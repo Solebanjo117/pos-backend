@@ -1,0 +1,225 @@
+import { Category } from '../types/category';
+
+export const mockCategories: Category[] = [
+  {
+    id: 'filtro-aire',
+    name: 'Filtro de Aire',
+    attributes: [
+      {
+        id: 'largo',
+        name: 'Largo',
+        dataType: 'number',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'altura',
+        name: 'Altura',
+        dataType: 'number',
+        required: true,
+        order: 2,
+      },
+    ],
+  },
+  {
+    id: 'balineras',
+    name: 'Balineras',
+    attributes: [
+      {
+        id: 'diametro-exterior',
+        name: 'Diámetro Exterior',
+        dataType: 'number',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'diametro-interior',
+        name: 'Diámetro Interior',
+        dataType: 'number',
+        required: true,
+        order: 2,
+      },
+      {
+        id: 'altura',
+        name: 'Altura',
+        dataType: 'number',
+        required: true,
+        order: 3,
+      },
+    ],
+  },
+  {
+    id: 'alternador',
+    name: 'Alternador',
+    attributes: [
+      {
+        id: 'pin',
+        name: 'Pin',
+        dataType: 'text',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'polea',
+        name: 'Polea',
+        dataType: 'text',
+        required: true,
+        order: 2,
+      },
+      {
+        id: 'amperaje',
+        name: 'Amperaje',
+        dataType: 'number',
+        required: true,
+        order: 3,
+      },
+      {
+        id: 'voltaje',
+        name: 'Voltaje',
+        dataType: 'select',
+        options: ['12V', '24V'],
+        required: true,
+        order: 4,
+      },
+    ],
+  },
+  {
+    id: 'bujias',
+    name: 'Bujías',
+    attributes: [
+      {
+        id: 'rosca',
+        name: 'Rosca',
+        dataType: 'text',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'gap',
+        name: 'Gap',
+        dataType: 'number',
+        required: true,
+        order: 2,
+      },
+      {
+        id: 'material',
+        name: 'Material',
+        dataType: 'select',
+        options: ['Cobre', 'Platino', 'Iridio'],
+        required: true,
+        order: 3,
+      },
+    ],
+  },
+  {
+    id: 'frenos',
+    name: 'Frenos',
+    attributes: [
+      {
+        id: 'largo',
+        name: 'Largo',
+        dataType: 'number',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'ancho',
+        name: 'Ancho',
+        dataType: 'number',
+        required: true,
+        order: 2,
+      },
+      {
+        id: 'espesor',
+        name: 'Espesor',
+        dataType: 'number',
+        required: true,
+        order: 3,
+      },
+      {
+        id: 'tipo',
+        name: 'Tipo',
+        dataType: 'select',
+        options: ['Cerámicas', 'Orgánicas', 'Metálicas'],
+        required: true,
+        order: 4,
+      },
+    ],
+  },
+  {
+    id: 'filtros',
+    name: 'Filtros',
+    attributes: [
+      {
+        id: 'diametro',
+        name: 'Diámetro',
+        dataType: 'number',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'altura',
+        name: 'Altura',
+        dataType: 'number',
+        required: true,
+        order: 2,
+      },
+      {
+        id: 'tipo',
+        name: 'Tipo',
+        dataType: 'select',
+        options: ['Aceite', 'Aire', 'Combustible', 'Habitáculo'],
+        required: true,
+        order: 3,
+      },
+    ],
+  },
+  {
+    id: 'motor',
+    name: 'Motor',
+    attributes: [
+      {
+        id: 'descripcion',
+        name: 'Descripción',
+        dataType: 'text',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'codigo-oem',
+        name: 'Código OEM',
+        dataType: 'text',
+        required: false,
+        order: 2,
+      },
+    ],
+  },
+  {
+    id: 'suspension',
+    name: 'Suspensión',
+    attributes: [
+      {
+        id: 'longitud',
+        name: 'Longitud',
+        dataType: 'number',
+        required: true,
+        order: 1,
+      },
+      {
+        id: 'diametro',
+        name: 'Diámetro',
+        dataType: 'number',
+        required: true,
+        order: 2,
+      },
+      {
+        id: 'tipo',
+        name: 'Tipo',
+        dataType: 'select',
+        options: ['Gas', 'Hidráulico', 'Neumático'],
+        required: true,
+        order: 3,
+      },
+    ],
+  },
+];

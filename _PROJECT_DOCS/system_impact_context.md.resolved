@@ -1,0 +1,57 @@
+# 🧠 Contexto del Sistema e Impactos Cruzados (Pre-Flight Checklist)
+
+*❗ Pásame o haz referencia a este archivo antes de iniciar cualquier desarrollo, migración o cambio arquitectónico. Sirve como matriz de impacto para evitar romper funcionalidades adyacentes.*
+
+## 1. 🏢 Eje Central: Multi-Sucursal (Multi-Warehouse)
+**Impacto:** Cualquier módulo que maneje existencias, transacciones u operaciones diarias.
+- **Transacciones:** Toda venta (POS, OV), compra (OC), cotización, gasto y movimiento de caja DEBE estar asociado a un `warehouse_id`.
+- **Inventario:** El stock (`ProductWarehouse` o similar) vive por sucursal. Validar existencias globales es un error; siempre validar contra el `warehouse_id` origen/destino.
+- **Frontend Context:** La sucursal operativa nunca se asume. Se obitene de `/api/user/warehouse-context`. Si se crea un registro desde el Front, inyectar este ID.
+- **Reportes:** Si un reporte suma valores financieros o de stock, DEBE poder filtrarse por `warehouse_id` o arrojará datos mezclados financieramente incorrectos.
+
+## 2. 📦 Eje Logístico: Inventario y Movimientos
+**Impacto:** Creación de OVs, Recepción de Compras (AP), Transferencias, POS, Devoluciones.
+- **Validación de Stock por Variante:** El inventario correcto vive en `ProductInventory`, no en la tabla `Inventory` antigua. Todo chequeo de stock DEBE evaluar tanto `warehouse_id` como `variant_id` (o la ausencia de una variante si el producto no las tiene). Nunca validar el stock general del `Product`.
+- **Reservas de Stock (OVs):** Validar si el stock se disminuye al *Aprobar/Confirmar* una orden o al *Crear* una orden. Actualmente las OVs descuentan stock al llamar a [confirm()](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SalesOrderController.php#228-248).
+- **Kardex / Historial de Movimientos:** Ninguna entidad altera la cantidad de inventario silenciosamente. Todas deben generar un registro rastreable en el historial de movimientos de inventario.
+- **Precios y Costos:** El costo promedio o unitario se ve afectado en la recepción de OC. Las ventas (POS/OV) utilizan listas de precios (`price`) pero deben registrar el `cost` al momento de la venta para calcular rentabilidad futura.
+
+## 3. 💰 Eje Financiero: Cálculos, Impuestos y Descuentos
+**Impacto:** Cuentas por Cobrar (AR), Cuentas por Pagar (AP), Cotizaciones, Reporte Z, Pagos parciales.
+- **Cálculo Descentralizado vs Centralizado:** Las fórmulas de UI asisten al usuario, pero la **fuente de verdad es el backend**. Cualquier controlador que modifique líneas de detalle debe disparar el método `$model->calculateTotals()`.
+- **Nivel de detalle:** Los impuestos (`tax`) y los descuentos (`discount`) se aplican y almacenan a nivel de línea de producto ([items](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesQuote.php#62-66)), no como un modificador final en el carrito/orden (excepto gastos de envío u otros *fees*).
+- **Control de Abonos y Pagos Parciales:** Una factura (OV/OC) tiene un estado de pago (`payment_status`: pending/partial/paid). Cuidar de actualizar este estado al insertar un pago en el registro de caja.
+- **Pagos Divididos (Multi-Tender):** Una orden puede pagarse con múltiples métodos a la vez (ej. mitad efectivo, mitad tarjeta). La fuente de la verdad para el cierre de caja (Reporte Z) son los registros individuales en `SalesOrderPayment`, NO el campo `payment_method` a nivel de orden.
+- **Envíos Inmediatos (POS):** En el Punto de Venta directo (POS), se asume entrega inmediata (Cash & Carry). Las opciones de envío complejo son exclusivas de órdenes corporativas / OVs creadas desde el panel principal.
+
+## 4. 📊 Eje Analítico: Reportes y Dashboard
+**Impacto:** Módulo de analítica, cierres diarios (Reporte Z), comisiones.
+- **Métricas Vivas:** El Dashboard consolida ventas diarias. Si se crea un nuevo estado para OVs (ej. "En Tránsito"), asegurarse de que las consultas SUM del dashboard evalúen correctamente si ese estado cuenta como "ingreso".
+- **Vincular Entidades:** Todo debe tener un rastro. Una venta desde el POS genera una [SalesOrder](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/types/sales-order.ts#28-53) con origen "POS". Las cotizaciones convertidas guardan `converted_order_id`. Esto permite reportar la efectividad de las cotizaciones vs. ventas directas.
+
+## 5. 🧑‍🤝‍🧑 Eje B2B y Usuarios: Roles y CRM
+**Impacto:** Registro B2B, pre-selección de precios, créditos, acceso a pantallas.
+- **Límites de cotización/crédito:** Dependiendo del Customer seleccionado, ciertas validaciones de límite de crédito (`credit_limit`) deben correr antes de dejar crear una OV a crédito en el POS.
+- **Asignación de Vendedor (`seller_id`):** Las ventas (OVs de POS) tienen un `seller_id` por ítem para comisiones. Si se hace una integración, hay que heredar o preguntar estos identificadores.
+
+---
+
+## 6. 🧠 Reglas de Negocio y Escalabilidad (Adoptadas en Fases 1-5)
+**Impacto:** Creación de Productos, POS, Reportes y Vistas de Cliente.
+- **Impuestos (Fase 1):** El límite técnico máximo de ITBM es 15%. En Admin, Costo/ITBM/Total son biestables (3 vías). En POS, el override manual de ITBM se desactiva si el vendedor edita el precio unitario, regresando automáticamente a la tarifa base.
+- **Auto-Nomenclatura y SKUs (Fase 2):** Los nombres se auto-construyen (`[Cat]-[Sub]-[Marca]-[Attr]`). El campo principal ya no es UPC sino `Custom SKU`, el cual se pre-genera secuencialmente (e.g., `FRE-001`). 
+- **Entradas/Salidas Forzadas (Fase 4):** Todo movimiento de almacén debe requerir seleccionar el "Producto Base" primero, y obligar a escoger una "Variante (Marca)". Ya no se exponen columnas de caducidad/fabricación en la UX general.
+- **Confidencialidad "Modo Cliente" (Fase 5):** Ninguna pantalla de cara al público o recibo impreso debe exponer los SKUs literales del proveedor. Se deben renderizar IDs genéricos autogenerados (`#84920`).
+- **Auditoría POS (Fase 5):** Toda operación de caja (búsqueda, agregar, remover) debe encolarse en el estado local y grabarse en BD (`sales_order_logs`) con timestamp al confirmar el pago.
+
+---
+
+### ✅ Checklist antes de implementar un requerimiento
+
+Cuando me asignes una tarea, revisaré esto mentalmente:
+1. [ ] ¿El nuevo modelo requiere `warehouse_id`?
+2. [ ] ¿Modifica inventario? (Estricto: Producto Base -> Variante -> Cantidad).
+3. [ ] ¿Es financiero? (Suma de impuestos por línea + recálculo central en Backend + actualizar AR/AP).
+4. [ ] ¿Expone información confidencial? (Validar "Modo Cliente" para ocultar SKUs/Costos/Lotes).
+5. [ ] ¿La data entra a los Reportes, POS Logs o Z-Report? (Verificar enums y filtrado estructurado).
+6. [ ] ¿Se agregó algo al "Carrito" (LocalStorage) o Frontend? (Asegurar fallbacks si falla la versión antigua del navegador).

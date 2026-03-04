@@ -1,0 +1,63 @@
+# Auditoría Complementaria de Frontend y UI/UX (Basada en Navegación)
+
+Esta auditoría complementa la revisión del código fuente explorando el comportamiento real de la interfaz (Browser Subagent) en el entorno de pruebas local.
+
+## 1. Experiencia de Usuario (UX) y Flujos de Trabajo
+
+### ✅ Positivo
+- **Persistencia Visual:** El carrito del POS mantiene los productos y valores correctamente.
+- **Manejo del Modal de Pago:** El modal de métodos de pago (Efectivo, Tarjeta, etc.) es intuitivo, accesible y rápido para la operación en caja.
+- **Feedback del Back-End en Tiempo Real:** El sistema detecta correctamente la falta de stock mediante validaciones del servidor y lo refleja alertando en el carrito (ej. *"TEST-E2E-01: solicitado 2, disponible 0"*).
+- **Consistencia de UI:** La interfaz basada en *Tailwind CSS* es consistente entre Órdenes de Venta, Órdenes de Compra y Movimientos de Inventario.
+
+### ⚠️ Hallazgos a Corregir
+
+#### **Desincronización del Estado Local de la Caja (POS)**
+**Gravedad:** ⚠️ Baja
+Al abrir la caja e ingresar un fondo inicial (ej. $100), el encabezado del POS ("Caja Abierta") no siempre refleja el valor y suele mostrar "Fondo inicial: $0.00" hasta que ocurre otra interacción o recarga que traiga el estado actualizado desde el backend.
+**Recomendación:** Asegurar que el *store* o estado reactivo de Vue se sincronice inmediatamente con la respuesta del endpoint `PosSessionController::open`.
+
+#### **Ausencia de Bloqueo en Pagos Inválidos (Checkout Modal)**
+**Gravedad:** ❌ Alta (Bug de UX)
+Cuando el sistema alerta sobre la falta de inventario para un producto en el carrito (el servidor arroja un warning de que el stock es 0), el botón de validación/confirmar pago en el checkout **permanece totalmente habilitado**.
+**Impacto:** El cajero puede procesar una venta inválida que luego será rechazada y causará confusión a nivel operativo.
+**Recomendación:** Implementar una directiva `disabled` en el botón de pago si la orden actual tiene errores conocidos de validación (es la responsabilidad del frontend bloquear proactivamente esto).
+
+#### **Manejo de Errores Desagrupados (API Downs)**
+**Gravedad:** ⚠️ Media
+Cuando el backend experimenta fallas (simuladas durante el testeo), la aplicación web muestra múltiples notificaciones toast rojas apiladas en diferentes componentes (ej. "Error al cargar productos", "Error al cargar inventario") en lugar de un estado central de desconexión.
+**Recomendación:** Implementar un componente global "Offline" o un `catch` general en Axios que modifique un estado central y muestre una notificación unificada y amigable al usuario (Graceful Degradation).
+
+---
+
+## Conclusión
+
+El uso en vivo del Frontend revela que aunque la estructura visual y de interacción es madura, la tolerancia a errores de red y algunas sincronizaciones de estado (fondo de caja, validación bloqueante de pagos sin inventario) tienen oportunidades críticas de mejora para evitar errores humanos durante la operación apresurada de un Punto de Venta real.
+
+---
+
+## 2. Auditoría de Módulos Secundarios (Proveedores, Clientes, Reportes)
+
+Durante la segunda fase de auditoría automatizada visual, se exploraron los módulos adyacentes al POS:
+
+### ✅ Positivo
+- **Estructura Visual:** Los listados vacíos (*Empty States*) para Cotizaciones y Clientes son limpios, centrados y tienen llamadas a la acción (*Call to Action*) claras como "Crear primera cotización".
+- **Validación Nativa:** Formularios como la creación de Proveedores aprovechan HTML5 para bloquear el submit si faltan campos requeridos (ej. el nombre).
+
+### ❌ Bugs y Oportunidades Críticas de UX
+
+#### **Interbloqueo de Botones sin Manejo de Errores (Error Handling)**
+**Gravedad:** ❌ Alta (Bug Lógico)
+Cuando la API no responde (ej. al guardar un Proveedor o Cliente), el botón entra en un estado visual de `"Guardando..."` y se deshabilita, pero al carecer de un bloque `catch` adecuado o un *timeout*, **el botón se queda bloqueado indefinidamente**, forzando al usuario a refrescar la página manualmente y perder sus datos no guardados. 
+
+#### **Cotizaciones: Guardado de Formularios Vacíos**
+**Gravedad:** ⚠️ Media
+La pantalla de "Nueva Cotización" carece de validación reactiva sobre el contenido del carrito de la cotización. El sistema permite al usuario hacer clic en "Guardar Cotización" incluso si no hay productos seleccionados, lo cual delegará el error al endpoint del backend en vez de bloquearse proactivamente en el frontend.
+
+#### **Formularios Estáticos sin Reactividad (Clientes)**
+**Gravedad:** ⚠️ Baja
+Al alternar el tipo de cliente entre "Individual" y "Empresa", **los campos del formulario permanecen estáticos**. La UX mejoraría significativamente si al seleccionar Empresa se revelaran campos exclusivos (Razón Social, RFC) y se ocultaran aquellos irrelevantes o viceversa, previniendo errores de captura de datos.
+
+#### **Sidebar: Enlaces Huérfanos**
+**Gravedad:** ⚠️ Media
+Varias opciones visibles en el Sidebar (ej. "Vehículos", "Almacenes", "Mermas" y "Stock por Almacén") no poseen hipervínculos funcionales o de ruteo (`vue-router`). Actúan como simple texto plano, lo que genera confusión al navegar.

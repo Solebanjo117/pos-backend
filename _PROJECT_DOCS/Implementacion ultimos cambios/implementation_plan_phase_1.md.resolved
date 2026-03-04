@@ -1,0 +1,81 @@
+# Plan de Implementación: Fase 1 (Facturación, Impuestos y Automatización)
+
+Este documento detalla los pasos técnicos exactos para implementar las funcionalidades de la **Fase 1**.
+
+## User Review Required
+- **Límite de Impuesto (ITBM):** He fijado el límite duro técnico de ITBM en **15%** en el plan para evitar errores de tipeo. Por favor confirma si este límite es razonable.
+- **Base de Datos:** Se añadirán dos columnas a la tabla `products` (o `variants`, dependiendo de donde manejen el precio actual): `tax_type` (tipo de impuesto: estándar, exento, personalizado) y `tax_rate` (porcentaje directo). Confirmar si esto se alinea con la arquitectura actual.
+
+---
+
+## Proposed Changes
+
+### Backend: Base de Datos y Validaciones
+
+#### [NEW] database/migrations/..._add_tax_columns_to_products_table.php
+- **Propósito:** Añadir columnas para gestionar la configuración de impuestos por producto.
+- **Detalles:** 
+  - Agregar columna `tax_type` (enum/string: `standard`, `exempt`, [custom](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/CustomerTransaction.php#33-40)) por defecto `standard`.
+  - Agregar columna `tax_rate` (decimal, 5,2) por defecto `7.00`.
+
+#### [MODIFY] app/Http/Requests/.../StoreProductRequest.php & UpdateProductRequest.php
+- **Propósito:** Validar límite lógico del impuesto.
+- **Detalles:** 
+  - Regla para `tax_rate`: `numeric|min:0|max:15`. (Límite 15% como salvaguarda contra errores de tipeo).
+
+#### [MODIFY] app/Models/Product.php
+- **Propósito:** Definir los campos rellenables (fillables).
+- **Detalles:** Añadir `tax_type` y `tax_rate` al `$fillable`.
+
+---
+
+### Frontend: Administrador de Productos
+
+#### [MODIFY] resources/js/Pages/Products/Form.vue (o componentes equivalentes de producto)
+- **Propósito:** Implementar opciones de impuesto y la **Calculadora a 3 bandas** (Costo, ITBM, Total).
+- **Detalles UI:**
+  - Cambiar el label del campo de descripción a "Notas".
+  - Añadir Radio Buttons o Select: "Producto con ITBM (7%)", "Producto sin ITBM (0%)", "Tasa personalizada (%)".
+  - Mostrar 3 inputs alineados: `Precio/Costo Base`, `ITBM (%)` (readonly a menos que sea Tasa personalizada), y `Precio Total`.
+- **Detalles Lógicos (`watchers` en Vue 3):**
+  - Implementar lógica paralela de recalculado.
+  - Al cambiar `precio_base`: `precio_total.value = precio_base.value * (1 + (itbm.value / 100))`.
+  - Al cambiar `precio_total`: `precio_base.value = precio_total.value / (1 + (itbm.value / 100))`.
+  - Al cambiar `itbm` (modo personalizado): `precio_total.value = precio_base.value * (1 + (itbm.value / 100))`.
+
+---
+
+### Frontend: Punto de Venta (POS)
+
+#### [MODIFY] resources/js/composables/usePOS.ts (o equivalente de Lógica de Carrito)
+- **Propósito:** ITBM Editable (Override) y Auto-Recálculo en Venta.
+- **Detalles:**
+  - Cuando se añade un producto al carrito, este toma su `tax_rate` configurado de BD.
+  - Por cada línea del carrito (o a nivel general si aplica a toda la factura), añadir una propiedad de estado `is_tax_overridden = false`.
+  - Crear función `overrideTax(lineId, newTaxRate)` que permita al vendedor cambiar el ITBM de esa línea. Esto establece `is_tax_overridden = true`.
+  - **Lógica de Autocorrección:** Si el usuario *modifica manualmente el precio unitario del producto* en el carrito (descuento o cambio de precio), disparar un evento que:
+    1. Vuelva `is_tax_overridden = false`.
+    2. Restaure el ITBM de la línea al 7% por defecto (o al impuesto base del producto).
+    3. Recalcule los subtotales usando el nuevo precio ingresado.
+
+#### [MODIFY] resources/js/pages/POS/Index.vue (y componentes del ticket)
+- **Propósito:** Reflejar las fórmulas de facturación.
+- **Detalles UI:**
+  - Mostrar desglose en tiempo real al finalizar: `Subtotal global`, `ITBM Total` y `Total a Pagar`.
+  - Incluir el botón/icono al lado del impuesto de la línea para permitir al vendedor introducir su ITBM manual (el modo override).
+
+---
+
+### Renombrado Global (UI)
+
+#### [MODIFY] resources/js/... (Vistas del Catálogo y Traducciones)
+- **Propósito:** Cambiar el concepto de "Descripción" por "Notas".
+- **Detalles:**
+  - Búsqueda y reemplazo global en los archivos [.vue](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/pages/POS/Index.vue) de las tablas y perfiles administrativos donde diga `Descripción` visualmente a lo largo de los formularios para que diga `Notas`.
+
+---
+
+## Verification Plan
+1. **Verificación Admin:** Crear un producto, probar insertar `$100` en Precio Total y verificar que Precio Base baje a `~$93.45` automáticamente.
+2. **Verificación Límite ITBM:** Intentar guardar un producto con 25% de ITBM -> debe arrojar alerta de validación.
+3. **Verificación POS:** Añadir producto al POS. Hacer override manual del ITBM a 10% (el total debe subir). Luego, cambiar manualmente el precio del producto -> el ITBM debe auto-desactivar el override retornando a 7% de manera visible.

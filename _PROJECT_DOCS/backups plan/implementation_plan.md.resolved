@@ -1,0 +1,70 @@
+# Plan de Implementación: Sistema de Backups y Restauración (Admin Panel)
+
+Este documento detalla los pasos técnicos para implementar la **Fase A (Estabilidad y Seguridad)**, enfocada en crear un sistema de respaldos de la base de datos controlable desde un panel de administración en el Frontend.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Sobre el Alcance de la Restauración (Global):**
+> Por diseño arquitectónico (para mantener la integridad de clientes, productos y ventas entre sucursales), los backups y restauraciones son **Globales**. Una restauración afecta a toda la base de datos y a todos los almacenes simultáneamente. Esta acción está reservada exclusivamente para el Administrador Principal en caso de desastres mayores.
+
+> [!WARNING]
+> **Sobre la Restauración Automática (Rollback):**
+> Volcar (restaurar) una base de datos en caliente desde la web es una operación muy riesgosa. Si la restauración falla a la mitad, el sistema entero queda inutilizable. 
+> *   **Propuesta técnica:** El panel permitirá ver la lista de `.zip` generados y descargar el archivo directamente a tu computadora. 
+> *   La automatización de la "Restauración a un click" requerirá correr comandos pesados del sistema operativo (`mysql -u root -p < backup.sql`) de manera asíncrona. Implementaremos un *Job* en Laravel para que esta acción se ejecute en segundo plano y avise cuando termine, pero debes ser consciente de que durante el proceso (1-2 minutos), el POS estará fuera de servicio para todos los usuarios.
+
+## Proposed Changes
+
+---
+
+### Backend: Motor de Backups (Laravel)
+
+Utilizaremos el estándar de la industria `spatie/laravel-backup` para la generación.
+
+#### [NEW] Instalación y Configuración del Paquete
+*   Instalar `spatie/laravel-backup` vía Composer.
+*   Publicar archivo de configuración `config/backup.php`.
+*   Configurar el Cron de Laravel ([routes/console.php](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/routes/console.php) o `app/Console/Kernel.php`) para disparar `backup:run` y `backup:clean` automáticamente (ej. 3:00 AM).
+
+#### [NEW] `app/Http/Controllers/Api/BackupController.php`
+Controlador para exponer la API al Frontend:
+*   `index()`: Lista todos los archivos de backup existentes con su peso y fecha.
+*   `create()`: Dispara un backup manual en ese instante.
+*   `download()`: Descarga un backup específico en formato `.zip`.
+*   `delete()`: Elimina un backup antiguo manualmente.
+*   `restore()`: **(Operación Crítica)** Descomprime un backup específico y vuelca el archivo `.sql` resultante sobre la base de datos actual, pisando la información. Esto requiere ejecutar comandos del SO (`Process::run()`).
+
+#### [NEW] `routes/api_backups.php`
+Nuevas rutas protegidas (solo para el rol/usuario Administrador).
+
+---
+
+### Frontend: Panel de Configuración (Vue 3)
+
+#### [MODIFY] `resources/js/components/Layout/Sidebar.vue` (o navegación principal)
+*   Añadir el enlace al nuevo módulo de "Backups y Seguridad" bajo la sección de Configuración (Settings).
+
+#### [NEW] `resources/js/pages/Settings/Backups.vue`
+La interfaz principal para el Administrador que incluirá:
+*   **Tabla de Backups:** Lista de archivos (Nombre, Fecha, Tamaño).
+*   **Botones de Acción por fila:**
+    *   Descargar (`⬇️ Download`)
+    *   Eliminar (`🗑️ Delete`)
+    *   **Restaurar (`🔄 Restore`)** -> Este botón requerirá una alerta de **[CAUTION]** roja muy fuerte, pidiendo confirmación de texto (ej. escribir "RESTAURAR"), ya que sobreescribirá todas las ventas de hoy.
+*   **Botón Principal:** "Crear Copia de Seguridad Ahora".
+
+## Verification Plan
+
+### Automated Tests
+*   Verificaremos mediante comandos Artisan que la base de datos MySQL envía la orden correcta y genera el archivo ZIP en la carpeta `storage/app/backups`.
+
+### Manual Verification
+1.  **Frontend:** Entrar al panel desde el navegador y presionar "Crear Copia". Verificar que aparezca en la tabla.
+2.  **Descarga:** Descargar el ZIP y verificar en la PC que dentro existe un archivo `.sql` válido con la estructura real de la BD.
+3.  **Restauración (Prueba de Fuego):** 
+    *   Crearemos un producto ficticio ("Llanta de Prueba").
+    *   Haremos un Backup.
+    *   Borraremos la "Llanta de Prueba" del sistema.
+    *   Presionaremos el botón "Restaurar" desde el panel.
+    *   Verificaremos que el sistema regrese el tiempo atrás y vuelva a aparecer la "Llanta de Prueba".

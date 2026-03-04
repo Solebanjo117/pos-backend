@@ -1,0 +1,35 @@
+# Implementación de Versión "Ciega" (Pública) para Cotizaciones en PDF
+
+Esta función permitirá generar dos tipos de PDFs para una cotización:
+1. **Estándar:** Muestra el nombre del producto, el nombre de la variante y el SKU (el formato actual).
+2. **Pública (Blind/Sin SKU):** Muestra el nombre del producto, el nombre de la variante, pero OMITIRÁ el SKU y en su lugar mostrará el ID único autoincrementable de la variante. De esta forma, el cliente final no podrá buscar fácilmente el SKU en Google/competencia para comparar precios.
+
+## Cambios Propuestos
+
+### Backend
+
+#### [MODIFY] [SalesQuoteController.php](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SalesQuoteController.php)
+- Modificar el método `pdf()` para leer un parámetro `request('mode')`.
+- Pasar la variable `$mode` a la vista Blade `quotes.a4`.
+
+#### [MODIFY] [a4.blade.php](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/resources/views/quotes/a4.blade.php)
+- Modificar la celda donde se muestra la descripción del ítem.
+- Si `$mode === 'blind'`, ocultar el SKU interno y mostrar solo el nombre de la variante, acompañado del ID de la variante (ej. `(ID: 15)`).
+- Si es el modo normal (estándar), continuar mostrando el SKU como se hace actualmente.
+
+### Frontend
+
+#### [MODIFY] [Index.vue](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/pages/SalesQuotes/Index.vue)
+- Cambiar la función `openPdf` para que acepte un parámetro adicional `mode: 'standard' | 'blind' = 'standard'` y lo añada a la URL generada (`?mode=${mode}`).
+- Reemplazar el botón actual de enlace del N° de Cotización (y también el icono de PDF de la tabla de acciones) por un pequeño "Dropdown" (menú desplegable) flotante. 
+- Al hacer clic o pasar el mouse (hover), el usuario podrá elegir entre dos botones:
+  - 📄 **Formato Estándar (Con SKU)** -> Llama a `openPdf(id, 'standard')`
+  - 👁️‍🗨️ **Formato Público (Sin SKU)** -> Llama a `openPdf(id, 'blind')`
+
+## Criterios de Validación (Verification Plan)
+### Verificación Manual
+1. Abrir la página de Cotizaciones en el frontend web.
+2. Hacer "hover" sobre el número de una cotización y hacer clic en **Formato Estándar**.
+   - Verificar que el PDF generado incluya el SKU.
+3. Hacer clic en **Formato Público**.
+   - Verificar que el PDF generado no incluya el SKU y, en cambio, muestre el ID de la variante o un indicador seguro para el cliente.

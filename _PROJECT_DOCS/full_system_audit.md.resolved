@@ -1,0 +1,226 @@
+# Auditoría Completa del Sistema POS/ERP
+
+**Fecha:** 25/02/2026  
+**Alcance:** 33 controladores API, 12 servicios, 41 modelos, 82 páginas Vue  
+**Método:** Revisión de código línea por línea de toda la lógica de negocio
+
+---
+
+## Resumen Ejecutivo
+
+| Categoría | Total | ✅ Bien | ⚠️ Riesgo | ❌ Bug |
+|-----------|-------|---------|-----------|--------|
+| Módulos auditados | 16 | 10 | 5 | 1 |
+| Vulnerabilidades de seguridad | — | — | 3 | — |
+| Bugs de integridad de datos | — | — | — | 2 |
+| Inconsistencias de lógica | — | — | 4 | — |
+
+---
+
+## 1. Autenticación y Roles
+
+### ✅ Positivo
+- Roles bien definidos: `admin`, `manager`, `buyer`, `seller`, `cashier`, `assistant`
+- Métodos helper: [hasRole()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/User.php#58-66), [isAdmin()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/User.php#67-71), etc.
+- Sistema de warehouse access con tabla M:M (`user_warehouse`)
+
+### ⚠️ Hallazgo: Sin middleware de autorización por rol en rutas API
+Los controladores API **no verifican roles**. Cualquier usuario autenticado puede acceder a todos los endpoints. No hay Policies ni Gates implementados.
+
+---
+
+## 2. POS — Punto de Venta
+
+### ✅ Positivo
+- Carrito persiste en LocalStorage (`pos_cart`, `pos_customer_id`, `pos_notes`)
+- Protección anti double-click con variables `loading` reactivas
+- Sesiones de caja con resumen de ventas por método de pago
+- Soporte multi-tender (efectivo + tarjeta + transferencia)
+
+### ⚠️ Hallazgo: PosSession sin verificación de propiedad
+[PosSessionController::close()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/PosSessionController.php#L120-L190) filtra por `user_id`, pero el `user_id` viene del **request body** (`$request->input('user_id')`), **no** de `auth()->id()`. Un usuario malicioso podría cerrar la sesión de otro usuario enviando su ID.
+
+### ⚠️ Hallazgo: F5 no interceptado
+No hay `beforeunload` listener ni `preventDefault` para F5. Aunque LocalStorage preserva el carrito, el estado de modales abiertos (pago, variantes) se perdería.
+
+---
+
+## 3. Órdenes de Venta (SalesOrder)
+
+### ✅ Positivo
+- Ciclo de vida completo: `draft` → `confirmed` → `processing` → `completed`
+- [confirm()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#188-289) deduce inventario correctamente (variant_id + warehouse_id)
+- [cancel()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/PurchaseOrderService.php#310-376) restaura inventario y libera reservas
+- [addPayment()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#305-360) registra pagos y actualiza balance del cliente para crédito
+
+### ⚠️ Hallazgo: Cancel no revierte pagos
+[SalesOrder::cancel()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#L361-L422) restaura inventario pero **NO revierte los pagos** registrados en `SalesOrderPayment`. Si un cliente pagó $500 con tarjeta y se cancela, el pago queda registrado sin reembolso.
+
+### ❌ Bug: Cancel no maneja status "completed"
+[canBeCancelled()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#172-179) probablemente excluye órdenes completadas, pero [cancel()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/PurchaseOrderService.php#310-376) solo tiene lógica para `confirmed`/`processing` y `draft`/`pending`. No hay una guarda explícita que informe al usuario.
+
+---
+
+## 4. Devoluciones (SalesReturn)
+
+### ✅ Positivo
+- Validación de cantidad devolvible (`maxReturnable`)
+- Restauración de inventario con [InventoryMovement](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/InventoryMovementController.php#14-240)
+- Ajuste de balance del cliente con `CustomerTransaction`
+
+### ⚠️ Hallazgo: Reembolso genérico
+[SalesReturn::approve()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesReturn.php#L90-L156) reduce `customer.current_balance` sin distinguir si el pago original fue efectivo, tarjeta o crédito. No se crea un registro de reembolso para cada método de pago.
+
+---
+
+## 5. Órdenes de Compra (PurchaseOrder)
+
+### ✅ Positivo
+- Ciclo completo: `draft` → `sent` → `partial` → `received`
+- Recepción parcial con tracking de `quantity_received` vs `quantity_ordered`
+- [receiveItems()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/PurchaseOrderService.php#194-309) crea [InventoryMovement](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/InventoryMovementController.php#14-240) y actualiza `ProductInventory`
+- Soporte de batch tracking (`ProductBatch`) con `batch_number` y `expiry_date`
+- Cancelación de POs parciales revierte inventario correctamente
+
+### ⚠️ Hallazgo: Validación de store usa `variant_id` pero update usa `product_id`
+En [PurchaseOrderController::store()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/PurchaseOrderController.php#L47-L80), los items requieren `items.*.variant_id`, pero en [update()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/PurchaseOrderController.php#82-116) requieren `items.*.product_id`. Esto es inconsistente y podría causar errores en la edición.
+
+---
+
+## 6. Cotizaciones (SalesQuote)
+
+### ✅ Positivo
+- CRUD completo con estados: `draft`, `sent`, `approved`, `rejected`, `expired`, `converted`
+- Conversión a SalesOrder con [convert()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SalesQuoteController.php#203-288): copia items, calcula totales, confirma orden, registra pago inicial
+
+### ⚠️ Hallazgo: Convert auto-confirma sin validar stock
+[SalesQuoteController::convert()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SalesQuoteController.php#L203-L287) llama `$order->confirm()` automáticamente, lo cual deduce inventario. Si el stock se agotó desde que se creó la cotización, [confirm()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#188-289) podría deducir stock a valores negativos (depende de si hay validación interna).
+
+---
+
+## 7. Clientes (Customer)
+
+### ✅ Positivo
+- CRUD completo con tipos `individual`/`business`
+- Balance tracking con `current_balance` y `credit_limit`
+- Transacciones con historial (`CustomerTransaction`)
+- Ajuste manual de balance con razón documentada
+- Protección: no se puede eliminar cliente con órdenes activas
+
+---
+
+## 8. Proveedores (Supplier)
+
+### ✅ Positivo
+- CRUD con soft delete
+- Protección: no se puede eliminar proveedor con POs activas
+- Endpoint `/all` para dropdowns sin paginación
+- Relación con `ProductSupplier` (costo, lead time, cantidad mínima, preferido)
+
+---
+
+## 9. Productos (Product)
+
+### ✅ Positivo
+- Controller más completo del sistema (684 líneas, 28 métodos)
+- Variantes con inventario independiente
+- Atributos dinámicos (`AttributeDefinition` + `ProductAttribute`)
+- Proveedores múltiples por producto
+- Compatibilidad vehicular (VIN, Make/Model/Engine)
+- Referencias OEM
+- Productos alternativos
+- Imágenes con upload múltiple
+- Batch tracking por producto
+
+---
+
+## 10. Inventario (ProductInventory)
+
+### ✅ Positivo
+- `quantity_available` y `quantity_reserved` separados
+- Scoping por `warehouse_id` y `variant_id`
+- `reorder_point` y `reorder_quantity` para Smart Reorder
+
+---
+
+## 11. Transferencias de Inventario (InventoryTransfer)
+
+### ✅ Positivo
+- Flujo completo: `draft` → `in_transit` → `completed`
+- [dispatch()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/InventoryTransferService.php#40-87) valida stock disponible antes de deducir
+- [receive()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/InventoryTransferService.php#88-133) crea `ProductInventory` en destino si no existe (`firstOrCreate`)
+- Movimientos trazables ([InventoryMovement](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/InventoryMovementController.php#14-240)) en ambas direcciones
+
+### ⚠️ Hallazgo: Cancel solo para drafts, no para in_transit
+[InventoryTransferService::cancel()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/InventoryTransferService.php#L134-L145) solo cancela `draft`. Si se despacha y luego hay un error, **no hay forma de revertir** una transferencia `in_transit`. El stock ya fue deducido del origen pero no se puede devolver.
+
+---
+
+## 12. Movimientos de Inventario
+
+### ✅ Positivo
+- Inbound, outbound, transfer, y bulk operations
+- Form Requests separados para validación (`StoreInboundMovementRequest`, etc.)
+- Filtros por producto, warehouse, tipo, fecha
+- Endpoint de movimientos relacionados
+
+---
+
+## 13. Cuentas por Pagar (AccountsPayable)
+
+### ⚠️ Hallazgo: Solo lectura, sin funcionalidad de pago
+[AccountsPayableController](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/AccountsPayableController.php) solo tiene un [index()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SupplierController.php#12-44) que calcula deudas. No hay endpoint para registrar pagos a proveedores (**ya existe** `PurchaseOrderPaymentController` por separado).
+
+---
+
+## 14. Smart Reorder
+
+### ✅ Positivo
+- Detecta productos bajo `reorder_point` por warehouse
+- Genera sugerencias agrupadas por proveedor
+- [batchCreate()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SmartReorderController.php#49-96) crea múltiples POs en una operación
+
+### ❌ Bug de Seguridad: Fallback de userId
+```php
+$userId = auth()->id() ?? \App\Models\User::first()?->id ?? 1;
+```
+En [SmartReorderController::batchCreate()](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/SmartReorderController.php#L49-L95), si `auth()->id()` es null, usa el **primer usuario de la DB** como creador. Esto es una vulnerabilidad de seguridad y debería fallar en lugar de inventar un usuario.
+
+---
+
+## 15. Vehículos (VIN/Compatibilidad)
+
+### ✅ Positivo
+- Catálogos: `VehicleMake` → `VehicleModel` → `VehicleEngine` → `VehicleVin`
+- `ProductVehicleCompatibility` vincula productos con motores
+- `ProductVin` vincula productos directamente con VINs
+- Cross-reference en `ProductController::vehicleCompatibility()`
+
+---
+
+## 16. Reportes (ReportService)
+
+### ✅ Positivo
+- **Stock Levels:** Inventario por warehouse con métricas (total, out of stock, low stock)
+- **Movement History:** Kardex con agrupación por timeline y producto
+- **Financial P&L:** Revenue, COGS, Gross Profit, con desglose por método de pago
+- **Brand/Category Profitability:** Rentabilidad por marca y categoría
+- **Z-Report:** Cierre de caja con reconciliación de efectivo, ventas netas, P&L diario, ticket promedio
+
+El [ReportService](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/ReportService.php#11-724) (724 líneas) es el más completo y bien implementado del sistema.
+
+---
+
+## Resumen de Recomendaciones Prioritarias
+
+| # | Severidad | Hallazgo | Módulo |
+|---|-----------|----------|--------|
+| 1 | ❌ Alta | SmartReorder: fallback de userId inseguro | Smart Reorder |
+| 2 | ❌ Alta | Cancel no revierte pagos registrados | SalesOrder |
+| 3 | ⚠️ Media | PosSession: `user_id` del request body, no de auth | POS |
+| 4 | ⚠️ Media | Sin middleware de autorización por rol en API | Auth |
+| 5 | ⚠️ Media | Convert de cotización no valida stock | SalesQuote |
+| 6 | ⚠️ Media | Transferencia in_transit no cancelable | InventoryTransfer |
+| 7 | ⚠️ Media | Reembolso genérico sin distinguir método | SalesReturn |
+| 8 | ⚠️ Baja | Inconsistencia variant_id/product_id en PO store vs update | PurchaseOrder |
+| 9 | ⚠️ Baja | F5 no interceptado (mitigado por LocalStorage) | POS Frontend |

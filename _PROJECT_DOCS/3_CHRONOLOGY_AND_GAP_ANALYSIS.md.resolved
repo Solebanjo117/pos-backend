@@ -1,0 +1,82 @@
+# 📅 Cronología de Desarrollo y Análisis de Brechas (Gap Analysis)
+
+Este documento consolida el análisis de los archivos de planificación existentes ([1_CONTEXTO_Y_ROADMAP.md](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/_PROJECT_DOCS/1_CONTEXTO_Y_ROADMAP.md), [2_LIGHTSPEED_BENCHMARK.md](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/_PROJECT_DOCS/2_LIGHTSPEED_BENCHMARK.md)) y el estudio de mercado (`Análisis del POS Lightspeed...`), estableciendo una línea de tiempo clara para las funcionalidades faltantes.
+
+---
+
+## 🚦 Estado Actual Resumido
+*   **Fase 1 y 2 (Cimientos y Venta):** ✅ **COMPLETADO**
+    *   Catalogación vehicular (ACES), Fitment Engine, POS con búsqueda por vehículo, Inventario Multi-lote.
+    *   *Nota:* La base estructural es sólida y superior a Lightspeed en manejo de catálogo.
+
+---
+
+## 🗺️ Cronología de Trabajo Pendiente
+
+### 🚧 Corto Plazo: El "Músculo" Operativo (Meses 1-2)
+*El foco crítico inmediato es cerrar el ciclo de reabastecimiento. Actualmente se puede vender, pero no reponer eficientemente.*
+
+1.  **Gestión de Compras (Purchase Orders - PO)** 🔴 *Prioridad Máxima*
+    *   **Generación de Pedidos:** Crear POs manuales y automáticos basados en "Reorder Points" (Mín/Máx).
+    *   **Gestión de Proveedores:** Base de datos con tiempos de entrega (Lead Time) y Costos Históricos.
+    *   **Recepción de Mercancía:** Convertir una PO en entrada de inventario, validando costos recibidos vs. pactados.
+    *   *Diferenciador PDF:* Integración con APIs de proveedores mayoristas (si existen localmente) para consulta de disponibilidad externa.
+
+2.  **Lógica de Reabastecimiento (Forecasting Básico)**
+    *   Reporte de "Sugerencia de Compra" basado en velocidad de ventas de los últimos 30/90 días.
+
+### 🔨 Mediano Plazo: Ecosistema de Servicios y CRM (Meses 3-4)
+*Transformar el sistema de un "punto de venta" a una "herramienta de fidelización" para mecánicos y clientes.*
+
+1.  **Módulo "Mi Garaje" (CRM Vehicular)**
+    *   Guardar vehículos en el perfil del cliente (Ej: "Juan - Toyota Hilux 2018").
+    *   **Acción Rápida:** Al seleccionar al cliente en el POS, filtrar automáticamente el catálogo a sus vehículos guardados.
+
+2.  **Cuentas Corrientes (Crédito B2B)**
+    *   Gestión de límites de crédito para talleres mecánicos.
+    *   Estados de cuenta y abonos a deuda.
+
+3.  **Recordatorios Automáticos (Maintenance Reminders)** ⭐ *Feature Clave del PDF*
+    *   Automatización: "6 meses desde cambio de aceite -> Enviar WhatsApp/Email".
+    *   Estimación de kilometraje basada en historial de visitas.
+
+4.  **Módulo de Taller / Órdenes de Trabajo (Work Orders)**
+    *   Si la refaccionaria tiene taller o aliados: Cotización de Piezas + Mano de Obra.
+    *   Estados: En Diagnóstico -> Esperando Aprobación -> En Proceso -> Terminado.
+
+### 🚀 Largo Plazo: Diferenciación Tecnológica y Fiscal (Meses 5-6)
+
+1.  **Inteligencia de Negocio (BI) Profunda**
+    *   **Reporte de "Ventas Perdidas":** Registrar qué pidieron los clientes que NO teníamos (crítico para afinar compras).
+    *   **Rentabilidad por Marca/Categoría:** ¿Gano más vendiendo frenos Bosch o genéricos?
+
+2.  **Decodificación VIN (Vehicle Identification Number)** 💎 *Diferenciador Premium*
+    *   Implementar escaneo/ingreso de VIN para identificar el vehículo exacto (Motor, Trim, Transmisión) sin preguntas manuales.
+    *   *Reto:* Requiere integración con API externa (NHTSA gratuita o pagas como DataOne).
+
+3.  **Gestión de Garantías y "Core Returns"**
+    *   Control de piezas retornables (baterías, alternadores) donde el cliente deja el "casco" viejo.
+    *   Impresión de pólizas de garantía con seriales específicos.
+
+4.  **Facturación Electrónica (DGI Panamá)**
+    *   Integración nativa con PACs (Proveedores Autorizados de Certificación) para cumplimiento fiscal obligatorio.
+
+5.  **Offline-First Robusto**
+    *   *Análisis PDF:* El documento hace énfasis en PWA/IndexedDB para operar sin internet. Validar si la arquitectura actual soporta *verdadera* operación offline (guardar ventas localmente y sincronizar al volver la red).
+
+---
+
+## ⚠️ Análisis de Brechas (Gaps) Críticas
+
+| Área | Requisito (PDF/Benchmark) | Estado Actual | Acción Requerida |
+| :--- | :--- | :--- | :--- |
+| **Compras** | Flujo completo PO -> Recepción | Inexistente | **Desarrollar Inmediatamente** |
+| **Clientes** | CRM con Vehículos ("Garage") | Básico (Solo datos personales) | Expandir Modelo de Datos |
+| **Servicio** | Recordatorios de Mantenimiento | Inexistente | Crear Motor de Notificaciones |
+| **Técnico** | Operación Offline Real | Depende de conexión | Evaluar PWA / Service Workers |
+| **Fiscal** | DGI Panamá | No iniciado | Planificar Integración |
+
+---
+
+## 📋 Resumen de la Estrategia
+El sistema actual es un **"Catálogo Inteligente con Caja"**. Para superar a Lightspeed y justificar el ROI, debe evolucionar a un **"ERP Operativo"** en los próximos 2 meses (Compras/Cuentas por Cobrar) y luego a una **"Plataforma de Servicios"** (CRM Vehicular/Garantías).

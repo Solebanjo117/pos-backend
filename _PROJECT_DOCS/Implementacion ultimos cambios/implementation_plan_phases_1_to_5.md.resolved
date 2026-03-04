@@ -1,0 +1,108 @@
+# Plan de Implementación: Escalabilidad del Sistema POS (Fases 1 a 5)
+
+Este plan detalla los cambios arquitectónicos y de código necesarios para implementar la reestructuración y automatización solicitada por el cliente. Las funcionalidades abarcan desde cálculo automático de impuestos hasta generación de nombres inteligentes y mejoras en el POS.
+
+## 🔹 FASE 1: Facturación, Impuestos y Automatización
+
+### 1. Opciones de Impuesto y Calculadora Dinámica en Formulario
+**Objetivo:** Agregar opciones de impuesto explícitas: "Producto con ITBM", "Producto sin ITBM" y "Tasa personalizada" en la creación del ítem, y lograr una interfaz donde los campos Costo (o Precio Subtotal), ITBM y Precio Total se calculen automáticamente al modificar cualquiera de ellos.
+**Cambios:**
+- `resources/js/Pages/Products/Form.vue` (o componentes de precios): Añadir un selector de "Tipo de Impuesto".
+- Implementar `watchers` en Vue para que:
+  - Si cambia `precio_base`, `precio_total = precio_base * (1 + itbm)`.
+  - Si cambia `itbm`, recalcula `precio_total`.
+  - Si cambia `precio_total`, `precio_base = precio_total / (1 + itbm)`.
+- Validar límite máximo de ITBM definido para Panamá (ej. 15% o 20%).
+
+### 2. ITBM Editable y Override en POS
+**Objetivo:** En el Punto de Venta, permitir llevar el ITBM configurado por el producto, permitir sobreescribirlo manual, y recalcular al 7% estándar si el vendedor hace un override manual del precio de venta.
+**Cambios:**
+- [resources/js/composables/usePOS.ts](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/composables/usePOS.ts): Añadir lógica a [addToCart](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/composables/usePOS.ts#128-170) y a la modificación de líneas para manejar una bandera interna `is_tax_overridden`.
+- Si `price_changed` manual -> `tax_rate = 7%`, `is_tax_overridden = false`.
+- Modificar el cálculo del total de la orden y subtotal dinámicamente.
+
+### 3. Renombrar "Descripción" a "Notas"
+- Búsqueda y reemplazo global en los archivos [.vue](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/pages/POS/Index.vue) y lenguajes (`es.json`) de la palabra "Descripción" por "Notas" en tablas y formularios de productos/variantes.
+
+---
+
+## 🔹 FASE 2: Estructura Inteligente de Productos
+
+### 4. Categorías/Subcategorías con Especificaciones por Defecto
+**Objetivo:** Las "subcategorías" (o categorías padre si no hay sub) deben sugerir atributos técnicos base (una guía por defecto) para hacer más fácil la creación de productos.
+**Cambios:**
+- [app/Models/Category.php](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/Category.php): Añadir migración para columna `default_attributes` (JSON).
+- Al seleccionar una categoría/subcategoría en el frontend ([Create.vue](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/Pages/Products/Create.vue)), auto-poblar el arreglo de especificaciones con las claves predeterminadas y dejarlas listas para llenar.
+
+### 5. Nombres Automáticos (Auto-Naming)
+**Objetivo:** Estandarizar nombres: `[Categoría] + [Subcategoría] + [Marca] + [Atributos]`.
+**Cambios:**
+- Mutator o Listener en [Product](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/_PROJECT_DOCS/Sistema%20de%20Repuestos%20Estructura%20Update%20%281%29/src/app/types.ts#34-43) / [Variant](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/components/Products/ProductDetailModal.vue#128-138): En el evento `saving`, interceptar la creación/edición, recopilar las relaciones y generar el nombre automáticamente si las reglas aplican.
+
+### 6. SKU Automático y Renombrar UPC a "Custom Sku"
+**Objetivo:** Reemplazar el concepto de código de barras (UPC) por Custom SKU editable. Generar SKUs automáticos basados en prefijo de categoría + secuencia.
+**Cambios:**
+- UI: Renombrar label "UPC / Barcode" a "Custom SKU".
+- Backend (`Store/Update Request`): Lógica de generación de SKU `CAT-00X` obteniendo el último registro de la base de datos tipo `LIKE 'CAT-%'`.
+
+### 7. Alternativas = Misma Subcategoría / Categoría
+**Objetivo:** Mostrar como "Productos alternativos" a todos aquellos que pertenezcan a la misma subcategoría (o categoría padre).
+**Cambios:**
+- En [ProductDetailModal.vue](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/components/Products/ProductDetailModal.vue) y el controlador `ProductController::alternatives`, cambiar la query de relaciones explícitas a una query basada en `category_id`: "Traer otros productos que compartan este `category_id`".
+
+---
+
+## 🔹 FASE 3: Búsqueda Inteligente
+
+### 8. Búsqueda "Fuzzy" de Coincidencia Cruzada
+**Objetivo:** Encontrar "Bomba de Freno" cuando el usuario teclea "bomade freno" o "bomba freno".
+**Cambios:**
+- Crear un `scopeSearch` en [Product](file:///C:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/_PROJECT_DOCS/Sistema%20de%20Repuestos%20Estructura%20Update%20%281%29/src/app/types.ts#34-43) / [Variant](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/components/Products/ProductDetailModal.vue#128-138) que:
+  - Divida la frase en palabras (ej. `['bomba', 'freno']`).
+  - Aplique un agrupamiento: `WHERE (name LIKE '%bomba%' OR sku LIKE '%bomba%') AND (name LIKE '%freno%' OR sku LIKE '%freno%')`.
+  - Esta aproximación es altamente eficiente sin requerir dependencias costosas como Algolia/Meilisearch.
+
+### 9. Búsqueda Global por VIN en el POS
+**Cambios:**
+- El input de búsqueda principal del POS validará si la cadena ingresada tiene formato de VIN (ej. 17 caracteres alfanuméricos) y añadirá un `OR has_vehicle_with_vin` en la consulta al backend.
+
+### 10. Buscador de Variantes en Pantalla de Administradores
+- [resources/js/Pages/Products/Index.vue](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/Pages/Products/Index.vue): Añadir un filtro avanzado colapsable para buscar por: Color, Tamaño, Marca y Atributos Específicos.
+
+---
+
+## 🔹 FASE 4: Entradas y Salidas Masivas
+
+*(Nota: Ingreso Masivo desde Excel fue pospuesto por el cliente).*
+
+### 11. Rediseño Formulario Entradas/Salidas (Movimientos)
+**Cambios:**
+- Quitar columnas/campos de "Caducidad" y "Fecha de Fabricación" de cada fila que se genere.
+- Cambiar la UX: el usuario selecciona la caja del "Producto Base" (no variantes), y luego aparece un Select con las variantes (marcas) disponibles para ese producto.
+- Si no hay variantes (marcas) creadas para ese producto, mostrar un botón que diga "Añadir Variante" que dispare la creación rápida.
+
+---
+
+## 🔹 FASE 5: Punto de Venta (POS)
+
+### 12. Menú Contextual (Click Derecho y Long Press)
+**Cambios:**
+- Crear un componente `ProductContextMenu.vue`.
+- Detectar `@contextmenu.prevent` (PC) y `v-touch:hold` (Tablets / Móvil) sobre las tarjetas del producto.
+- Mostrar popup flotante con: Costo, Lote, Stock detallado, Notas Internas y VIN Compatible.
+
+### 13. Protección de Códigos (Modo Cliente)
+**Objetivo:** Proteger SKUs reales de capturas de pantalla.
+**Cambios:**
+- En el recibo y en la pantalla del carrito si la configuración "Client Mode" está activa:
+- Reemplazar el `sku` mostrado por el [id](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#110-117) bruto autogenerado de la DB (Ej: `#8429`).
+- Solo mostrar código de proveedor en vistas internas.
+
+### 14. Logs y Auditoría de Caja (POS Events)
+**Objetivo:** Guardar un registro exacto (timestamped) de las interacciones del vendedor durante la venta.
+**Cambios:**
+- **Frontend ([usePOS.ts](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/composables/usePOS.ts) / local state):** Crear un arreglo reactivo `sessionLogs: {action: string, metadata: any, timestamp: string}[]`. Registrar cada vez que se busca un producto, se añade, se quita del carrito o se cambia la cantidad.
+- **Backend ([SalesOrder](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/SalesOrder.php#12-469) & Endpoint):** Añadir soporte para recibir un array de `logs` al momento de guardar la orden (`/api/v1/pos/checkout`). Almacenarlos en una nueva tabla `sales_order_logs` o en un campo JSON `audit_logs` en la tabla `sales_orders`.
+
+---
+**Nota:** Este documento es el marco de trabajo para proceder con la ejecución paso a paso (EXECUTION).

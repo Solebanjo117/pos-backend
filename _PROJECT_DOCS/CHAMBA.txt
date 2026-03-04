@@ -1,0 +1,220 @@
+
+
+---
+
+# Estructura General del Sistema
+
+Piensa que tu sistema tiene **3 capas grandes**:
+
+1. **Administración (Back-Office)**
+2. **Venta / Catálogo (Front-Office)**
+3. **Motor Inteligente (Lógica interna)**
+
+---
+
+# 1. BACK-OFFICE – Panel Interno
+
+Aquí solo entra:
+
+* Dueño
+* Administrador
+* Empleados
+
+### Módulos
+
+## A. Dashboard
+
+* Ventas del día
+* Stock bajo
+* Productos más vendidos
+
+---
+
+## B. Productos
+
+* Crear producto
+* Editar
+* SKU
+* Categoría
+* Atributos
+* Imagen
+* Compatibilidad vehicular
+* Descripción automática (editable)
+
+---
+
+## C. Inventario
+
+* Stock
+* Ubicación
+* Ajustes
+* Merma
+* Backorder
+
+---
+
+## D. Proveedores
+
+* Datos proveedor
+* Historial compras
+* Órdenes
+
+---
+
+## E. Facturación / Ventas
+
+* Factura
+* Nota de crédito
+* Pago parcial
+* Crédito
+
+---
+
+## F. Usuarios
+
+* Roles
+* Permisos
+
+---
+
+# 2. FRONT-OFFICE – Catálogo / Vendedor
+
+Esto es lo que ve el cliente o vendedor rápido.
+
+### Pantallas
+
+## A. Buscador Principal
+
+* Código
+* Nombre
+* Vehículo
+
+---
+
+## B. Filtros Laterales
+
+* Categoría
+* Precio
+* Disponibilidad
+
+---
+
+## C. Vista Productos
+
+* Lista / Galería
+* Cards
+* “Desde $”
+* Compatibilidad
+* Marcas
+
+---
+
+## D. Detalle Producto
+
+* Imagen
+* Marcas disponibles
+* Tabla de precios
+* Agregar rápido
+
+---
+
+# 3. MOTOR INTELIGENTE – Lógica Interna
+
+Esto no se ve, pero es el corazón.
+
+## A. Generador de Descripciones
+
+Campos → Texto automático editable.
+
+---
+
+## B. Compatibilidad Vehicular
+
+Carro ↔ Producto.
+
+---
+
+## C. Backups
+
+* Diario
+* Restaurar
+
+---
+
+## D. Multi-Empresa
+
+Separar bases de datos.
+
+---
+
+# Orden Real de Desarrollo (para no quemarte)
+
+## Fase 1 – Base
+
+* Productos
+* Categorías
+* Inventario
+* Tabla simple
+
+---
+
+## Fase 2 – Ventas
+
+* Factura
+* POS básico
+* Stock automático
+
+---
+
+## Fase 3 – Catálogo Inteligente
+
+* Filtros
+* Compatibilidad
+* Cards
+
+---
+
+## Fase 4 – Avanzado
+
+* Crédito
+* Backorder
+* Multi-empresa
+* Backups
+
+---
+
+# Regla de Oro
+
+Si algo:
+
+* No vende
+* No controla stock
+* No evita errores
+
+→ Va después.
+
+---
+
+Visualmente en tu cabeza debería verse así:
+
+```
+Sistema
+ ├── Admin
+ │   ├── Productos
+ │   ├── Inventario
+ │   ├── Proveedores
+ │   └── Facturación
+ │
+ ├── Catálogo
+ │   ├── Buscador
+ │   ├── Filtros
+ │   └── Detalle
+ │
+ └── Motor
+     ├── Descripciones
+     ├── Compatibilidad
+     └── Backups
+```
+
+Con esto ya no estás “haciendo pantallas”,
+estás **construyendo un producto organizado**.

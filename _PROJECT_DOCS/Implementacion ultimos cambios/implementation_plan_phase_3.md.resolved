@@ -1,0 +1,38 @@
+# Phase 3 Implementation Plan: Intelligent Search
+
+## Goal Description
+Implement "Intelligent Search" capabilities to enhance the discovery of products internally (for Admins) and at the Point of Sale (POS). This phase introduces fuzzy cross-matching for search terms (e.g., finding "bomba de freno" when typing "bomade freno" or "bomba freno"), global search by 17-character VINs in the POS, and an advanced collapsible filter panel in the admin catalog UI.
+
+## Proposed Changes
+
+### Backend
+#### [MODIFY] app/Models/Product.php
+- **`scopeSearch($query, $term)`**:
+  - Extract the search logic currently residing in [ProductController](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Http/Controllers/Api/ProductController.php#17-683) into this dedicated scope.
+  - Implement **Fuzzy Matching**: Split the search term by spaces into an array of words. Loop through each word and apply an `AND` grouping consisting of `OR` clauses matching `name`, `sku_base`, `variants.sku`, or `variants.upc`. This ensures the product matches *all* words provided, regardless of order.
+  - Implement **Global VIN Search**: If the user inputs exactly 17 characters, prioritize matching the query against the [vins](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/Product.php#50-57) relationship (`vin LIKE $term`), combined with the fuzzy text search via an `OR` condition logic.
+
+#### [MODIFY] app/Http/Controllers/Api/ProductController.php
+- Delegate the [search](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Services/ProductService.php#446-490) implementation completely to the new `Product::search($request->get('search'))` scope.
+
+### Frontend
+#### [MODIFY] resources/js/Pages/Products/Index.vue
+- **Advanced Filters UI**: 
+  - Wrap the current standard filters (Search, Status, Warehouse, etc.) in a standard top bar.
+  - Add a "Filtros Avanzados" button that toggles a new collapsible section.
+  - Add inputs for Advanced Filters defined in [ProductFilters](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/types/product.ts#251-268): [vin](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/Product.php#50-57) (17-char), `oem_code`, and a dynamic text-based `attribute_value` search (or inputs mimicking size/color if strictly needed by user).
+  - Bind these new inputs to the `filters` state and format `activeDeepLinkFilters` to display their badges when active.
+
+#### [MODIFY] resources/js/types/product.ts
+- Verify and extend [ProductFilters](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-frontend/resources/js/types/product.ts#251-268) interface to ensure attributes like [vin](file:///c:/Users/JUANANTONIOCASTILLAO/Herd/pos-backend/app/Models/Product.php#50-57), `oem_code`, and `attribute_value` are formally defined as optional strings.
+
+## Verification Plan
+
+### Automated/Direct Tests
+- Submit an HTTP request simulating the frontend POS hitting `/api/v1/products?search=Llan Bos`. Ensure it successfully returns the "Llantas Prueba Bosch" product via fuzzy matching.
+- Submit a request with a 17-character dummy VIN and confirm it queries vehicles correctly.
+
+### Browser Verification
+- Open the Admin grid in `/products`.
+- Open the "Filtros Avanzados" panel.
+- Filter by a specific OEM Code or VIN and confirm it queries correctly and shows the active deep-link filter badges at the top.
