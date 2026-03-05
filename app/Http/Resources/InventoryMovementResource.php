@@ -16,7 +16,7 @@ class InventoryMovementResource extends JsonResource
                 return [
                     'id' => $this->product->id,
                     'name' => $this->product->name,
-                    'sku' => $this->product->sku,
+                    'sku' => $this->product->sku_base,
                 ];
             }),
             'warehouse' => $this->whenLoaded('warehouse', function () {

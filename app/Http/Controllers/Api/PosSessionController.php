@@ -251,35 +251,58 @@ class PosSessionController extends Controller
             ->orderBy('created_at', 'asc')
             ->get();
 
-        // ── Ensure closing_details has a detailed electronic_payments breakdown ──
-        // For sessions closed before the individual card-type form existed, we synthesize
-        // a breakdown using the generic payment_method values from the sales orders.
         $closingDetails = $posSession->closing_details ?? [];
 
+        // ── Always compute fresh payment totals to use as fallback ──
+        $orderIds = \App\Models\SalesOrder::where('pos_session_id', $posSession->id)
+            ->whereIn('status', ['completed', 'confirmed', 'processing'])
+            ->pluck('id');
+
+        $cashSales     = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
+        $cardSales     = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'card')->sum('amount');
+        $transferSales = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'transfer')->sum('amount');
+        $creditSales   = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'credit')->sum('amount');
+        $totalSales    = $cashSales + $cardSales + $transferSales + $creditSales;
+
+        $movementsIn  = (float) CashMovement::where('pos_session_id', $posSession->id)->where('type', 'in')->sum('amount');
+        $movementsOut = (float) CashMovement::where('pos_session_id', $posSession->id)->where('type', 'out')->sum('amount');
+        $openingAmount = (float) $posSession->opening_amount;
+        $expectedCash  = $openingAmount + $cashSales + $movementsIn - $movementsOut;
+        $declaredCash  = (float) ($posSession->closing_amount ?? $expectedCash);
+        $difference    = $declaredCash - $expectedCash;
+
+        // ── Rebuild summary if missing (sessions closed before the format existed) ──
+        if ($posSession->status === 'closed' && empty($closingDetails['summary'])) {
+            $closingDetails['summary'] = [
+                'opening_amount'     => $openingAmount,
+                'cash_sales'         => $cashSales,
+                'card_sales'         => $cardSales,
+                'transfer_sales'     => $transferSales,
+                'credit_sales'       => $creditSales,
+                'total_sales'        => $totalSales,
+                'shipping_revenue'   => 0.0,
+                'cash_movements_in'  => $movementsIn,
+                'cash_movements_out' => $movementsOut,
+                'expected_cash'      => $expectedCash,
+                'declared_cash'      => $declaredCash,
+                'difference'         => $difference,
+            ];
+        }
+
+        // ── Rebuild electronic_payments if missing ──
         if ($posSession->status === 'closed' && empty($closingDetails['electronic_payments'])) {
-            $showOrderIds = \App\Models\SalesOrder::where('pos_session_id', $posSession->id)
-                ->whereIn('status', ['completed', 'confirmed', 'processing'])
-                ->pluck('id');
-
-            $cardTotal     = (float) SalesOrderPayment::whereIn('sales_order_id', $showOrderIds)->where('method', 'card')->sum('amount');
-            $transferTotal = (float) SalesOrderPayment::whereIn('sales_order_id', $showOrderIds)->where('method', 'transfer')->sum('amount');
-            $creditTotal   = (float) SalesOrderPayment::whereIn('sales_order_id', $showOrderIds)->where('method', 'credit')->sum('amount');
-
-            // Map generic types to the closest specific type used in the close-session form.
-            // card -> visa (generic placeholder so the UI can show the total under a named column)
             $closingDetails['electronic_payments'] = [
                 'visa'           => 0.0,
                 'mastercard'     => 0.0,
                 'amex'           => 0.0,
-                'clave'          => $cardTotal,   // generic card goes to "Clave" as a catch-all
+                'clave'          => $cardSales,      // generic card → Clave as catch-all
                 'yappy'          => 0.0,
-                'transferencia'  => $transferTotal,
+                'transferencia'  => $transferSales,
                 'notaCredito'    => 0.0,
-                'creditoCliente' => $creditTotal,
+                'creditoCliente' => $creditSales,
             ];
         }
 
-        // Return session with (potentially enriched) closing_details
         $posSession->closing_details = $closingDetails;
 
         return response()->json([

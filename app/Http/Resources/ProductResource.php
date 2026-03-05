@@ -62,26 +62,26 @@ class ProductResource extends JsonResource
             ),
             
             
-            // Total stock: Product::inventory() returns ALL product_inventory records
-            // for this product_id (including those with variant_id set), so we only
-            // need to sum from one source to avoid double counting.
-            'total_stock' => (function() {
-                // Primary: sum from Product::inventory() — includes all records
-                if ($this->relationLoaded('inventory') && $this->inventory->count() > 0) {
-                    return $this->inventory->sum('quantity_available');
-                }
+            // Total stock: always compute from variants to stay consistent with per-variant totals shown in UI.
+        // Previously used Product::inventory() which could disagree with the sum of variant stocks
+        // when warehouse filters or eager-loading constraints differed between the two relations.
+        'total_stock' => (function() {
+            // Preferred: sum from each variant's loaded inventory
+            if ($this->relationLoaded('variants')) {
+                return $this->variants->sum(function($variant) {
+                    return $variant->relationLoaded('inventory') 
+                        ? $variant->inventory->sum('quantity_available') 
+                        : 0;
+                });
+            }
 
-                // Fallback: if no direct inventory loaded, try summing from variants
-                if ($this->relationLoaded('variants')) {
-                    return $this->variants->sum(function($variant) {
-                        return $variant->relationLoaded('inventory') 
-                            ? $variant->inventory->sum('quantity_available') 
-                            : 0;
-                    });
-                }
+            // Fallback: if variants not loaded, try product-level inventory
+            if ($this->relationLoaded('inventory') && $this->inventory->count() > 0) {
+                return $this->inventory->sum('quantity_available');
+            }
 
-                return 0;
-            })(),
+            return 0;
+        })(),
             
             
             // Inventory records (for checking stock levels in frontend)

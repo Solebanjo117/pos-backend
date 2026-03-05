@@ -16,7 +16,7 @@ class UserController extends Controller
      */
     public function index(): JsonResponse
     {
-        $users = User::select(['id', 'name', 'email', 'role', 'is_active', 'current_warehouse_id', 'created_at'])
+        $users = User::select(['id', 'name', 'username', 'email', 'role', 'is_active', 'current_warehouse_id', 'created_at'])
             ->with(['currentWarehouse:id,name', 'warehouses:id,name'])
             ->orderBy('name')
             ->get();
@@ -31,6 +31,7 @@ class UserController extends Controller
     {
         $validated = $request->validate([
             'name'                  => 'required|string|max:255',
+            'username'              => 'required|string|max:50|unique:users,username',
             'email'                 => 'required|email|unique:users,email',
             'password'              => 'required|string|min:8|confirmed',
             'role'                  => ['required', Rule::in(User::VALID_ROLES)],
@@ -60,6 +61,7 @@ class UserController extends Controller
     {
         $validated = $request->validate([
             'name'                  => 'sometimes|string|max:255',
+            'username'              => ['sometimes', 'string', 'max:50', Rule::unique('users')->ignore($user->id)],
             'email'                 => ['sometimes', 'email', Rule::unique('users')->ignore($user->id)],
             'password'              => 'nullable|string|min:8|confirmed',
             'role'                  => ['sometimes', Rule::in(User::VALID_ROLES)],

@@ -60,7 +60,7 @@ class SupplierController extends Controller
                     'id' => $ps->id,
                     'product_id' => $ps->product_id,
                     'product_name' => $ps->product->name ?? 'N/A',
-                    'product_sku' => $ps->product->sku ?? 'N/A',
+                    'product_sku' => $ps->product->sku_base ?? 'N/A',
                     'brand_name' => $ps->product->brand->name ?? 'N/A',
                     'supplier_cost' => $ps->supplier_cost,
                     'lead_time_days' => $ps->lead_time_days,

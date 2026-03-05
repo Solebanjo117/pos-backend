@@ -131,7 +131,7 @@ class ReportService
                 'date' => $movement->created_at->format('Y-m-d H:i:s'),
                 'product_id' => $movement->product_id,
                 'product_name' => $movement->product->name,
-                'product_sku' => $movement->product->sku,
+                'product_sku' => $movement->product->sku_base,
                 'warehouse' => $movement->warehouse->name,
                 'destination_warehouse' => $movement->destinationWarehouse?->name,
                 'movement_type' => $movement->movement_type,
@@ -298,7 +298,7 @@ class ReportService
             return [
                 'product_id' => $productId,
                 'product_name' => $product->name,
-                'product_sku' => $product->sku,
+                'product_sku' => $product->sku_base,
                 'total_movements' => $items->count(),
                 'inbound' => $items->where('movement_type', 'in')->count(),
                 'outbound' => $items->where('movement_type', 'out')->count(),

@@ -75,6 +75,12 @@ Route::middleware(['web'])->prefix('v1')->group(function () {
     require __DIR__ . '/api_backup.php';
 
     // ---------------------------------------------------------------
+    // Store Settings: admin and managers
+    // ---------------------------------------------------------------
+    require __DIR__ . '/api_store_settings.php';
+
+
+    // ---------------------------------------------------------------
     // Activity Logs: admin only
     // ---------------------------------------------------------------
     require __DIR__ . '/api_activity_logs.php';

@@ -144,12 +144,12 @@ class PurchaseOrder extends Model
         
         // Get the maximum sequence for today, INCLUDING soft-deleted records
         // to avoid UNIQUE constraint violations
-        $maxSequence = self::withTrashed()
+        $lastPo = self::withTrashed()
             ->whereDate('created_at', now()->toDateString())
-            ->selectRaw('MAX(CAST(SUBSTR(po_number, -4) AS INTEGER)) as max_seq')
-            ->value('max_seq');
+            ->orderBy('id', 'desc')
+            ->first();
 
-        $sequence = $maxSequence ? $maxSequence + 1 : 1;
+        $sequence = $lastPo ? (int) substr($lastPo->po_number, -4) + 1 : 1;
 
         return 'PO-' . $date . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
     }

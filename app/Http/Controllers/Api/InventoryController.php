@@ -41,7 +41,7 @@ class InventoryController extends Controller
             $search = $request->search;
             $query->whereHas('product', function ($q) use ($search) {
                 $q->where('name', 'ilike', "%{$search}%")
-                    ->orWhere('sku', 'ilike', "%{$search}%");
+                    ->orWhere('sku_base', 'ilike', "%{$search}%");
             });
         }
 
@@ -62,7 +62,7 @@ class InventoryController extends Controller
                     'id' => $item->id,
                     'product_id' => $item->product_id,
                     'product_name' => $item->product->name,
-                    'product_sku' => $item->product->sku,
+                    'product_sku' => $item->product->sku_base,
                     'brand' => $item->product->brand->name ?? 'N/A',
                     'warehouse_id' => $item->warehouse_id,
                     'warehouse_name' => $item->warehouse->name,

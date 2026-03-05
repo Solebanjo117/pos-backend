@@ -116,7 +116,7 @@ class WarehouseService
             $search = $filters['search'];
             $query->whereHas('product', function ($q) use ($search) {
                 $q->where('name', 'ILIKE', "%{$search}%")
-                  ->orWhere('sku', 'ILIKE', "%{$search}%");
+                  ->orWhere('sku_base', 'ILIKE', "%{$search}%");
             });
         }
 

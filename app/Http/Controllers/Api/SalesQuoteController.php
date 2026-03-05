@@ -287,27 +287,128 @@ class SalesQuoteController extends Controller
     }
 
     /**
-     * GET /api/sales-quotes/{id}/pdf
-     * Generate PDF for the quote
+     * Generate a PNG barcode as a base64 data URI from the quote number.
      */
-    public function pdf(Request $request, int $id)
+    private function generateBarcodeSvg(string $quoteNumber): string
     {
-        $quote = SalesQuote::with(['customer', 'user', 'warehouse', 'items.product', 'items.variant'])->findOrFail($id);
+        $numericValue = preg_replace('/\D/', '', $quoteNumber);
+        if (empty($numericValue)) {
+            $numericValue = $quoteNumber;
+        }
 
-        $config = config('app');
-        $mode = $request->input('mode', 'standard');
+        $generator = new \Picqer\Barcode\BarcodeGeneratorPNG();
+        $png = $generator->getBarcode($numericValue, $generator::TYPE_CODE_128, 2, 50);
+        return 'data:image/png;base64,' . base64_encode($png);
+    }
 
-        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('quotes.a4', [
-            'quote'        => $quote,
-            'mode'         => $mode,
-            'businessName' => $config['business_name'] ?? 'Mi Empresa',
-            'businessRfc'  => $config['business_rfc'] ?? '',
-            'businessAddr' => $config['business_address'] ?? '',
-            'businessPhone'=> $config['business_phone'] ?? '',
+    /**
+     * GET /api/sales-quotes/{id}/ticket
+     * Generate a thermal ticket PDF for a sales quote.
+     */
+    public function ticket(Request $request, int $id)
+    {
+        $type = $request->query('mode', 'standard'); // standard or blind (sin SKU)
+        
+        $quote = SalesQuote::with([
+            'items.product',
+            'items.variant',
+            'items.warehouse',
+            'customer',
+            'user',
+        ])->findOrFail($id);
+
+        // Business info from configurable settings
+        $businessName    = \App\Models\Setting::get('store_name', 'Mi Negocio');
+        $businessAddress = \App\Models\Setting::get('store_address', '');
+        $businessPhone   = \App\Models\Setting::get('store_phone', '');
+        $businessRfc     = \App\Models\Setting::get('store_tax_id', '');
+        $businessEmail   = \App\Models\Setting::get('store_email', '');
+        $businessLogo    = \App\Models\Setting::get('store_logo_url', null);
+        $ticketFooter    = \App\Models\Setting::get('store_ticket_footer', 'Cotización válida hasta: ' . ($quote->valid_until ? date('d/m/Y', strtotime($quote->valid_until)) : 'N/A'));
+
+        // Generate barcode SVG
+        $barcodeSvg   = $this->generateBarcodeSvg($quote->quote_number);
+        $barcodeValue = preg_replace('/\D/', '', $quote->quote_number);
+
+        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('tickets.sale', [
+            'order'           => $quote, // using generic 'order' var the template expects
+            'is_quote'        => true,
+            'businessName'    => $businessName,
+            'businessAddress' => $businessAddress,
+            'businessPhone'   => $businessPhone,
+            'businessEmail'   => $businessEmail,
+            'businessRfc'     => $businessRfc,
+            'businessLogo'    => $businessLogo,
+            'ticketFooter'    => $ticketFooter,
+            'type'            => $type === 'blind' ? 'client' : 'internal', // Map blind to client (no SKU)
+            'barcodeSvg'      => $barcodeSvg,
+            'barcodeValue'    => $barcodeValue,
         ]);
 
-        $pdf->setPaper('letter');
+        // 80mm ≈ 226.77pt, height auto (long receipt)
+        $pdf->setPaper([0, 0, 226.77, 800], 'portrait');
+        $pdf->setOption('isRemoteEnabled', true);
+        $pdf->setOption('defaultFont', 'Courier');
 
-        return $pdf->stream("cotizacion-{$quote->quote_number}.pdf");
+        return $pdf->stream("cotizacion-ticket-{$quote->quote_number}.pdf");
+    }
+
+    /**
+     * GET /api/sales-quotes/{id}/proforma
+     * Generate a half-letter landscape proforma for a sales quote.
+     */
+    public function proforma(Request $request, int $id)
+    {
+        $type = $request->query('mode', 'standard');
+
+        $quote = SalesQuote::with([
+            'items.product.category',
+            'items.product.variants.brand',
+            'items.product.variants.pricing',
+            'items.product.vins',
+            'items.variant',
+            'items.warehouse',
+            'customer',
+            'user',
+        ])->findOrFail($id);
+
+        $businessName    = \App\Models\Setting::get('store_name', 'Mi Negocio');
+        $businessAddress = \App\Models\Setting::get('store_address', '');
+        $businessPhone   = \App\Models\Setting::get('store_phone', '');
+        $businessEmail   = \App\Models\Setting::get('store_email', '');
+        $businessRfc     = \App\Models\Setting::get('store_tax_id', '');
+        $businessLogo    = \App\Models\Setting::get('store_logo_url', null);
+        $ticketFooter    = \App\Models\Setting::get('store_ticket_footer', 'Cotización válida por 15 días');
+
+        // Calculate dominant tax percent
+        $taxPercent = 7;
+        if ($quote->items->count() > 0) {
+            $taxPercent = $quote->items->first()->tax_percent ?? 7;
+        }
+
+        $barcodeSvg   = $this->generateBarcodeSvg($quote->quote_number);
+        $barcodeValue = preg_replace('/\D/', '', $quote->quote_number);
+
+        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('tickets.proforma', [
+            'order'           => $quote, // mapped for template expectations
+            'is_quote'        => true,
+            'businessName'    => $businessName,
+            'businessAddress' => $businessAddress,
+            'businessPhone'   => $businessPhone,
+            'businessEmail'   => $businessEmail,
+            'businessRfc'     => $businessRfc,
+            'businessLogo'    => $businessLogo,
+            'ticketFooter'    => $ticketFooter,
+            'type'            => $type === 'blind' ? 'client' : 'internal',
+            'taxPercent'      => $taxPercent,
+            'barcodeSvg'      => $barcodeSvg,
+            'barcodeValue'    => $barcodeValue,
+        ]);
+
+        $pdf->setPaper([0, 0, 612, 396], 'landscape');
+        $pdf->setOption('isRemoteEnabled', true);
+        $pdf->setOption('defaultFont', 'Helvetica');
+
+        return $pdf->stream("cotizacion-proforma-{$quote->quote_number}.pdf");
     }
 }

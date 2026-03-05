@@ -142,7 +142,7 @@
     <div class="divider"></div>
 
     {{-- ===== PAYMENTS ===== --}}
-    @if($order->payments->count() > 0)
+    @if(isset($order->payments) && $order->payments->count() > 0)
     <table>
         @foreach($order->payments as $payment)
         <tr>

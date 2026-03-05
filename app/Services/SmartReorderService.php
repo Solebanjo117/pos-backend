@@ -69,7 +69,7 @@ class SmartReorderService
                 'product_id' => $product->id,
                 'product' => [
                     'id' => $product->id,
-                    'sku' => $product->sku,
+                    'sku' => $product->sku_base,
                     'name' => $product->name,
                 ],
                 'warehouse_id' => $inventoryRecord->warehouse_id,

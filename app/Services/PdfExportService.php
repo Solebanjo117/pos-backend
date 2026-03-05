@@ -2,23 +2,41 @@
 
 namespace App\Services;
 
+use App\Models\Setting;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Illuminate\Support\Facades\View;
 
 class PdfExportService
 {
+    /**
+     * Gather all store settings for PDF headers.
+     */
+    private function storeData(): array
+    {
+        return [
+            'store_name'          => Setting::get('store_name', 'HermeX POS'),
+            'store_tagline'       => Setting::get('store_tagline', ''),
+            'store_logo_url'      => Setting::get('store_logo_url', null),
+            'store_owner_name'    => Setting::get('store_owner_name', ''),
+            'store_phone'         => Setting::get('store_phone', ''),
+            'store_email'         => Setting::get('store_email', ''),
+            'store_address'       => Setting::get('store_address', ''),
+            'store_tax_id'        => Setting::get('store_tax_id', ''),
+            'store_ticket_footer' => Setting::get('store_ticket_footer', '¡Gracias por su compra!'),
+        ];
+    }
+
     /**
      * Export stock levels report to PDF
      */
     public function exportStockLevels(array $reportData): string
     {
-        $pdf = Pdf::loadView('pdf.stock-levels', [
-            'report' => $reportData,
+        $pdf = Pdf::loadView('pdf.stock-levels', array_merge([
+            'report'      => $reportData,
             'generatedAt' => now()->format('d/m/Y H:i'),
-        ]);
+        ], $this->storeData()));
 
         $pdf->setPaper('a4', 'landscape');
-        
+
         return $pdf->output();
     }
 
@@ -27,13 +45,13 @@ class PdfExportService
      */
     public function exportMovementHistory(array $reportData): string
     {
-        $pdf = Pdf::loadView('pdf.movement-history', [
-            'report' => $reportData,
+        $pdf = Pdf::loadView('pdf.movement-history', array_merge([
+            'report'      => $reportData,
             'generatedAt' => now()->format('d/m/Y H:i'),
-        ]);
+        ], $this->storeData()));
 
         $pdf->setPaper('a4', 'landscape');
-        
+
         return $pdf->output();
     }
 
@@ -42,10 +60,10 @@ class PdfExportService
      */
     public function exportPurchaseOrder($purchaseOrder, string $mode = 'standard')
     {
-        $pdf = Pdf::loadView('pdf.purchase-order', [
+        $pdf = Pdf::loadView('pdf.purchase-order', array_merge([
             'purchaseOrder' => $purchaseOrder,
-            'mode' => $mode,
-        ]);
+            'mode'          => $mode,
+        ], $this->storeData()));
 
         $pdf->setPaper('a4', 'portrait');
 

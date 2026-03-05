@@ -49,7 +49,7 @@ class InventoryMovementService
         if (!empty($filters['search'])) {
             $query->whereHas('product', function ($q) use ($filters) {
                 $q->where('name', 'ilike', '%' . $filters['search'] . '%')
-                  ->orWhere('sku', 'ilike', '%' . $filters['search'] . '%');
+                  ->orWhere('sku_base', 'ilike', '%' . $filters['search'] . '%');
             })->orWhereHas('variant', function ($q) use ($filters) {
                 $q->where('sku', 'ilike', '%' . $filters['search'] . '%');
             });

@@ -36,7 +36,7 @@ class BatchInventoryController extends Controller
                 $q->where('product_batches.batch_number', 'ilike', "%{$search}%")
                   ->orWhereHas('product', function ($q2) use ($search) {
                       $q2->where('name', 'ilike', "%{$search}%")
-                         ->orWhere('sku', 'ilike', "%{$search}%");
+                         ->orWhere('sku_base', 'ilike', "%{$search}%");
                   });
             });
         }
@@ -73,7 +73,7 @@ class BatchInventoryController extends Controller
                 return [
                     'product_id' => $batch->product_id,
                     'product_name' => $batch->product->name,
-                    'product_sku' => $batch->product->sku,
+                    'product_sku' => $batch->product->sku_base,
                     'total_quantity' => $warehouseBatches->sum('quantity'),
                     'warehouses' => $warehouseBatches->map(fn($wb) => [
                         'warehouse_id' => $wb->warehouse_id,
@@ -91,6 +91,7 @@ class BatchInventoryController extends Controller
                 'expiry_date' => $firstBatch->expiry_date,
                 'manufacturing_date' => $firstBatch->manufacturing_date,
                 'cost' => $firstBatch->cost,
+                'notes' => $firstBatch->notes,
                 'total_quantity' => $totalQuantity,
                 'product_count' => $products->count(),
                 'products' => $products->toArray(),
@@ -112,5 +113,26 @@ class BatchInventoryController extends Controller
                 'total' => $total,
             ],
         ]);
+    }
+
+    /**
+     * Update the notes for all product batches that share the same batch_number.
+     * PUT /api/inventory/batches/{batch_number}/notes
+     */
+    public function updateNotes(Request $request, string $batchNumber): JsonResponse
+    {
+        $request->validate([
+            'notes' => 'nullable|string'
+        ]);
+
+        $updated = ProductBatch::where('batch_number', $batchNumber)->update([
+            'notes' => $request->notes
+        ]);
+
+        if ($updated === 0) {
+            return response()->json(['message' => 'Lote no encontrado'], 404);
+        }
+
+        return response()->json(['message' => 'Notas del lote actualizadas con éxito']);
     }
 }

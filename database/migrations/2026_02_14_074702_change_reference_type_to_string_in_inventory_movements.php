@@ -14,10 +14,15 @@ return new class extends Migration
      */
     public function up(): void
     {
-        // Change enum to string to support flexible reference types
-        Schema::table('inventory_movements', function (Blueprint $table) {
-            $table->string('reference_type', 50)->nullable()->change();
-        });
+        // PostgreSQL: drop the enum CHECK constraint explicitly, then change column type
+        if (DB::getDriverName() === 'pgsql') {
+            DB::statement("ALTER TABLE inventory_movements DROP CONSTRAINT IF EXISTS inventory_movements_reference_type_check");
+            DB::statement("ALTER TABLE inventory_movements ALTER COLUMN reference_type TYPE VARCHAR(50)");
+        } else {
+            Schema::table('inventory_movements', function (Blueprint $table) {
+                $table->string('reference_type', 50)->nullable()->change();
+            });
+        }
     }
 
     /**

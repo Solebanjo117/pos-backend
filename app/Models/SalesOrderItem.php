@@ -83,7 +83,7 @@ class SalesOrderItem extends Model
 
     public function getProductSkuAttribute(): ?string
     {
-        return $this->product?->sku;
+        return $this->product?->sku_base;
     }
 
     public function getWarehouseNameAttribute(): ?string

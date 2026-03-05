@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Setting;
 use App\Models\SalesOrder;
 use Illuminate\Http\Request;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -27,14 +28,17 @@ class TicketController extends Controller
             'payments',
         ])->findOrFail($id);
 
-        // Business info — could come from a settings table in the future
-        $businessName    = config('app.business_name', 'Mi Negocio');
-        $businessAddress = config('app.business_address', '');
-        $businessPhone   = config('app.business_phone', '');
-        $businessRfc     = config('app.business_rfc', '');
+        // Business info from configurable settings
+        $businessName    = Setting::get('store_name', 'Mi Negocio');
+        $businessAddress = Setting::get('store_address', '');
+        $businessPhone   = Setting::get('store_phone', '');
+        $businessRfc     = Setting::get('store_tax_id', '');
+        $businessEmail   = Setting::get('store_email', '');
+        $businessLogo    = Setting::get('store_logo_url', null);
+        $ticketFooter    = Setting::get('store_ticket_footer', '¡Gracias por su compra!');
 
         // Generate barcode SVG
-        $barcodeSvg = $this->generateBarcodeSvg($order->order_number);
+        $barcodeSvg   = $this->generateBarcodeSvg($order->order_number);
         $barcodeValue = preg_replace('/\D/', '', $order->order_number);
 
         $pdf = Pdf::loadView('tickets.sale', [
@@ -42,7 +46,10 @@ class TicketController extends Controller
             'businessName'    => $businessName,
             'businessAddress' => $businessAddress,
             'businessPhone'   => $businessPhone,
+            'businessEmail'   => $businessEmail,
             'businessRfc'     => $businessRfc,
+            'businessLogo'    => $businessLogo,
+            'ticketFooter'    => $ticketFooter,
             'type'            => $type,
             'barcodeSvg'      => $barcodeSvg,
             'barcodeValue'    => $barcodeValue,
@@ -71,13 +78,16 @@ class TicketController extends Controller
             'payments',
         ])->findOrFail($id);
 
-        $businessName    = config('app.business_name', 'Mi Negocio');
-        $businessAddress = config('app.business_address', '');
-        $businessPhone   = config('app.business_phone', '');
-        $businessRfc     = config('app.business_rfc', '');
+        $businessName    = Setting::get('store_name', 'Mi Negocio');
+        $businessAddress = Setting::get('store_address', '');
+        $businessPhone   = Setting::get('store_phone', '');
+        $businessRfc     = Setting::get('store_tax_id', '');
+        $businessEmail   = Setting::get('store_email', '');
+        $businessLogo    = Setting::get('store_logo_url', null);
+        $ticketFooter    = Setting::get('store_ticket_footer', '¡Gracias por su compra!');
 
         // Generate barcode SVG
-        $barcodeSvg = $this->generateBarcodeSvg($order->order_number);
+        $barcodeSvg   = $this->generateBarcodeSvg($order->order_number);
         $barcodeValue = preg_replace('/\D/', '', $order->order_number);
 
         $pdf = Pdf::loadView('tickets.sale', [
@@ -85,7 +95,10 @@ class TicketController extends Controller
             'businessName'    => $businessName,
             'businessAddress' => $businessAddress,
             'businessPhone'   => $businessPhone,
+            'businessEmail'   => $businessEmail,
             'businessRfc'     => $businessRfc,
+            'businessLogo'    => $businessLogo,
+            'ticketFooter'    => $ticketFooter,
             'barcodeSvg'      => $barcodeSvg,
             'barcodeValue'    => $barcodeValue,
         ]);
@@ -115,22 +128,24 @@ class TicketController extends Controller
             'payments',
         ])->findOrFail($id);
 
-        // Business info
-        $businessName    = config('app.business_name', 'Mi Negocio');
-        $businessAddress = config('app.business_address', '');
-        $businessPhone   = config('app.business_phone', '');
-        $businessEmail   = config('app.business_email', '');
-        $businessRfc     = config('app.business_rfc', '');
+        // Business info from configurable settings
+        $businessName    = Setting::get('store_name', 'Mi Negocio');
+        $businessAddress = Setting::get('store_address', '');
+        $businessPhone   = Setting::get('store_phone', '');
+        $businessEmail   = Setting::get('store_email', '');
+        $businessRfc     = Setting::get('store_tax_id', '');
+        $businessLogo    = Setting::get('store_logo_url', null);
+        $ticketFooter    = Setting::get('store_ticket_footer', '¡Gracias por su compra!');
 
         // Calculate dominant tax percent for display
         $taxPercent = 7;
         if ($order->items->count() > 0) {
-            $firstTax = $order->items->first()->tax_percent ?? 7;
+            $firstTax   = $order->items->first()->tax_percent ?? 7;
             $taxPercent = $firstTax;
         }
 
         // Generate barcode SVG
-        $barcodeSvg = $this->generateBarcodeSvg($order->order_number);
+        $barcodeSvg   = $this->generateBarcodeSvg($order->order_number);
         $barcodeValue = preg_replace('/\D/', '', $order->order_number);
 
         $pdf = Pdf::loadView('tickets.proforma', [
@@ -140,6 +155,8 @@ class TicketController extends Controller
             'businessPhone'   => $businessPhone,
             'businessEmail'   => $businessEmail,
             'businessRfc'     => $businessRfc,
+            'businessLogo'    => $businessLogo,
+            'ticketFooter'    => $ticketFooter,
             'type'            => $type,
             'taxPercent'      => $taxPercent,
             'barcodeSvg'      => $barcodeSvg,

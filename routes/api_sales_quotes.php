@@ -10,5 +10,6 @@ Route::middleware(['web'])->group(function () {
     Route::put('/sales-quotes/{id}',           [SalesQuoteController::class, 'update']);
     Route::delete('/sales-quotes/{id}',        [SalesQuoteController::class, 'destroy']);
     Route::post('/sales-quotes/{id}/convert',  [SalesQuoteController::class, 'convert']);
-    Route::get('/sales-quotes/{id}/pdf',       [SalesQuoteController::class, 'pdf']);
+    Route::get('/sales-quotes/{id}/ticket',    [SalesQuoteController::class, 'ticket']);
+    Route::get('/sales-quotes/{id}/proforma',  [SalesQuoteController::class, 'proforma']);
 });

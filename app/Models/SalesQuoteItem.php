@@ -69,7 +69,7 @@ class SalesQuoteItem extends Model
 
     public function getProductSkuAttribute(): ?string
     {
-        return $this->product?->sku;
+        return $this->product?->sku_base;
     }
 
     // ==================== CALCULATIONS ====================

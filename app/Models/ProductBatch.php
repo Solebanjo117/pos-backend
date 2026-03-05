@@ -19,6 +19,7 @@ class ProductBatch extends Model
         'expiry_date',
         'cost',
         'supplier_id',
+        'notes',
     ];
 
     protected $casts = [

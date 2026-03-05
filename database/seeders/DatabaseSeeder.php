@@ -41,6 +41,9 @@ class DatabaseSeeder extends Seeder
         $this->call(ProductSeeder::class);
         $this->command->info('✅ Productos con relaciones creados');
         
+        // Demo data: sales, purchases, customers, POS sessions
+        $this->call(DemoDataSeeder::class);
+        
         $this->command->info('🎉 Seeders completados exitosamente!');
     }
 }

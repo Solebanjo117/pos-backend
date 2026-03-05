@@ -18,7 +18,8 @@ class PurchaseOrderService
     public function getAll(array $filters = []): LengthAwarePaginator
     {
         $query = PurchaseOrder::with(['supplier:id,name', 'warehouse:id,name', 'user:id,name'])
-            ->withCount('items');
+            ->withCount('items')
+            ->withSum('payments', 'amount'); // avoid N+1 for amount_paid
 
         if (!empty($filters['search'])) {
             $search = $filters['search'];
@@ -46,6 +47,11 @@ class PurchaseOrderService
             $query->where('order_date', '<=', $filters['date_to']);
         }
 
+        // Filter by payment status
+        if (!empty($filters['payment_status'])) {
+            $query->where('payment_status', $filters['payment_status']);
+        }
+
         $sortBy = $filters['sort_by'] ?? 'created_at';
         $sortDir = $filters['sort_direction'] ?? 'desc';
         $query->orderBy($sortBy, $sortDir);
@@ -62,10 +68,10 @@ class PurchaseOrderService
             'supplier',
             'warehouse',
             'user:id,name',
-            'items.product:id,sku,name',
+            'items.product:id,sku_base,name',
             'items.product.defaultVariant.brand:id,name', // Fallback for products
             'items.variant.brand:id,name', // Primary source
-            'items.product.pricing:id,product_id,cost,sell_price',
+            'items.product.pricing:id,product_id,cost,base_price',
         ])->findOrFail($id);
     }
 
@@ -388,17 +394,23 @@ class PurchaseOrderService
             $query->where('order_date', '<=', $filters['date_to']);
         }
 
-        $allOrders = (clone $query)->get();
+        $allOrders = (clone $query)->withSum('payments', 'amount')->get();
 
         return [
-            'total_orders' => $allOrders->count(),
-            'total_spent' => $allOrders->where('status', '!=', 'cancelled')->sum('total'),
-            'draft_orders' => $allOrders->where('status', 'draft')->count(),
-            'sent_orders' => $allOrders->where('status', 'sent')->count(),
-            'partial_orders' => $allOrders->where('status', 'partial')->count(),
-            'received_orders' => $allOrders->where('status', 'received')->count(),
-            'cancelled_orders' => $allOrders->where('status', 'cancelled')->count(),
-            'average_order_value' => $allOrders->where('status', '!=', 'cancelled')->avg('total') ?? 0,
+            'total_orders'           => $allOrders->count(),
+            'total_spent'            => $allOrders->where('status', '!=', 'cancelled')->sum('total'),
+            'draft_orders'           => $allOrders->where('status', 'draft')->count(),
+            'sent_orders'            => $allOrders->where('status', 'sent')->count(),
+            'partial_orders'         => $allOrders->where('status', 'partial')->count(),
+            'received_orders'        => $allOrders->where('status', 'received')->count(),
+            'cancelled_orders'       => $allOrders->where('status', 'cancelled')->count(),
+            'average_order_value'    => $allOrders->where('status', '!=', 'cancelled')->avg('total') ?? 0,
+            'total_unpaid'           => $allOrders->where('payment_status', '!=', 'paid')
+                                           ->where('status', '!=', 'cancelled')
+                                           ->sum(fn($o) => max(0, (float)$o->total - (float)($o->payments_sum_amount ?? 0))),
+            'pending_payment_orders' => $allOrders->where('payment_status', '!=', 'paid')
+                                           ->where('status', '!=', 'cancelled')
+                                           ->count(),
         ];
     }
 }

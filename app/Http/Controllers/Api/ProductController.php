@@ -152,9 +152,13 @@ class ProductController extends Controller
         }
 
         // Dynamic sorting
-        $allowedSortFields = ['name', 'sku', 'status', 'created_at', 'updated_at'];
+        $allowedSortFields = ['name', 'sku_base', 'status', 'created_at', 'updated_at'];
         $sortField = $request->get('sortField', 'created_at');
         $sortDirection = $request->get('sortDirection', 'desc');
+        // Map legacy 'sku' sort to 'sku_base'
+        if ($sortField === 'sku') {
+            $sortField = 'sku_base';
+        }
         if (!in_array($sortField, $allowedSortFields)) {
             $sortField = 'created_at';
         }
