@@ -8,10 +8,21 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
+// ---------------------------------------------------------------
+// Public routes (no authentication required)
+// ---------------------------------------------------------------
 Route::middleware(['web'])->prefix('v1')->group(function () {
+    // Store settings (logo, name) needed on login page
+    Route::get('/store-settings', [App\Http\Controllers\Api\StoreSettingController::class, 'index']);
+});
+
+// ---------------------------------------------------------------
+// Authenticated routes (requires valid session via Sanctum)
+// ---------------------------------------------------------------
+Route::middleware(['web', 'auth:sanctum'])->prefix('v1')->group(function () {
 
     // ---------------------------------------------------------------
-    // Public to all authenticated users
+    // Available to all authenticated users
     // ---------------------------------------------------------------
     require __DIR__ . '/api_dashboard.php';
     require __DIR__ . '/api_inventory.php';
@@ -75,10 +86,10 @@ Route::middleware(['web'])->prefix('v1')->group(function () {
     require __DIR__ . '/api_backup.php';
 
     // ---------------------------------------------------------------
-    // Store Settings: admin and managers
+    // Store Settings (modify): admin and managers
     // ---------------------------------------------------------------
-    require __DIR__ . '/api_store_settings.php';
-
+    Route::put('/store-settings', [App\Http\Controllers\Api\StoreSettingController::class, 'update']);
+    Route::post('/store-settings/logo', [App\Http\Controllers\Api\StoreSettingController::class, 'uploadLogo']);
 
     // ---------------------------------------------------------------
     // Activity Logs: admin only
