@@ -23,8 +23,6 @@ return [
         'http://pos-frontend.test',
         'http://localhost:5173',
         'http://127.0.0.1:5173',
-        'http://68.183.147.166',
-        'http://68.183.147.166:8080',
     ],
 
     'allowed_origins_patterns' => [],
