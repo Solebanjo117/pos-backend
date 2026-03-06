@@ -38,6 +38,30 @@ return Application::configure(basePath: dirname(__DIR__))
             Route::middleware('api')
                 ->prefix('api/v1')
                 ->group(base_path('routes/api_vehicles.php'));
+            
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_users.php'));
+            
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_purchase_orders.php'));
+            
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_payment_methods.php'));
+                
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_store_settings.php'));
+                
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_backup.php'));
+                
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_activity_logs.php'));
         },
     )
     ->withMiddleware(function (Middleware $middleware): void {
