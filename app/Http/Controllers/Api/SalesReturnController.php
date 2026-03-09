@@ -42,6 +42,14 @@ class SalesReturnController extends Controller
             ], 422);
         }
 
+        // Require an open POS Session to process a return
+        $session = \App\Models\PosSession::where('user_id', auth()->id())->where('status', 'open')->first();
+        if (!$session) {
+            return response()->json([
+                'message' => 'Debe tener una sesión de caja abierta para registrar una devolución.',
+            ], 403);
+        }
+
         $validated = $request->validate([
             'reason'         => 'nullable|string|max:500',
             'refund_method'  => 'required|string|in:cash,card,transfer,balance',
@@ -102,8 +110,9 @@ class SalesReturnController extends Controller
                     $orderItem = $order->items->firstWhere('id', $returnItem['sales_order_item_id']);
 
                     // Calculate unit price after discount
-                    $unitAfterDiscount = (float) $orderItem->unit_price * (1 - ((float) $orderItem->discount_percent / 100));
-                    $subtotal = $unitAfterDiscount * $returnItem['quantity'];
+                    $discountPercent = (float) ($orderItem->discount_percent ?? 0);
+                    $unitAfterDiscount = round((float) $orderItem->unit_price * (1 - ($discountPercent / 100)), 2);
+                    $subtotal = round($unitAfterDiscount * (int) $returnItem['quantity'], 2);
 
                     $salesReturn->items()->create([
                         'sales_order_item_id' => $orderItem->id,
@@ -118,7 +127,7 @@ class SalesReturnController extends Controller
                     $totalAmount += $subtotal;
                 }
 
-                $salesReturn->update(['total_amount' => $totalAmount]);
+                $salesReturn->update(['total_amount' => round($totalAmount, 2)]);
 
                 return $salesReturn->load('items.product', 'items.variant');
             });
@@ -130,7 +139,7 @@ class SalesReturnController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error al crear la devolución.',
-                'error'   => $e->getMessage(),
+                'error'   => $e->getMessage() . ' en la línea ' . $e->getLine() . ' de ' . basename($e->getFile()),
             ], 500);
         }
     }
@@ -147,6 +156,16 @@ class SalesReturnController extends Controller
             return response()->json([
                 'message' => 'Esta devolución ya fue procesada.',
             ], 422);
+        }
+
+        // Require an open POS Session to approve a return if money is returned directly
+        if (in_array($return->refund_method, ['cash', 'card', 'transfer'])) {
+            $session = \App\Models\PosSession::where('user_id', auth()->id())->where('status', 'open')->first();
+            if (!$session) {
+                return response()->json([
+                    'message' => 'Debe tener una sesión de caja abierta para aprobar un reembolso directo.',
+                ], 403);
+            }
         }
 
         try {

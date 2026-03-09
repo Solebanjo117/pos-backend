@@ -34,19 +34,19 @@ class PosSessionController extends Controller
         $summary = null;
 
         if ($session) {
-            // Get all completed/confirmed/processing order IDs for this session
-            $orderIds = \App\Models\SalesOrder::where('pos_session_id', $session->id)
-                ->whereIn('status', ['completed', 'confirmed', 'processing'])
-                ->pluck('id');
+            // Sum payments by method from the payments created during this session
+            $paymentsQuery = \App\Models\SalesOrderPayment::where('created_by', $session->user_id)
+                ->where('paid_at', '>=', $session->opened_at);
+            
+            if ($session->closed_at) {
+                $paymentsQuery->where('paid_at', '<=', $session->closed_at);
+            }
 
-            // Sum payments by method from the payments table
-            // Note: payment methods are stored with granular names (visa, mastercard, yappy, transferencia, clave, etc.)
-            // so we group them: 'cash' = cash, everything else = electronic
-            $cashSales       = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
-            $electronicSales = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', '!=', 'cash')->sum('amount');
+            $cashSales       = (float) (clone $paymentsQuery)->where('method', 'cash')->sum('amount');
+            $electronicSales = (float) (clone $paymentsQuery)->where('method', '!=', 'cash')->sum('amount');
 
             // Breakdown by specific electronic methods for detailed reporting
-            $allElectronic = \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)
+            $allElectronic = (clone $paymentsQuery)
                 ->where('method', '!=', 'cash')
                 ->selectRaw('method, SUM(amount) as total')
                 ->groupBy('method')
@@ -155,18 +155,26 @@ class PosSessionController extends Controller
             ], 404);
         }
 
-        // ── Calculate breakdown by payment method using actual payments ──
+        // ── Calculate breakdown by payment method using actual payments in session's timeframe ──
+        $paymentsQuery = \App\Models\SalesOrderPayment::where('created_by', $session->user_id)
+            ->where('paid_at', '>=', $session->opened_at);
+            
+        // Use now() as upper bound since we are closing it exactly now
+        $closeTime = now();
+        $paymentsQuery->where('paid_at', '<=', $closeTime);
+
+        $cashSales       = (float) (clone $paymentsQuery)->where('method', 'cash')->sum('amount');
+        $electronicSales = (float) (clone $paymentsQuery)->where('method', '!=', 'cash')->sum('amount');
+        $totalSales      = $cashSales + $electronicSales;
+        
+        // Note: Shipping revenue might still be order-based. We'll stick to orderIds for shipping.
         $orderIds = \App\Models\SalesOrder::where('pos_session_id', $session->id)
             ->whereIn('status', ['completed', 'confirmed', 'processing'])
             ->pluck('id');
-
-        $cashSales       = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
-        $electronicSales = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', '!=', 'cash')->sum('amount');
-        $totalSales      = $cashSales + $electronicSales;
         $shippingRevenue = (float) \App\Models\SalesOrder::whereIn('id', $orderIds)->sum('shipping_cost');
 
         // Detailed breakdown by specific method
-        $allElectronic = \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)
+        $allElectronic = (clone $paymentsQuery)
             ->where('method', '!=', 'cash')
             ->selectRaw('method, SUM(amount) as total')
             ->groupBy('method')
@@ -261,17 +269,20 @@ class PosSessionController extends Controller
 
         $closingDetails = $posSession->closing_details ?? [];
 
-        // ── Always compute fresh payment totals to use as fallback ──
-        $orderIds = \App\Models\SalesOrder::where('pos_session_id', $posSession->id)
-            ->whereIn('status', ['completed', 'confirmed', 'processing'])
-            ->pluck('id');
+        // ── Always compute fresh payment totals using session time window ──
+        $paymentsQuery = SalesOrderPayment::where('created_by', $posSession->user_id)
+            ->where('paid_at', '>=', $posSession->opened_at);
+            
+        if ($posSession->closed_at) {
+            $paymentsQuery->where('paid_at', '<=', $posSession->closed_at);
+        }
 
-        $cashSales       = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
-        $electronicSales = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', '!=', 'cash')->sum('amount');
+        $cashSales       = (float) (clone $paymentsQuery)->where('method', 'cash')->sum('amount');
+        $electronicSales = (float) (clone $paymentsQuery)->where('method', '!=', 'cash')->sum('amount');
         $totalSales      = $cashSales + $electronicSales;
 
         // Detailed electronic breakdown by specific method
-        $allElectronic = SalesOrderPayment::whereIn('sales_order_id', $orderIds)
+        $allElectronic = (clone $paymentsQuery)
             ->where('method', '!=', 'cash')
             ->selectRaw('method, SUM(amount) as total')
             ->groupBy('method')

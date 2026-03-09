@@ -33,7 +33,7 @@ class StoreProductRequest extends FormRequest
 
             // Default Variant
             'sku' => 'nullable|string|max:50|unique:product_variants,sku',
-            'upc' => 'nullable|string|max:20|unique:product_variants,upc',
+            'upc' => 'nullable|string|max:255|unique:product_variants,upc',
             'brand_id' => 'required|exists:brands,id',
             
             // Pricing

@@ -29,7 +29,7 @@ class UpdateProductRequest extends FormRequest
                 'max:50',
                 Rule::unique('products', 'sku_base')->ignore($productId)
             ],
-            'upc' => 'nullable|string|max:20',
+            'upc' => 'nullable|string|max:255',
             'product_line_id' => 'nullable|exists:product_lines,id',
             'category_id' => 'nullable|exists:categories,id',
             'name' => 'sometimes|string|max:255',

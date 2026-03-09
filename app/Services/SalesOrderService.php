@@ -244,11 +244,14 @@ class SalesOrderService
      */
     public function addItem(int $orderId, array $itemData): SalesOrderItem
     {
-        $order = $this->getById($orderId);
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($orderId, $itemData) {
+            $order = $this->getById($orderId);
 
-        if (!$order->canBeEdited()) {
-            throw new \Exception('No se pueden agregar items a una orden en estado ' . $order->status);
-        }
+            $isConfirmed = in_array($order->status, ['confirmed', 'processing', 'completed']);
+
+            if (!$order->canBeEdited() && !$isConfirmed) {
+                throw new \Exception('No se pueden agregar items a una orden en estado ' . $order->status);
+            }
 
         // Resolve unit cost from preferred supplier
         $unitCost = 0;
@@ -275,7 +278,80 @@ class SalesOrderService
             'tax_percent' => $itemData['tax_percent'] ?? 0,
         ]);
 
+        if ($isConfirmed) {
+            $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
+            $query = \App\Models\ProductInventory::where('warehouse_id', $item->warehouse_id);
+            if ($item->variant_id) {
+                $query->where('variant_id', $item->variant_id);
+            } else {
+                $query->where('product_id', $item->product_id);
+            }
+            $inventory = $query->first();
+
+            if (!$allowNegative && (!$inventory || $inventory->quantity_available < $item->quantity)) {
+                throw new \Exception("Stock insuficiente para agregar " . ($item->product->name ?? 'producto') . " a esta orden.");
+            }
+
+            // Create inventory movement
+            \App\Models\InventoryMovement::create([
+                'product_id' => $item->product_id,
+                'variant_id' => $item->variant_id,
+                'warehouse_id' => $item->warehouse_id,
+                'movement_type' => 'out',
+                'quantity' => $item->quantity,
+                'reference_type' => 'sale',
+                'reference_id' => $order->id,
+                'notes' => "Agregado post-venta a Orden {$order->order_number}",
+                'user_id' => auth()->id(),
+                'date' => now(),
+            ]);
+
+            if ($inventory) {
+                $inventory->quantity_available -= $item->quantity;
+                $inventory->save();
+            }
+            
+            // Re-evaluate payment status immediately
+            // Subtotals are updated via SalesOrderItem's saved event. We need to wait for that or just re-evaluate manually.
+            // When we refresh the order, the total will be updated.
+            $order->refresh();
+            $paid = $order->amount_paid;
+            if ($paid < $order->total && $paid > 0) {
+                $order->payment_status = 'partial';
+            } elseif ($paid <= 0) {
+                $order->payment_status = 'pending';
+            }
+            $order->save();
+            
+            // Adjust customer balance if this is a credit-like system where the balance was already locked
+            // Actually, adding items to a confirmed order means the order is worth more, 
+            // so if there's a customer, we should charge them the difference!
+            $diffAmount = $item->total; // total for this item
+            if ($order->customer_id) {
+                $customer = \App\Models\Customer::find($order->customer_id);
+                if ($customer) {
+                    $balanceBefore = (float) $customer->current_balance;
+                    $customer->current_balance = $balanceBefore + $diffAmount;
+                    $customer->save();
+
+                    \App\Models\CustomerTransaction::create([
+                        'customer_id'      => $customer->id,
+                        'type'             => 'sale',
+                        'reference_type'   => 'sales_order',
+                        'reference_id'     => $order->id,
+                        'amount'           => $diffAmount,
+                        'balance_before'   => $balanceBefore,
+                        'balance_after'    => $customer->current_balance,
+                        'description'      => "Cargo por producto agregado a venta {$order->order_number}",
+                        'transaction_date' => now(),
+                        'created_by'       => auth()->id(),
+                    ]);
+                }
+            }
+        }
+
         return $item;
+        });
     }
 
     /**
