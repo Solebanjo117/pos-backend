@@ -66,6 +66,7 @@ class VehicleModelController extends Controller
             'name' => 'required|string|max:100',
             'year_from' => 'required|integer|min:1900|max:' . (date('Y') + 2),
             'year_to' => 'required|integer|min:1900|max:' . (date('Y') + 2) . '|gte:year_from',
+            'generation' => 'nullable|string|max:20',
         ]);
 
         $model = VehicleModel::create($validated);
@@ -98,6 +99,7 @@ class VehicleModelController extends Controller
             'name' => 'sometimes|required|string|max:100',
             'year_from' => 'sometimes|required|integer|min:1900|max:' . (date('Y') + 2),
             'year_to' => 'sometimes|required|integer|min:1900|max:' . (date('Y') + 2) . '|gte:year_from',
+            'generation' => 'nullable|string|max:20',
         ]);
 
         $model->update($validated);

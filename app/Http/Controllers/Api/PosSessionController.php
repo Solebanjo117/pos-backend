@@ -39,12 +39,19 @@ class PosSessionController extends Controller
                 ->whereIn('status', ['completed', 'confirmed', 'processing'])
                 ->pluck('id');
 
-            // Sum payments by method from the payments table (handles 'multiple' correctly)
-            $cashSales     = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
-            $cardSales     = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'card')->sum('amount');
-            $transferSales = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'transfer')->sum('amount');
-            $creditSales   = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'credit')->sum('amount');
-            $electronicSales = $cardSales + $transferSales + $creditSales;
+            // Sum payments by method from the payments table
+            // Note: payment methods are stored with granular names (visa, mastercard, yappy, transferencia, clave, etc.)
+            // so we group them: 'cash' = cash, everything else = electronic
+            $cashSales       = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
+            $electronicSales = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', '!=', 'cash')->sum('amount');
+
+            // Breakdown by specific electronic methods for detailed reporting
+            $allElectronic = \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)
+                ->where('method', '!=', 'cash')
+                ->selectRaw('method, SUM(amount) as total')
+                ->groupBy('method')
+                ->pluck('total', 'method')
+                ->toArray();
 
             // Cash movements (retiros / ingresos extra)
             $movementsIn  = (float) CashMovement::where('pos_session_id', $session->id)->where('type', 'in')->sum('amount');
@@ -64,11 +71,7 @@ class PosSessionController extends Controller
                 'total_billed'         => $cashSales + $electronicSales,
                 'cash_movements_in'    => $movementsIn,
                 'cash_movements_out'   => $movementsOut,
-                'electronic_breakdown' => [
-                    'card'     => $cardSales,
-                    'transfer' => $transferSales,
-                    'credit'   => $creditSales,
-                ],
+                'electronic_breakdown' => $allElectronic,
             ];
         }
 
@@ -157,12 +160,18 @@ class PosSessionController extends Controller
             ->whereIn('status', ['completed', 'confirmed', 'processing'])
             ->pluck('id');
 
-        $cashSales     = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
-        $cardSales     = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'card')->sum('amount');
-        $transferSales = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'transfer')->sum('amount');
-        $creditSales   = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'credit')->sum('amount');
-        $totalSales    = $cashSales + $cardSales + $transferSales + $creditSales;
+        $cashSales       = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
+        $electronicSales = (float) \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', '!=', 'cash')->sum('amount');
+        $totalSales      = $cashSales + $electronicSales;
         $shippingRevenue = (float) \App\Models\SalesOrder::whereIn('id', $orderIds)->sum('shipping_cost');
+
+        // Detailed breakdown by specific method
+        $allElectronic = \App\Models\SalesOrderPayment::whereIn('sales_order_id', $orderIds)
+            ->where('method', '!=', 'cash')
+            ->selectRaw('method, SUM(amount) as total')
+            ->groupBy('method')
+            ->pluck('total', 'method')
+            ->toArray();
 
         // Cash movements (retiros / ingresos extra)
         $movementsIn  = (float) CashMovement::where('pos_session_id', $session->id)->where('type', 'in')->sum('amount');
@@ -175,18 +184,17 @@ class PosSessionController extends Controller
         // Build detailed closing summary
         $closingDetails = $request->input('closing_details', []);
         $closingDetails['summary'] = [
-            'opening_amount'   => (float) $session->opening_amount,
-            'cash_sales'       => (float) $cashSales,
-            'card_sales'       => (float) $cardSales,
-            'transfer_sales'   => (float) $transferSales,
-            'credit_sales'     => (float) $creditSales,
-            'total_sales'      => (float) $totalSales,
-            'shipping_revenue' => (float) $shippingRevenue,
-            'cash_movements_in'  => $movementsIn,
-            'cash_movements_out' => $movementsOut,
-            'expected_cash'    => (float) $expected,
-            'declared_cash'    => $closingAmount,
-            'difference'       => $difference,
+            'opening_amount'       => (float) $session->opening_amount,
+            'cash_sales'           => (float) $cashSales,
+            'electronic_sales'     => (float) $electronicSales,
+            'total_sales'          => (float) $totalSales,
+            'shipping_revenue'     => (float) $shippingRevenue,
+            'cash_movements_in'    => $movementsIn,
+            'cash_movements_out'   => $movementsOut,
+            'expected_cash'        => (float) $expected,
+            'declared_cash'        => $closingAmount,
+            'difference'           => $difference,
+            'electronic_breakdown' => $allElectronic,
         ];
 
         $session->update([
@@ -258,11 +266,17 @@ class PosSessionController extends Controller
             ->whereIn('status', ['completed', 'confirmed', 'processing'])
             ->pluck('id');
 
-        $cashSales     = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
-        $cardSales     = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'card')->sum('amount');
-        $transferSales = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'transfer')->sum('amount');
-        $creditSales   = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'credit')->sum('amount');
-        $totalSales    = $cashSales + $cardSales + $transferSales + $creditSales;
+        $cashSales       = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', 'cash')->sum('amount');
+        $electronicSales = (float) SalesOrderPayment::whereIn('sales_order_id', $orderIds)->where('method', '!=', 'cash')->sum('amount');
+        $totalSales      = $cashSales + $electronicSales;
+
+        // Detailed electronic breakdown by specific method
+        $allElectronic = SalesOrderPayment::whereIn('sales_order_id', $orderIds)
+            ->where('method', '!=', 'cash')
+            ->selectRaw('method, SUM(amount) as total')
+            ->groupBy('method')
+            ->pluck('total', 'method')
+            ->toArray();
 
         $movementsIn  = (float) CashMovement::where('pos_session_id', $posSession->id)->where('type', 'in')->sum('amount');
         $movementsOut = (float) CashMovement::where('pos_session_id', $posSession->id)->where('type', 'out')->sum('amount');
@@ -274,33 +288,23 @@ class PosSessionController extends Controller
         // ── Rebuild summary if missing (sessions closed before the format existed) ──
         if ($posSession->status === 'closed' && empty($closingDetails['summary'])) {
             $closingDetails['summary'] = [
-                'opening_amount'     => $openingAmount,
-                'cash_sales'         => $cashSales,
-                'card_sales'         => $cardSales,
-                'transfer_sales'     => $transferSales,
-                'credit_sales'       => $creditSales,
-                'total_sales'        => $totalSales,
-                'shipping_revenue'   => 0.0,
-                'cash_movements_in'  => $movementsIn,
-                'cash_movements_out' => $movementsOut,
-                'expected_cash'      => $expectedCash,
-                'declared_cash'      => $declaredCash,
-                'difference'         => $difference,
+                'opening_amount'       => $openingAmount,
+                'cash_sales'           => $cashSales,
+                'electronic_sales'     => $electronicSales,
+                'total_sales'          => $totalSales,
+                'shipping_revenue'     => 0.0,
+                'cash_movements_in'    => $movementsIn,
+                'cash_movements_out'   => $movementsOut,
+                'expected_cash'        => $expectedCash,
+                'declared_cash'        => $declaredCash,
+                'difference'           => $difference,
+                'electronic_breakdown' => $allElectronic,
             ];
         }
 
         // ── Rebuild electronic_payments if missing ──
         if ($posSession->status === 'closed' && empty($closingDetails['electronic_payments'])) {
-            $closingDetails['electronic_payments'] = [
-                'visa'           => 0.0,
-                'mastercard'     => 0.0,
-                'amex'           => 0.0,
-                'clave'          => $cardSales,      // generic card → Clave as catch-all
-                'yappy'          => 0.0,
-                'transferencia'  => $transferSales,
-                'notaCredito'    => 0.0,
-                'creditoCliente' => $creditSales,
-            ];
+            $closingDetails['electronic_payments'] = $allElectronic;
         }
 
         $posSession->closing_details = $closingDetails;

@@ -16,6 +16,7 @@ class VehicleModel extends Model
         'name',
         'year_from',
         'year_to',
+        'generation',
     ];
 
     protected $casts = [

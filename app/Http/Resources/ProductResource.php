@@ -21,6 +21,7 @@ class ProductResource extends JsonResource
             'sku_base' => $this->sku_base,
             'name' => $this->name,
             'status' => $this->status,
+            'is_universal' => (bool) $this->is_universal,
             'image_url' => $this->image_url ? url('storage/' . $this->image_url) : null,
             
             'pricing' => $this->when($this->relationLoaded('pricing'), [

@@ -53,6 +53,7 @@ class ProductService
                 'name' => $name,
                 'description' => $data['description'] ?? null,
                 'status' => $data['status'] ?? 'active',
+                'is_universal' => $data['is_universal'] ?? false,
             ]);
 
             // Create default variant with brand
@@ -97,6 +98,15 @@ class ProductService
                 }
             }
 
+            // Assign OEM / Cross References
+            if (!empty($data['oem_references'])) {
+                foreach ($data['oem_references'] as $refCode) {
+                    $product->oemReferences()->firstOrCreate([
+                        'oem_code' => trim($refCode),
+                    ]);
+                }
+            }
+
             // Update name with vehicle info if vehicles/VINs were provided
             if (!empty($data['vehicle_compatibility']) || !empty($data['vins'])) {
                 $this->updateProductNameWithVehicles($product);
@@ -137,12 +147,16 @@ class ProductService
         
         try {
             // Update basic product info (only base product fields)
-            $product->update(array_filter([
-                'name' => $data['name'] ?? $product->name,
-                'description' => $data['description'] ?? $product->description,
-                'status' => $data['status'] ?? $product->status,
-                'product_line_id' => $data['product_line_id'] ?? $product->product_line_id,
-            ]));
+            $updatePayload = [];
+            foreach (['name', 'description', 'status', 'product_line_id', 'is_universal', 'sku_base'] as $field) {
+                if (array_key_exists($field, $data)) {
+                    $updatePayload[$field] = $data[$field];
+                }
+            }
+            
+            if (!empty($updatePayload)) {
+                $product->update($updatePayload);
+            }
 
             // Update default variant if provided
             if (isset($data['default_variant_id'])) {
@@ -413,19 +427,25 @@ class ProductService
             }
         }
 
-        // Find the last product with this prefix
-        $lastProduct = Product::where('sku_base', 'LIKE', $prefix . '-%')
-            ->orderByRaw("CAST(SUBSTR(sku_base, " . (strlen($prefix) + 2) . ") AS INTEGER) DESC")
-            ->first();
+        // Fetch SKUs to find the max number safely in PHP
+    $skus = Product::where('sku_base', 'LIKE', $prefix . '-%')
+        ->pluck('sku_base');
 
-        $nextNumber = 1;
-        if ($lastProduct) {
-            $parts = explode('-', $lastProduct->sku_base);
-            $lastNumber = intval(end($parts));
-            $nextNumber = $lastNumber + 1;
+    $maxNumber = 0;
+    foreach ($skus as $sku) {
+        $parts = explode('-', $sku);
+        $lastPart = end($parts);
+        if (is_numeric($lastPart)) {
+            $num = (int)$lastPart;
+            if ($num > $maxNumber) {
+                $maxNumber = $num;
+            }
         }
+    }
 
-        return $prefix . '-' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+    $nextNumber = $maxNumber + 1;
+
+    return $prefix . '-' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
     /**

@@ -35,11 +35,12 @@ class ProductVariantResource extends JsonResource
                     'msrp' => (float) $this->pricing->msrp,
                     'cost' => (float) $this->pricing->cost,
                     'tax_rate' => (float) $this->pricing->tax_rate,
+                    'tax_type' => $this->pricing->tax_type ?? 'standard',
                     'max_discount_percentage' => (float) $this->pricing->max_discount_percentage,
                 ]
             ),
             
-            'product' => $this->when($this->relationLoaded('product'), [
+            'product' => $this->when($this->relationLoaded('product') && $this->product, fn() => [
                 'id' => $this->product->id,
                 'sku_base' => $this->product->sku_base,
                 'name' => $this->product->name,

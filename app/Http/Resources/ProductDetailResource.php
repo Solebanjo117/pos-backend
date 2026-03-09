@@ -23,7 +23,9 @@ class ProductDetailResource extends JsonResource
             'description' => $this->description,
             'status' => $this->status,
             'batch_tracking' => $this->batch_tracking,
+            'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
+            'product_line_id' => $this->product_line_id,
             'image_url' => $this->image_url ? url('storage/' . $this->image_url) : null,
             
             'pricing' => $this->when($this->relationLoaded('pricing') && $this->pricing, [
@@ -32,6 +34,7 @@ class ProductDetailResource extends JsonResource
                 'cost' => (float) $this->pricing?->cost,
                 'margin_percentage' => (float) $this->pricing?->margin_percentage,
                 'tax_rate' => (float) $this->pricing?->tax_rate,
+                'tax_type' => $this->pricing?->tax_type ?? 'standard',
                 'max_discount_percentage' => (float) $this->pricing?->max_discount_percentage,
             ]),
             

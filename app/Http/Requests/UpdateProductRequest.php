@@ -23,11 +23,11 @@ class UpdateProductRequest extends FormRequest
         $productId = $this->route('product');
 
         return [
-            'sku' => [
+            'sku_base' => [
                 'sometimes',
                 'string',
                 'max:50',
-                Rule::unique('products', 'sku')->ignore($productId)
+                Rule::unique('products', 'sku_base')->ignore($productId)
             ],
             'upc' => 'nullable|string|max:20',
             'product_line_id' => 'nullable|exists:product_lines,id',
@@ -35,6 +35,7 @@ class UpdateProductRequest extends FormRequest
             'name' => 'sometimes|string|max:255',
             'description' => 'nullable|string',
             'status' => 'sometimes|in:active,discontinued,pending',
+            'is_universal' => 'sometimes|boolean',
             'attributes' => 'sometimes|array',
             'attributes.*.name' => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
@@ -56,7 +57,7 @@ class UpdateProductRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'sku.unique' => 'El SKU ya está en uso por otro producto',
+            'sku_base.unique' => 'El SKU ya está en uso por otro producto',
             'status.in' => 'El estado debe ser: active, discontinued o pending',
         ];
     }

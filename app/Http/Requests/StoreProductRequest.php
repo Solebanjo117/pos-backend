@@ -55,10 +55,15 @@ class StoreProductRequest extends FormRequest
             // Vehicle Compatibility
             'vehicle_compatibility' => 'nullable|array',
             'vehicle_compatibility.*' => 'integer|exists:vehicle_engines,id',
+            'is_universal' => 'nullable|boolean',
 
             // VINs
             'vins' => 'nullable|array',
             'vins.*' => 'string|min:1|max:40',
+
+            // OEM / Cross References
+            'oem_references' => 'nullable|array',
+            'oem_references.*' => 'string|min:1|max:100',
         ];
     }
 
@@ -68,11 +73,26 @@ class StoreProductRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'brand_id.required' => 'La marca es obligatoria',
+            'brand_id.exists' => 'La marca seleccionada no existe',
             'sku.unique' => 'El SKU de la variante ya está registrado',
             'sku_base.unique' => 'El SKU base del producto ya existe',
-            'upc.unique' => 'El código UPC ya está registrado',
-            'pricing.msrp.gte' => 'El MSRP debe ser mayor o igual al precio base',
-            'brand_id.exists' => 'La marca seleccionada no existe',
+            'upc.unique' => 'El Custom SKU ya está registrado',
+            'pricing.required' => 'La información de precios es obligatoria',
+            'pricing.base_price.required' => 'El precio base es obligatorio',
+            'pricing.base_price.min' => 'El precio base debe ser mayor o igual a 0',
+            'pricing.tax_rate.required' => 'La tasa de impuesto es obligatoria',
+            'pricing.tax_rate.between' => 'La tasa de impuesto debe estar entre 0 y 15%',
+            'category_id.exists' => 'La categoría seleccionada no existe',
+            'status.in' => 'El estado debe ser: activo, discontinuado o pendiente',
+            'initial_inventory.*.warehouse_id.required' => 'El almacén es obligatorio',
+            'initial_inventory.*.warehouse_id.exists' => 'El almacén seleccionado no existe',
+            'initial_inventory.*.stock_available.required' => 'El stock disponible es obligatorio',
+            'initial_inventory.*.stock_available.min' => 'El stock debe ser mayor o igual a 0',
+            'vins.*.min' => 'El VIN debe tener al menos 1 carácter',
+            'vins.*.max' => 'El VIN no puede tener más de 40 caracteres',
+            'oem_references.*.min' => 'La referencia debe tener al menos 1 carácter',
+            'oem_references.*.max' => 'La referencia no puede exceder 100 caracteres',
         ];
     }
 }

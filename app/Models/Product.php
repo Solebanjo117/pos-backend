@@ -23,12 +23,14 @@ class Product extends Model
         'image_url',
         'status',
         'batch_tracking',
+        'is_universal',
     ];
 
     protected $casts = [
         'product_line_id' => 'integer',
         'status' => 'string',
         'batch_tracking' => 'boolean',
+        'is_universal' => 'boolean',
     ];
 
     /**
@@ -196,24 +198,58 @@ class Product extends Model
         $words = array_filter(preg_split('/\s+/', $term));
 
         return $query->where(function ($q) use ($term, $words) {
-            // --- Fuzzy multi-word matching ---
+            // --- Priority-based matching ---
+            // 1. Exact SKU match (highest priority)
+            // 2. Prefix match for short words (≤3 chars) to avoid false positives (e.g. "CS" matching "Tucson")
+            // 3. Substring match for longer words
             $q->where(function ($fuzzy) use ($words) {
                 foreach ($words as $word) {
-                    $w = '%' . $word . '%';
-                    $fuzzy->where(function ($inner) use ($w) {
-                        $inner->where('name', 'ilike', $w)
-                              ->orWhere('sku_base', 'ilike', $w)
-                              ->orWhereHas('variants', function ($vq) use ($w) {
-                                  $vq->where('sku', 'ilike', $w)
-                                     ->orWhere('upc', 'ilike', $w);
-                              })
-                              ->orWhereHas('oemReferences', function ($oq) use ($w) {
-                                  $oq->where('oem_code', 'ilike', $w);
-                              })
-                              ->orWhereHas('attributes', function ($aq) use ($w) {
-                                  $aq->where('value', 'ilike', $w);
-                              });
-                    });
+                    // Short words (≤3 chars): use word-boundary matching (prefix/exact)
+                    // Long words (>3 chars): use substring matching
+                    if (mb_strlen($word) <= 3) {
+                        $prefix = $word . '%';
+                        $wordBoundary = '% ' . $word . '%';
+                        $fuzzy->where(function ($inner) use ($word, $prefix, $wordBoundary) {
+                            $inner->where('name', 'ilike', $prefix)
+                                  ->orWhere('name', 'ilike', $wordBoundary)
+                                  ->orWhere('sku_base', 'ilike', $prefix)
+                                  ->orWhere('sku_base', 'ilike', $wordBoundary)
+                                  ->orWhereHas('variants', function ($vq) use ($word, $prefix, $wordBoundary) {
+                                      $vq->where('sku', 'ilike', $prefix)
+                                         ->orWhere('sku', 'ilike', $wordBoundary)
+                                         ->orWhere('upc', 'ilike', $prefix)
+                                         ->orWhere('upc', 'ilike', $wordBoundary)
+                                         ->orWhere('sku', $word)
+                                         ->orWhere('upc', $word);
+                                  })
+                                  ->orWhereHas('oemReferences', function ($oq) use ($word, $prefix, $wordBoundary) {
+                                      $oq->where('oem_code', $word)
+                                         ->orWhere('oem_code', 'ilike', $prefix)
+                                         ->orWhere('oem_code', 'ilike', $wordBoundary);
+                                  })
+                                  ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary) {
+                                      $aq->where('value', $word)
+                                         ->orWhere('value', 'ilike', $prefix)
+                                         ->orWhere('value', 'ilike', $wordBoundary);
+                                  });
+                        });
+                    } else {
+                        $w = '%' . $word . '%';
+                        $fuzzy->where(function ($inner) use ($w) {
+                            $inner->where('name', 'ilike', $w)
+                                  ->orWhere('sku_base', 'ilike', $w)
+                                  ->orWhereHas('variants', function ($vq) use ($w) {
+                                      $vq->where('sku', 'ilike', $w)
+                                         ->orWhere('upc', 'ilike', $w);
+                                  })
+                                  ->orWhereHas('oemReferences', function ($oq) use ($w) {
+                                      $oq->where('oem_code', 'ilike', $w);
+                                  })
+                                  ->orWhereHas('attributes', function ($aq) use ($w) {
+                                      $aq->where('value', 'ilike', $w);
+                                  });
+                        });
+                    }
                 }
             });
 
