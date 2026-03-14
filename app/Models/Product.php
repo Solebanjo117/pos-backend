@@ -204,10 +204,30 @@ class Product extends Model
             // For normal searches, EVERY word must match EITHER product info OR vehicle info
             $q->where(function ($main) use ($words) {
                 foreach ($words as $word) {
-                    $main->where(function ($wordMatchQuery) use ($word) {
+                    $attrName = null;
+                    $attrValue = null;
+                    $attrNumeric = null;
+                    $attrUnit = null;
+
+                    if (preg_match('/^([^:=]{1,80})\s*[:=]\s*(.{1,200})$/u', $word, $m)) {
+                        $attrName = trim($m[1]);
+                        $attrValue = trim($m[2]);
+                        if (preg_match('/^(\d+(?:[.,]\d+)?)([a-zA-Z%]+)$/', $attrValue, $nv)) {
+                            $attrNumeric = str_replace(',', '.', $nv[1]);
+                            $attrUnit = strtolower($nv[2]);
+                        } elseif (preg_match('/^(\d+(?:[.,]\d+)?)\s*([a-zA-Z%]+)$/', $attrValue, $nv2)) {
+                            $attrNumeric = str_replace(',', '.', $nv2[1]);
+                            $attrUnit = strtolower($nv2[2]);
+                        }
+                    } elseif (preg_match('/^(\d+(?:[.,]\d+)?)([a-zA-Z%]+)$/', $word, $nu)) {
+                        $attrNumeric = str_replace(',', '.', $nu[1]);
+                        $attrUnit = strtolower($nu[2]);
+                    }
+
+                    $main->where(function ($wordMatchQuery) use ($word, $attrName, $attrValue, $attrNumeric, $attrUnit) {
                         
                         // 1. Matches Product Info
-                        $wordMatchQuery->where(function ($productInfo) use ($word) {
+                        $wordMatchQuery->where(function ($productInfo) use ($word, $attrName, $attrValue, $attrNumeric, $attrUnit) {
                             if (mb_strlen($word) <= 3) {
                                 $prefix = $word . '%';
                                 $wordBoundary = '% ' . $word . '%';
@@ -231,7 +251,11 @@ class Product extends Model
                                       ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary) {
                                           $aq->where('value', $word)
                                              ->orWhere('value', 'ilike', $prefix)
-                                             ->orWhere('value', 'ilike', $wordBoundary);
+                                             ->orWhere('value', 'ilike', $wordBoundary)
+                                             ->orWhere('name', 'ilike', $prefix)
+                                             ->orWhere('name', 'ilike', $wordBoundary)
+                                             ->orWhere('unit', 'ilike', $prefix)
+                                             ->orWhere('unit', 'ilike', $wordBoundary);
                                       });
                             } else {
                                 $w = '%' . $word . '%';
@@ -245,8 +269,55 @@ class Product extends Model
                                           $oq->where('oem_code', 'ilike', $w);
                                       })
                                       ->orWhereHas('attributes', function ($aq) use ($w) {
-                                          $aq->where('value', 'ilike', $w);
+                                          $aq->where('value', 'ilike', $w)
+                                             ->orWhere('name', 'ilike', $w)
+                                             ->orWhere('unit', 'ilike', $w);
                                       });
+                            }
+
+                            if ($attrName && $attrValue) {
+                                $nameLike = '%' . $attrName . '%';
+                                $valueLike = '%' . $attrValue . '%';
+                                $productInfo->orWhereHas('attributes', function ($aq) use ($nameLike, $valueLike, $attrNumeric, $attrUnit) {
+                                    $aq->where('name', 'ilike', $nameLike)
+                                       ->where(function ($v) use ($valueLike, $attrNumeric, $attrUnit) {
+                                           $v->where('value', 'ilike', $valueLike);
+                                           if ($attrNumeric && $attrUnit) {
+                                               $numLike = '%' . $attrNumeric . '%';
+                                               $numUnitLike = '%' . $attrNumeric . $attrUnit . '%';
+                                               $numSpaceUnitLike = '%' . $attrNumeric . ' ' . $attrUnit . '%';
+                                               $v->orWhere('value', 'ilike', $numUnitLike)
+                                                 ->orWhere('value', 'ilike', $numSpaceUnitLike)
+                                                 ->orWhere('value', 'ilike', $numLike);
+                                           }
+                                       });
+
+                                    if ($attrUnit) {
+                                        $unitLike = '%' . $attrUnit . '%';
+                                        $aq->where(function ($u) use ($unitLike) {
+                                            $u->where('unit', 'ilike', $unitLike)
+                                              ->orWhere('value', 'ilike', $unitLike);
+                                        });
+                                    }
+                                });
+                            }
+
+                            if ($attrNumeric && $attrUnit) {
+                                $numLike = '%' . $attrNumeric . '%';
+                                $numUnitLike = '%' . $attrNumeric . $attrUnit . '%';
+                                $numSpaceUnitLike = '%' . $attrNumeric . ' ' . $attrUnit . '%';
+                                $unitLike = '%' . $attrUnit . '%';
+
+                                $productInfo->orWhereHas('attributes', function ($aq) use ($numLike, $numUnitLike, $numSpaceUnitLike, $unitLike) {
+                                    $aq->where(function ($v) use ($numLike, $numUnitLike, $numSpaceUnitLike) {
+                                        $v->where('value', 'ilike', $numUnitLike)
+                                          ->orWhere('value', 'ilike', $numSpaceUnitLike)
+                                          ->orWhere('value', 'ilike', $numLike);
+                                    })->where(function ($u) use ($unitLike) {
+                                        $u->where('unit', 'ilike', $unitLike)
+                                          ->orWhere('value', 'ilike', $unitLike);
+                                    });
+                                });
                             }
                         });
 
