@@ -202,6 +202,36 @@ class PurchaseOrderController extends Controller
     }
 
     /**
+     * POST /api/v1/purchase-orders/quick-receive
+     * Fast-track for POS Backorders: Create, Send, and Receive instantly.
+     */
+    public function quickReceive(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'supplier_id' => 'required|exists:suppliers,id',
+            'warehouse_id' => 'required|exists:warehouses,id',
+            'items' => 'required|array|min:1',
+            'items.*.variant_id' => 'required|exists:product_variants,id',
+            'items.*.quantity_ordered' => 'required|integer|min:1',
+            'items.*.unit_cost' => 'required|numeric|min:0',
+            'items.*.notes' => 'nullable|string',
+        ]);
+
+        try {
+            $order = $this->purchaseOrderService->quickReceive($validated);
+
+            return response()->json([
+                'message' => 'Backorder (Orden rápida) abastecido exitosamente',
+                'data' => $order,
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
      * GET /api/v1/purchase-orders/statistics
      * Get purchase order statistics
      */

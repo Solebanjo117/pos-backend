@@ -17,6 +17,7 @@ Route::prefix('purchase-orders')->group(function () {
     // CRUD
     Route::get('/', [PurchaseOrderController::class, 'index']);
     Route::post('/', [PurchaseOrderController::class, 'store']);
+    Route::post('/quick-receive', [PurchaseOrderController::class, 'quickReceive']);
     Route::get('/{id}', [PurchaseOrderController::class, 'show']);
     Route::put('/{id}', [PurchaseOrderController::class, 'update']);
     Route::delete('/{id}', [PurchaseOrderController::class, 'destroy']);

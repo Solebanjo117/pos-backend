@@ -7,6 +7,7 @@ use App\Models\PurchaseOrderItem;
 use App\Models\ProductInventory;
 use App\Models\InventoryMovement;
 use App\Models\ProductBatch;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Pagination\LengthAwarePaginator;
 
@@ -84,7 +85,7 @@ class PurchaseOrderService
             $po = PurchaseOrder::create([
                 'supplier_id' => $data['supplier_id'],
                 'warehouse_id' => $data['warehouse_id'],
-                'user_id' => auth()->id(),
+                'user_id' => Auth::id(),
                 'status' => 'draft',
                 'order_date' => $data['order_date'] ?? now()->toDateString(),
                 'expected_date' => $data['expected_date'] ?? null,
@@ -238,7 +239,7 @@ class PurchaseOrderService
                     'reference_type' => 'purchase_order',
                     'reference_id' => $po->id,
                     'notes' => "Recepción PO {$po->po_number}",
-                    'user_id' => auth()->id(),
+                    'user_id' => Auth::id(),
                     'date' => now(),
                 ];
 
@@ -314,6 +315,41 @@ class PurchaseOrderService
     }
 
     /**
+     * Fast-track method for POS: Create, Send, and Receive a Purchase Order instantly.
+     * $data requires: supplier_id, warehouse_id, items array (with quantities, costs).
+     */
+    public function quickReceive(array $data): PurchaseOrder
+    {
+        return DB::transaction(function () use ($data) {
+            // 1. Create the PO
+            $po = $this->create([
+                'supplier_id' => $data['supplier_id'],
+                'warehouse_id' => $data['warehouse_id'],
+                'order_date' => now()->toDateString(),
+                'expected_date' => now()->toDateString(),
+                'items' => $data['items'],
+                'notes' => 'Generado por Backorder rápido desde POS',
+            ]);
+
+            // 2. Mark as sent
+            $poSent = $this->send($po->id);
+
+            // 3. Receive the items immediately
+            $receivePayload = [];
+            foreach ($poSent->items as $item) {
+                // If the user specified an expiry date/batch, we would map it here.
+                // For a quick backorder we only need to receive all that was ordered.
+                $receivePayload[] = [
+                    'item_id' => $item->id,
+                    'quantity_received' => $item->quantity_ordered,
+                ];
+            }
+
+            return $this->receiveItems($poSent->id, $receivePayload);
+        });
+    }
+
+    /**
      * Cancel PO and revert inventory if needed
      */
     public function cancel(int $id): PurchaseOrder
@@ -341,7 +377,7 @@ class PurchaseOrderService
                             'reference_type' => 'purchase_order_cancelled',
                             'reference_id' => $po->id,
                             'notes' => "Cancelación PO {$po->po_number}",
-                            'user_id' => auth()->id(),
+                            'user_id' => Auth::id(),
                             'date' => now(),
                         ];
 

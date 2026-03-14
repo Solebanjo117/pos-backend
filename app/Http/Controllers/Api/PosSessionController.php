@@ -7,6 +7,7 @@ use App\Models\CashMovement;
 use App\Models\PosSession;
 use App\Models\SalesOrderPayment;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
 class PosSessionController extends Controller
@@ -16,7 +17,7 @@ class PosSessionController extends Controller
      */
     public function current(Request $request)
     {
-        $userId      = $request->input('user_id') ?? auth()->id();
+        $userId      = $request->input('user_id') ?? Auth::id();
         $warehouseId = $request->input('warehouse_id'); // optional: scope to warehouse
 
         if (!$userId) {
@@ -92,7 +93,7 @@ class PosSessionController extends Controller
      */
     public function open(Request $request)
     {
-        $userId = $request->input('user_id') ?? auth()->id();
+        $userId = $request->input('user_id') ?? Auth::id();
 
         if (!$userId) {
             return response()->json(['message' => 'No autorizado. Se requiere user_id en la petición.'], 401);
@@ -139,7 +140,7 @@ class PosSessionController extends Controller
      */
     public function close(Request $request)
     {
-        $userId = $request->input('user_id') ?? auth()->id();
+        $userId = $request->input('user_id') ?? Auth::id();
         
         if (!$userId) {
             return response()->json(['message' => 'No autorizado. Se requiere user_id en la petición.'], 401);
