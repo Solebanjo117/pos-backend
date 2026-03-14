@@ -40,14 +40,12 @@ class ProductVariantController extends Controller
             'sku' => [
                 'required', 
                 'string', 
-                'max:255', 
-                Rule::unique('product_variants', 'sku')->whereNull('deleted_at')
+                'max:255'
             ],
             'upc' => [
                 'nullable', 
                 'string', 
-                'max:50', 
-                Rule::unique('product_variants', 'upc')->whereNull('deleted_at')
+                'max:50'
             ],
             'status' => 'nullable|in:active,discontinued,pending',
 
@@ -58,6 +56,7 @@ class ProductVariantController extends Controller
             'pricing.cost' => 'nullable|numeric|min:0',
             'pricing.tax_rate' => 'nullable|numeric|min:0|max:100',
             'pricing.max_discount_percentage' => 'nullable|numeric|min:0|max:100',
+            'pricing.pricing_formula' => 'nullable|string|max:255',
 
             // Initial Inventory (optional)
             'initial_inventory' => 'nullable|array',
@@ -180,14 +179,12 @@ class ProductVariantController extends Controller
             'sku' => [
                 'nullable', 
                 'string', 
-                'max:255', 
-                Rule::unique('product_variants', 'sku')->ignore($variant->id)->whereNull('deleted_at')
+                'max:255'
             ],
             'upc' => [
                 'nullable', 
                 'string', 
-                'max:50', 
-                Rule::unique('product_variants', 'upc')->ignore($variant->id)->whereNull('deleted_at')
+                'max:50'
             ],
             'status' => 'nullable|in:active,discontinued,pending',
 
@@ -198,6 +195,7 @@ class ProductVariantController extends Controller
             'pricing.cost' => 'nullable|numeric|min:0',
             'pricing.tax_rate' => 'nullable|numeric|min:0|max:100',
             'pricing.max_discount_percentage' => 'nullable|numeric|min:0|max:100',
+            'pricing.pricing_formula' => 'nullable|string|max:255',
 
             // Attributes (variant-level specs)
             'attributes' => 'nullable|array',
@@ -251,13 +249,6 @@ class ProductVariantController extends Controller
             return response()->json(['message' => 'Variante no corresponde al producto'], 404);
         }
 
-        if ($variant->is_default) {
-            return response()->json(['message' => 'No se puede eliminar la variante por defecto'], 400);
-        }
-
-        // Check for dependencies like sales history if strict mode (optional)
-        // For now soft delete handles it.
-        
         $variant->delete();
 
         return response()->json([

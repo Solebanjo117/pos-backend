@@ -185,6 +185,121 @@ class SalesQuoteController extends Controller
     }
 
     /**
+     * POST /api/sales-quotes/from-pos
+     * Create a draft quote directly from a POS cart payload.
+     */
+    public function storeFromPos(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'customer_id'              => 'nullable|exists:customers,id',
+            'warehouse_id'             => 'nullable|exists:warehouses,id',
+            'notes'                    => 'nullable|string',
+            'items'                    => 'required|array|min:1',
+            'items.*.product_id'       => 'required|exists:products,id',
+            'items.*.variant_id'       => 'nullable|exists:product_variants,id',
+            'items.*.warehouse_id'     => 'required|exists:warehouses,id',
+            'items.*.quantity'         => 'required|integer|min:1',
+            'items.*.unit_price'       => 'required|numeric|min:0',
+            'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
+            'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+        ]);
+
+        try {
+            $quote = DB::transaction(function () use ($validated, $request) {
+                $quote = SalesQuote::create([
+                    'customer_id'  => $validated['customer_id'] ?? null,
+                    'user_id'      => $request->user()->id,
+                    'warehouse_id' => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
+                    'date'         => now(),
+                    'valid_until'  => null, // No expiry by default (configurable from admin)
+                    'status'       => 'draft',
+                    'notes'        => $validated['notes'] ?? null,
+                ]);
+
+                foreach ($validated['items'] as $itemData) {
+                    $quote->items()->create([
+                        'product_id'       => $itemData['product_id'],
+                        'variant_id'       => $itemData['variant_id'] ?? null,
+                        'warehouse_id'     => $itemData['warehouse_id'],
+                        'quantity'         => $itemData['quantity'],
+                        'unit_price'       => $itemData['unit_price'],
+                        'discount_percent' => $itemData['discount_percent'] ?? 0,
+                        'tax_percent'      => $itemData['tax_percent'] ?? 0,
+                    ]);
+                }
+
+                $quote->calculateTotals();
+
+                return $quote->load(['customer', 'user', 'items.product']);
+            });
+
+            return response()->json([
+                'message' => 'Cotización guardada exitosamente',
+                'data'    => $quote,
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Error al guardar cotización', 'error' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * POST /api/sales-quotes/{id}/send-to-deposit
+     */
+    public function sendToDeposit(int $id): JsonResponse
+    {
+        $quote = SalesQuote::findOrFail($id);
+
+        if (!$quote->sendToDeposit()) {
+            return response()->json([
+                'message' => "No se puede enviar a depósito desde el estado '{$quote->status_label}'.",
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => "Cotización {$quote->quote_number} enviada a Depósito",
+            'data'    => $quote->fresh(),
+        ]);
+    }
+
+    /**
+     * POST /api/sales-quotes/{id}/send-to-cashier
+     */
+    public function sendToCashier(int $id): JsonResponse
+    {
+        $quote = SalesQuote::findOrFail($id);
+
+        if (!$quote->sendToCashier()) {
+            return response()->json([
+                'message' => "No se puede enviar a caja desde el estado '{$quote->status_label}'.",
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => "Cotización {$quote->quote_number} enviada a Caja",
+            'data'    => $quote->fresh(),
+        ]);
+    }
+
+    /**
+     * POST /api/sales-quotes/{id}/mark-collected
+     */
+    public function markCollected(int $id): JsonResponse
+    {
+        $quote = SalesQuote::findOrFail($id);
+
+        if (!$quote->markCollected()) {
+            return response()->json([
+                'message' => "No se puede marcar como cobrada desde el estado '{$quote->status_label}'.",
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => "Cotización {$quote->quote_number} marcada como Cobrada",
+            'data'    => $quote->fresh(),
+        ]);
+    }
+
+    /**
      * DELETE /api/sales-quotes/{id}
      */
     public function destroy(int $id): JsonResponse

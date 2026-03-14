@@ -22,7 +22,35 @@ class ProductPricing extends Model
         'tax_rate',
         'tax_type',
         'max_discount_percentage',
+        'pricing_formula',
     ];
+
+    protected $appends = [
+        'calculated_price',
+    ];
+
+    /**
+     * Calculates the final price by evaluating the formula.
+     * If no formula is present, it returns the base_price.
+     */
+    public function getCalculatedPriceAttribute(): float
+    {
+        if (empty($this->pricing_formula)) {
+            return (float) $this->base_price;
+        }
+
+        try {
+            $service = app(\App\Services\PricingFormulaService::class);
+            $result = $service->preview(
+                $this->pricing_formula, 
+                (float) $this->base_price, 
+                (float) $this->tax_rate
+            );
+            return $result['success'] ? (float) $result['result'] : (float) $this->base_price;
+        } catch (\Exception $e) {
+            return (float) $this->base_price;
+        }
+    }
 
     protected $casts = [
         'product_id' => 'integer',

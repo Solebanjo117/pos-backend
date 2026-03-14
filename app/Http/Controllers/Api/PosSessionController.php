@@ -59,6 +59,11 @@ class PosSessionController extends Controller
 
             $expectedCash = (float) $session->opening_amount + $cashSales + $movementsIn - $movementsOut;
 
+            // Discounts
+            $totalDiscounts = (float) \App\Models\SalesOrder::where('pos_session_id', $session->id)
+                ->whereIn('status', ['completed', 'confirmed', 'processing'])
+                ->sum('discount_amount');
+
             // Update expected_amount (cash only)
             $session->expected_amount = $expectedCash;
             $session->save();
@@ -67,6 +72,7 @@ class PosSessionController extends Controller
                 'opening_amount'       => (float) $session->opening_amount,
                 'cash_sales'           => $cashSales,
                 'electronic_sales'     => $electronicSales,
+                'total_discounts'      => $totalDiscounts,
                 'expected_cash'        => $expectedCash,
                 'total_billed'         => $cashSales + $electronicSales,
                 'cash_movements_in'    => $movementsIn,
@@ -168,10 +174,11 @@ class PosSessionController extends Controller
         $totalSales      = $cashSales + $electronicSales;
         
         // Note: Shipping revenue might still be order-based. We'll stick to orderIds for shipping.
-        $orderIds = \App\Models\SalesOrder::where('pos_session_id', $session->id)
-            ->whereIn('status', ['completed', 'confirmed', 'processing'])
-            ->pluck('id');
-        $shippingRevenue = (float) \App\Models\SalesOrder::whereIn('id', $orderIds)->sum('shipping_cost');
+        $ordersQuery = \App\Models\SalesOrder::where('pos_session_id', $session->id)
+            ->whereIn('status', ['completed', 'confirmed', 'processing']);
+            
+        $shippingRevenue = (float) $ordersQuery->sum('shipping_cost');
+        $totalDiscounts  = (float) $ordersQuery->sum('discount_amount');
 
         // Detailed breakdown by specific method
         $allElectronic = (clone $paymentsQuery)
@@ -196,6 +203,7 @@ class PosSessionController extends Controller
             'cash_sales'           => (float) $cashSales,
             'electronic_sales'     => (float) $electronicSales,
             'total_sales'          => (float) $totalSales,
+            'total_discounts'      => (float) $totalDiscounts,
             'shipping_revenue'     => (float) $shippingRevenue,
             'cash_movements_in'    => $movementsIn,
             'cash_movements_out'   => $movementsOut,
@@ -269,7 +277,7 @@ class PosSessionController extends Controller
 
         $closingDetails = $posSession->closing_details ?? [];
 
-        // ── Always compute fresh payment totals using session time window ──
+        // ── Calculate breakdown by payment method using actual payments in session's timeframe ──
         $paymentsQuery = SalesOrderPayment::where('created_by', $posSession->user_id)
             ->where('paid_at', '>=', $posSession->opened_at);
             
@@ -280,6 +288,13 @@ class PosSessionController extends Controller
         $cashSales       = (float) (clone $paymentsQuery)->where('method', 'cash')->sum('amount');
         $electronicSales = (float) (clone $paymentsQuery)->where('method', '!=', 'cash')->sum('amount');
         $totalSales      = $cashSales + $electronicSales;
+
+        // Disounts and Orders
+        $ordersQuery = \App\Models\SalesOrder::where('pos_session_id', $posSession->id)
+            ->whereIn('status', ['completed', 'confirmed', 'processing']);
+            
+        $totalDiscounts = (float) $ordersQuery->sum('discount_amount');
+        $shippingRevenue = (float) $ordersQuery->sum('shipping_cost');
 
         // Detailed electronic breakdown by specific method
         $allElectronic = (clone $paymentsQuery)
@@ -303,7 +318,8 @@ class PosSessionController extends Controller
                 'cash_sales'           => $cashSales,
                 'electronic_sales'     => $electronicSales,
                 'total_sales'          => $totalSales,
-                'shipping_revenue'     => 0.0,
+                'total_discounts'      => $totalDiscounts,
+                'shipping_revenue'     => $shippingRevenue,
                 'cash_movements_in'    => $movementsIn,
                 'cash_movements_out'   => $movementsOut,
                 'expected_cash'        => $expectedCash,

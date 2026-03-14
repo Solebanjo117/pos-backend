@@ -13,13 +13,14 @@ class SalesQuote extends Model
 {
     use HasFactory, SoftDeletes;
 
-    const STATUSES = ['draft', 'sent', 'accepted', 'rejected', 'expired', 'converted'];
+    const STATUSES = ['draft', 'sent', 'sent_to_deposit', 'sent_to_cashier', 'accepted', 'collected', 'rejected', 'expired', 'converted'];
 
     protected $fillable = [
         'quote_number',
         'customer_id',
         'user_id',
         'warehouse_id',
+        'pos_session_id',
         'date',
         'valid_until',
         'status',
@@ -73,19 +74,22 @@ class SalesQuote extends Model
 
     public function getFormattedTotalAttribute(): string
     {
-        return '$' . number_format($this->total, 2);
+        return '$' . number_format((float) $this->total, 2);
     }
 
     public function getStatusLabelAttribute(): string
     {
         return match ($this->status) {
-            'draft'     => 'Borrador',
-            'sent'      => 'Enviada',
-            'accepted'  => 'Aceptada',
-            'rejected'  => 'Rechazada',
-            'expired'   => 'Expirada',
-            'converted' => 'Convertida a OV',
-            default     => ucfirst($this->status),
+            'draft'            => 'Borrador',
+            'sent'             => 'Enviada',
+            'sent_to_deposit'  => 'En Depósito',
+            'sent_to_cashier'  => 'En Caja',
+            'accepted'         => 'Aceptada',
+            'collected'        => 'Cobrada',
+            'rejected'         => 'Rechazada',
+            'expired'          => 'Expirada',
+            'converted'        => 'Convertida a OV',
+            default            => ucfirst($this->status),
         };
     }
 
@@ -98,7 +102,7 @@ class SalesQuote extends Model
 
     public function scopeActive($query)
     {
-        return $query->whereIn('status', ['draft', 'sent', 'accepted']);
+        return $query->whereIn('status', ['draft', 'sent', 'sent_to_deposit', 'sent_to_cashier', 'accepted']);
     }
 
     public function scopeExpirable($query)
@@ -106,6 +110,39 @@ class SalesQuote extends Model
         return $query->whereIn('status', ['draft', 'sent', 'accepted'])
                      ->whereNotNull('valid_until')
                      ->where('valid_until', '<', now()->toDateString());
+    }
+
+    // ==================== RELATIONS ====================
+
+    public function posSession(): BelongsTo
+    {
+        return $this->belongsTo(PosSession::class);
+    }
+
+    // ==================== STATE TRANSITIONS ====================
+
+    public function sendToDeposit(): bool
+    {
+        if (!in_array($this->status, ['draft', 'sent'])) {
+            return false;
+        }
+        return $this->update(['status' => 'sent_to_deposit']);
+    }
+
+    public function sendToCashier(): bool
+    {
+        if (!in_array($this->status, ['draft', 'sent', 'sent_to_deposit'])) {
+            return false;
+        }
+        return $this->update(['status' => 'sent_to_cashier']);
+    }
+
+    public function markCollected(): bool
+    {
+        if (!in_array($this->status, ['sent_to_cashier', 'accepted'])) {
+            return false;
+        }
+        return $this->update(['status' => 'collected']);
     }
 
     // ==================== BUSINESS METHODS ====================
@@ -141,14 +178,14 @@ class SalesQuote extends Model
 
     public function canBeConverted(): bool
     {
-        return in_array($this->status, ['draft', 'sent', 'accepted'])
+        return in_array($this->status, ['draft', 'sent', 'sent_to_deposit', 'sent_to_cashier', 'accepted'])
             && $this->converted_order_id === null
             && $this->items()->count() > 0;
     }
 
     public function isExpired(): bool
     {
-        return $this->valid_until && $this->valid_until->isPast();
+        return $this->valid_until && \Carbon\Carbon::parse($this->valid_until)->isPast();
     }
 
     // ==================== BOOT ====================

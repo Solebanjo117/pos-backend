@@ -32,11 +32,13 @@ class ProductVariantResource extends JsonResource
                 $this->relationLoaded('pricing') && $this->pricing,
                 fn() => [
                     'base_price' => (float) $this->pricing->base_price,
+                    'calculated_price' => (float) $this->pricing->calculated_price,
                     'msrp' => (float) $this->pricing->msrp,
                     'cost' => (float) $this->pricing->cost,
                     'tax_rate' => (float) $this->pricing->tax_rate,
                     'tax_type' => $this->pricing->tax_type ?? 'standard',
                     'max_discount_percentage' => (float) $this->pricing->max_discount_percentage,
+                    'pricing_formula' => $this->pricing->pricing_formula,
                 ]
             ),
             
@@ -46,6 +48,16 @@ class ProductVariantResource extends JsonResource
                 'name' => $this->product->name,
                 'status' => $this->product->status,
             ]),
+            
+            'attributes' => $this->when(
+                $this->relationLoaded('attributes'),
+                fn() => $this->attributes->map(fn($attr) => [
+                    'id' => $attr->id,
+                    'name' => $attr->name,
+                    'value' => $attr->value,
+                    'unit' => $attr->unit,
+                ])
+            ),
             
             'inventory' => $this->when(
                 $this->relationLoaded('inventory'),

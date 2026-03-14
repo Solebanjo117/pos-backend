@@ -19,6 +19,8 @@ class ProductDetailResource extends JsonResource
         return [
             'id' => $this->id,
             'sku_base' => $this->sku_base,
+            'alternate_code' => $this->alternate_code,
+            'pricing_formula'=> $this->pricing_formula,
             'name' => $this->name,
             'description' => $this->description,
             'status' => $this->status,
@@ -30,6 +32,7 @@ class ProductDetailResource extends JsonResource
             
             'pricing' => $this->when($this->relationLoaded('pricing') && $this->pricing, [
                 'base_price' => (float) $this->pricing?->base_price,
+                'calculated_price' => (float) $this->pricing?->calculated_price,
                 'msrp' => (float) $this->pricing?->msrp,
                 'cost' => (float) $this->pricing?->cost,
                 'margin_percentage' => (float) $this->pricing?->margin_percentage,

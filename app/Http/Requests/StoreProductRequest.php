@@ -21,19 +21,21 @@ class StoreProductRequest extends FormRequest
     {
         return [
             // Base Product
-            'sku_base' => 'nullable|string|max:50|unique:products,sku_base',
-            'name' => 'nullable|string|max:255',
-            'description' => 'nullable|string',
+            'sku_base'       => 'nullable|string|max:50',
+            'alternate_code' => 'nullable|string|max:100',
+            'pricing_formula'=> 'nullable|string|max:255',
+            'name'           => 'nullable|string|max:255',
+            'description'    => 'nullable|string',
             'product_line_id' => 'nullable|exists:product_lines,id',
-            'category_id' => 'nullable|exists:categories,id',
-            'status' => 'in:active,discontinued,pending',
-            'attributes' => 'nullable|array',
-            'attributes.*.name' => 'required_with:attributes|string|max:100',
+            'category_id'    => 'nullable|exists:categories,id',
+            'status'         => 'in:active,discontinued,pending',
+            'attributes'     => 'nullable|array',
+            'attributes.*.name'  => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
 
-            // Default Variant
-            'sku' => 'nullable|string|max:50|unique:product_variants,sku',
-            'upc' => 'nullable|string|max:255|unique:product_variants,upc',
+            // Default Variant — SKU and UPC are no longer unique keys
+            'sku'      => 'nullable|string|max:50',
+            'upc'      => 'nullable|string|max:255',
             'brand_id' => 'required|exists:brands,id',
             
             // Pricing
@@ -74,21 +76,18 @@ class StoreProductRequest extends FormRequest
     {
         return [
             'brand_id.required' => 'La marca es obligatoria',
-            'brand_id.exists' => 'La marca seleccionada no existe',
-            'sku.unique' => 'El SKU de la variante ya está registrado',
-            'sku_base.unique' => 'El SKU base del producto ya existe',
-            'upc.unique' => 'El Custom SKU ya está registrado',
-            'pricing.required' => 'La información de precios es obligatoria',
+            'brand_id.exists'   => 'La marca seleccionada no existe',
+            'pricing.required'  => 'La información de precios es obligatoria',
             'pricing.base_price.required' => 'El precio base es obligatorio',
-            'pricing.base_price.min' => 'El precio base debe ser mayor o igual a 0',
-            'pricing.tax_rate.required' => 'La tasa de impuesto es obligatoria',
-            'pricing.tax_rate.between' => 'La tasa de impuesto debe estar entre 0 y 15%',
-            'category_id.exists' => 'La categoría seleccionada no existe',
-            'status.in' => 'El estado debe ser: activo, discontinuado o pendiente',
-            'initial_inventory.*.warehouse_id.required' => 'El almacén es obligatorio',
-            'initial_inventory.*.warehouse_id.exists' => 'El almacén seleccionado no existe',
+            'pricing.base_price.min'      => 'El precio base debe ser mayor o igual a 0',
+            'pricing.tax_rate.required'   => 'La tasa de impuesto es obligatoria',
+            'pricing.tax_rate.between'    => 'La tasa de impuesto debe estar entre 0 y 15%',
+            'category_id.exists'          => 'La categoría seleccionada no existe',
+            'status.in'                   => 'El estado debe ser: activo, discontinuado o pendiente',
+            'initial_inventory.*.warehouse_id.required'    => 'El almacén es obligatorio',
+            'initial_inventory.*.warehouse_id.exists'      => 'El almacén seleccionado no existe',
             'initial_inventory.*.stock_available.required' => 'El stock disponible es obligatorio',
-            'initial_inventory.*.stock_available.min' => 'El stock debe ser mayor o igual a 0',
+            'initial_inventory.*.stock_available.min'      => 'El stock debe ser mayor o igual a 0',
             'vins.*.min' => 'El VIN debe tener al menos 1 carácter',
             'vins.*.max' => 'El VIN no puede tener más de 40 caracteres',
             'oem_references.*.min' => 'La referencia debe tener al menos 1 carácter',

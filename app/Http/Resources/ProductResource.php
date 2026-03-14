@@ -19,6 +19,8 @@ class ProductResource extends JsonResource
         return [
             'id' => $this->id,
             'sku_base' => $this->sku_base,
+            'alternate_code' => $this->alternate_code,
+            'pricing_formula'=> $this->pricing_formula,
             'name' => $this->name,
             'status' => $this->status,
             'is_universal' => (bool) $this->is_universal,
@@ -26,6 +28,7 @@ class ProductResource extends JsonResource
             
             'pricing' => $this->when($this->relationLoaded('pricing'), [
                 'base_price' => (float) $this->pricing?->base_price,
+                'calculated_price' => (float) $this->pricing?->calculated_price,
                 'msrp' => (float) $this->pricing?->msrp,
             ]),
             
@@ -97,6 +100,26 @@ class ProductResource extends JsonResource
                     ];
                 });
             }),
+            
+            // Key attributes (top 4) for quick display in search results / grids
+            'key_attributes' => (function () {
+                $attrs = collect();
+                if ($this->relationLoaded('attributes')) {
+                    $attrs = $this->attributes->whereNull('variant_id')->take(4);
+                }
+                // Fallback: try first variant's attributes
+                if ($attrs->isEmpty() && $this->relationLoaded('variants')) {
+                    $firstWithAttrs = $this->variants->first(fn($v) => $v->relationLoaded('attributes') && $v->attributes->count() > 0);
+                    if ($firstWithAttrs) {
+                        $attrs = $firstWithAttrs->attributes->take(4);
+                    }
+                }
+                return $attrs->map(fn($a) => [
+                    'name'  => $a->name,
+                    'value' => $a->value,
+                    'unit'  => $a->unit,
+                ])->values();
+            })(),
             
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),

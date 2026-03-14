@@ -33,9 +33,11 @@ class ProductService
         DB::beginTransaction();
         
         try {
-            // Auto-generate SKU if empty (category-only, no brand)
-            $skuBase = $data['sku_base'] ?? null;
-            if (empty($skuBase)) {
+            // sku_base is now optional — only auto-generate if completely absent
+            $skuBase = array_key_exists('sku_base', $data) ? $data['sku_base'] : null;
+            // If sku_base is explicitly provided (even empty string), respect it
+            // If not provided at all, auto-generate from category
+            if (!array_key_exists('sku_base', $data)) {
                 $skuBase = $this->autoGenerateSku($data['category_id'] ?? null);
             }
 
@@ -47,13 +49,15 @@ class ProductService
 
             // Create the base product (without brand)
             $product = Product::create([
-                'sku_base' => $skuBase,
+                'sku_base'       => $skuBase ?: null,
+                'alternate_code' => $data['alternate_code'] ?? null,
+                'pricing_formula'=> $data['pricing_formula'] ?? null,
                 'product_line_id' => $data['product_line_id'] ?? null,
-                'category_id' => $data['category_id'] ?? null,
-                'name' => $name,
-                'description' => $data['description'] ?? null,
-                'status' => $data['status'] ?? 'active',
-                'is_universal' => $data['is_universal'] ?? false,
+                'category_id'    => $data['category_id'] ?? null,
+                'name'           => $name,
+                'description'    => $data['description'] ?? null,
+                'status'         => $data['status'] ?? 'active',
+                'is_universal'   => $data['is_universal'] ?? false,
             ]);
 
             // Create default variant with brand
@@ -148,7 +152,8 @@ class ProductService
         try {
             // Update basic product info (only base product fields)
             $updatePayload = [];
-            foreach (['name', 'description', 'status', 'product_line_id', 'is_universal', 'sku_base'] as $field) {
+            foreach (['name', 'description', 'status', 'product_line_id', 'is_universal',
+                      'sku_base', 'alternate_code', 'pricing_formula'] as $field) {
                 if (array_key_exists($field, $data)) {
                     $updatePayload[$field] = $data[$field];
                 }
@@ -484,35 +489,67 @@ class ProductService
     }
 
     /**
-     * Recalculate the product name including up to 3 compatible vehicles.
+     * Recalculate the product name including compatible vehicles.
      * 
-     * Vehicles are gathered from two sources:
-     * 1. Explicit compatibility (product_vehicle_compatibility table)
-     * 2. VIN-based cross-reference (product_vins → vehicle_vins)
+     * Naming convention depends on the category:
+     * - Engine parts (motor, pistón, biela, cigüeñal, etc.):
+     *   "Category EngineCode - Make Model YY-YY" (engine code first)
+     * - Suspension/general parts:
+     *   "Category Make Model YY-YY" (chassis first, engine irrelevant)
      * 
-     * The result is deduplicated by "Make Model" and capped at 3.
-     * Example: "Amortiguador KYB - Honda Civic, CR-V, Accord y más"
+     * Years use 2-digit format (e.g. 00-08 instead of 2000-2008).
+     * Capped at 3 unique vehicle labels.
      */
     public function updateProductNameWithVehicles(Product $product): Product
     {
-        // 1. Build the base name (Category ONLY — brand/attributes belong to variants)
+        // 1. Build the base name (Category ONLY)
         $baseName = $this->autoGenerateName($product->category_id);
 
-        // 2. Collect unique vehicle labels from BOTH sources
-        $vehicleLabels = collect();
+        // 2. Determine if the category is engine-related
+        $isEnginePart = false;
+        if ($product->category_id) {
+            $category = Category::find($product->category_id);
+            if ($category) {
+                $catName = mb_strtolower($category->name);
+                $engineKeywords = ['motor', 'pistón', 'piston', 'biela', 'cigüeñal', 'cigueñal', 'culata',
+                    'válvula', 'valvula', 'árbol de levas', 'arbol de levas', 'empaque', 'junta de culata',
+                    'bomba de aceite', 'cadena', 'correa', 'timing', 'engine', 'piston ring', 'anillo'];
+                foreach ($engineKeywords as $keyword) {
+                    if (str_contains($catName, $keyword)) {
+                        $isEnginePart = true;
+                        break;
+                    }
+                }
+            }
+        }
 
-        // Source A: Explicit compatibility records
+        // 3. Collect vehicle labels from compatibility records
+        $vehicleLabels = collect();
         $explicitVehicles = ProductVehicleCompatibility::where('product_id', $product->id)
             ->with('engine.model.make')
             ->get();
 
         foreach ($explicitVehicles as $compat) {
-            $model = $compat->engine?->model;
-            $make  = $model?->make;
-            if ($make && $model) {
-                $label = $make->name . ' ' . $model->name;
-                $vehicleLabels->push($label);
+            $engine = $compat->engine;
+            $model  = $engine?->model;
+            $make   = $model?->make;
+
+            if (!$make || !$model) continue;
+
+            $engineCode = $engine->engine_code ?? null;
+            $yearFrom   = $model->year_from ? substr((string) $model->year_from, -2) : null;
+            $yearTo     = $model->year_to   ? substr((string) $model->year_to,   -2) : null;
+            $yearRange  = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
+
+            if ($isEnginePart && $engineCode) {
+                // Engine parts: "EngineCode Make Model YY-YY"
+                $label = "{$engineCode} {$make->name} {$model->name}{$yearRange}";
+            } else {
+                // Chassis/general: "Make Model YY-YY"
+                $label = "{$make->name} {$model->name}{$yearRange}";
             }
+
+            $vehicleLabels->push($label);
         }
 
         // Source B: VIN-based cross-reference
@@ -523,16 +560,28 @@ class ProductService
                 ->get();
 
             foreach ($vehicleVins as $vv) {
-                $model = $vv->engine?->model;
-                $make  = $model?->make;
-                if ($make && $model) {
-                    $label = $make->name . ' ' . $model->name;
-                    $vehicleLabels->push($label);
+                $engine = $vv->engine;
+                $model  = $engine?->model;
+                $make   = $model?->make;
+
+                if (!$make || !$model) continue;
+
+                $engineCode = $engine->engine_code ?? null;
+                $yearFrom   = $model->year_from ? substr((string) $model->year_from, -2) : null;
+                $yearTo     = $model->year_to   ? substr((string) $model->year_to,   -2) : null;
+                $yearRange  = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
+
+                if ($isEnginePart && $engineCode) {
+                    $label = "{$engineCode} {$make->name} {$model->name}{$yearRange}";
+                } else {
+                    $label = "{$make->name} {$model->name}{$yearRange}";
                 }
+
+                $vehicleLabels->push($label);
             }
         }
 
-        // 3. Deduplicate and cap at 3
+        // 4. Deduplicate and cap at 3
         $uniqueVehicles = $vehicleLabels->unique()->values();
 
         if ($uniqueVehicles->isNotEmpty()) {
@@ -541,7 +590,7 @@ class ProductService
             $baseName .= ' - ' . $displayed . $suffix;
         }
 
-        // 4. Save
+        // 5. Save
         $product->update(['name' => $baseName]);
 
         return $product->fresh();

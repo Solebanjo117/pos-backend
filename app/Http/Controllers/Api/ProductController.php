@@ -34,7 +34,7 @@ class ProductController extends Controller
         } elseif ($archived === 'all') {
             $query = Product::withTrashed()->with(['pricing', 'productLine', 'category']);
         } else {
-            $query = Product::query()->with(['pricing', 'productLine', 'category']);
+            $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes']);
         }
 
         // Filters
@@ -64,6 +64,7 @@ class ProductController extends Controller
             },
             'variants.brand',
             'variants.pricing',
+            'variants.attributes',
             'variants.inventory' => function ($q) use ($warehouseId) {
                 if ($warehouseId) {
                     $q->where('warehouse_id', $warehouseId);

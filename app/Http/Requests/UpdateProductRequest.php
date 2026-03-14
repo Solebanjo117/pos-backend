@@ -3,7 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
+
 
 class UpdateProductRequest extends FormRequest
 {
@@ -23,31 +23,28 @@ class UpdateProductRequest extends FormRequest
         $productId = $this->route('product');
 
         return [
-            'sku_base' => [
-                'sometimes',
-                'string',
-                'max:50',
-                Rule::unique('products', 'sku_base')->ignore($productId)
-            ],
-            'upc' => 'nullable|string|max:255',
+            'sku_base'       => 'nullable|string|max:50',
+            'alternate_code' => 'nullable|string|max:100',
+            'pricing_formula'=> 'nullable|string|max:255',
+            'upc'            => 'nullable|string|max:255',
             'product_line_id' => 'nullable|exists:product_lines,id',
-            'category_id' => 'nullable|exists:categories,id',
-            'name' => 'sometimes|string|max:255',
-            'description' => 'nullable|string',
-            'status' => 'sometimes|in:active,discontinued,pending',
-            'is_universal' => 'sometimes|boolean',
-            'attributes' => 'sometimes|array',
-            'attributes.*.name' => 'required_with:attributes|string|max:100',
+            'category_id'    => 'nullable|exists:categories,id',
+            'name'           => 'sometimes|string|max:255',
+            'description'    => 'nullable|string',
+            'status'         => 'sometimes|in:active,discontinued,pending',
+            'is_universal'   => 'sometimes|boolean',
+            'attributes'     => 'sometimes|array',
+            'attributes.*.name'  => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
             
             // Pricing (all optional for update)
-            'pricing' => 'sometimes|array',
-            'pricing.base_price' => 'sometimes|numeric|min:0',
-            'pricing.msrp' => 'nullable|numeric|min:0',
-            'pricing.cost' => 'nullable|numeric|min:0',
-            'pricing.tax_rate' => 'sometimes|numeric|between:0,15',
-            'pricing.tax_type' => 'sometimes|in:standard,exempt,custom',
-            'pricing.max_discount_percentage' => 'nullable|numeric|between:0,100',
+            'pricing'                           => 'sometimes|array',
+            'pricing.base_price'                => 'sometimes|numeric|min:0',
+            'pricing.msrp'                      => 'nullable|numeric|min:0',
+            'pricing.cost'                      => 'nullable|numeric|min:0',
+            'pricing.tax_rate'                  => 'sometimes|numeric|between:0,15',
+            'pricing.tax_type'                  => 'sometimes|in:standard,exempt,custom',
+            'pricing.max_discount_percentage'   => 'nullable|numeric|between:0,100',
         ];
     }
 

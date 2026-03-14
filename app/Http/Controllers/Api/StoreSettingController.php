@@ -4,19 +4,25 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Setting;
+use App\Services\PricingFormulaService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
 class StoreSettingController extends Controller
 {
+    public function __construct(private readonly PricingFormulaService $formulaService) {}
+
     /**
      * GET /api/v1/store-settings
      * Returns all store settings as a flat key→value map.
      */
     public function index(): JsonResponse
     {
-        $settings = Setting::where('group', 'store')->get();
+        $settings = Setting::where('group', 'store')
+            ->orWhere('group', 'pricing')
+            ->orWhere('group', 'quotes')
+            ->get(['*']);
 
         $map = $settings->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]);
 
@@ -33,23 +39,31 @@ class StoreSettingController extends Controller
             'store_name', 'store_tagline', 'store_owner_name',
             'store_phone', 'store_email', 'store_address',
             'store_tax_id', 'store_currency', 'store_ticket_footer',
+            'pricing_formula',
+            'quote_expiration_days',
         ];
 
         foreach ($allowed as $key) {
             if ($request->has($key)) {
-                Setting::set($key, $request->input($key), 'string', 'store');
+                $group = match(true) {
+                    $key === 'pricing_formula' => 'pricing',
+                    str_starts_with($key, 'quote_') => 'quotes',
+                    default => 'store',
+                };
+                $type = in_array($key, ['quote_expiration_days']) ? 'number' : 'string';
+                Setting::set($key, $request->input($key), $type, $group);
             }
         }
 
         return response()->json([
             'message' => 'Configuración guardada correctamente',
-            'data'    => Setting::where('group', 'store')->get()->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]),
+            'data'    => Setting::whereIn('group', ['store', 'pricing', 'quotes'])->get(['*'])->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]),
         ]);
     }
 
     /**
      * POST /api/v1/store-settings/logo
-     * Upload the store logo. Stores in storage/public/store/ and updates the URL setting.
+     * Upload the store logo.
      */
     public function uploadLogo(Request $request): JsonResponse
     {
@@ -72,6 +86,38 @@ class StoreSettingController extends Controller
         return response()->json([
             'message'   => 'Logo actualizado correctamente',
             'logo_url'  => $url,
+        ]);
+    }
+
+    /**
+     * POST /api/v1/pricing-formula/preview
+     * Preview the result of a pricing formula with a given cost.
+     */
+    public function previewFormula(Request $request): JsonResponse
+    {
+        $request->validate([
+            'formula'  => 'required|string|max:255',
+            'cost'     => 'required|numeric|min:0',
+            'tax_rate' => 'nullable|numeric|min:0|max:100',
+        ]);
+
+        $result = $this->formulaService->preview(
+            $request->input('formula'),
+            (float) $request->input('cost'),
+            (float) $request->input('tax_rate', 7.0)
+        );
+
+        return response()->json($result);
+    }
+
+    /**
+     * GET /api/v1/pricing-formula/presets
+     * Returns the list of built-in formula presets.
+     */
+    public function formulaPresets(): JsonResponse
+    {
+        return response()->json([
+            'data' => PricingFormulaService::presets(),
         ]);
     }
 }

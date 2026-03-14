@@ -16,6 +16,8 @@ class Product extends Model
 
     protected $fillable = [
         'sku_base',
+        'alternate_code',
+        'pricing_formula',
         'product_line_id',
         'category_id',
         'name',
@@ -198,58 +200,85 @@ class Product extends Model
         $words = array_filter(preg_split('/\s+/', $term));
 
         return $query->where(function ($q) use ($term, $words) {
-            // --- Priority-based matching ---
-            // 1. Exact SKU match (highest priority)
-            // 2. Prefix match for short words (≤3 chars) to avoid false positives (e.g. "CS" matching "Tucson")
-            // 3. Substring match for longer words
-            $q->where(function ($fuzzy) use ($words) {
+            
+            // For normal searches, EVERY word must match EITHER product info OR vehicle info
+            $q->where(function ($main) use ($words) {
                 foreach ($words as $word) {
-                    // Short words (≤3 chars): use word-boundary matching (prefix/exact)
-                    // Long words (>3 chars): use substring matching
-                    if (mb_strlen($word) <= 3) {
-                        $prefix = $word . '%';
-                        $wordBoundary = '% ' . $word . '%';
-                        $fuzzy->where(function ($inner) use ($word, $prefix, $wordBoundary) {
-                            $inner->where('name', 'ilike', $prefix)
-                                  ->orWhere('name', 'ilike', $wordBoundary)
-                                  ->orWhere('sku_base', 'ilike', $prefix)
-                                  ->orWhere('sku_base', 'ilike', $wordBoundary)
-                                  ->orWhereHas('variants', function ($vq) use ($word, $prefix, $wordBoundary) {
-                                      $vq->where('sku', 'ilike', $prefix)
-                                         ->orWhere('sku', 'ilike', $wordBoundary)
-                                         ->orWhere('upc', 'ilike', $prefix)
-                                         ->orWhere('upc', 'ilike', $wordBoundary)
-                                         ->orWhere('sku', $word)
-                                         ->orWhere('upc', $word);
-                                  })
-                                  ->orWhereHas('oemReferences', function ($oq) use ($word, $prefix, $wordBoundary) {
-                                      $oq->where('oem_code', $word)
-                                         ->orWhere('oem_code', 'ilike', $prefix)
-                                         ->orWhere('oem_code', 'ilike', $wordBoundary);
-                                  })
-                                  ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary) {
-                                      $aq->where('value', $word)
-                                         ->orWhere('value', 'ilike', $prefix)
-                                         ->orWhere('value', 'ilike', $wordBoundary);
-                                  });
+                    $main->where(function ($wordMatchQuery) use ($word) {
+                        
+                        // 1. Matches Product Info
+                        $wordMatchQuery->where(function ($productInfo) use ($word) {
+                            if (mb_strlen($word) <= 3) {
+                                $prefix = $word . '%';
+                                $wordBoundary = '% ' . $word . '%';
+                                $productInfo->where('name', 'ilike', $prefix)
+                                      ->orWhere('name', 'ilike', $wordBoundary)
+                                      ->orWhere('sku_base', 'ilike', $prefix)
+                                      ->orWhere('sku_base', 'ilike', $wordBoundary)
+                                      ->orWhereHas('variants', function ($vq) use ($word, $prefix, $wordBoundary) {
+                                          $vq->where('sku', 'ilike', $prefix)
+                                             ->orWhere('sku', 'ilike', $wordBoundary)
+                                             ->orWhere('upc', 'ilike', $prefix)
+                                             ->orWhere('upc', 'ilike', $wordBoundary)
+                                             ->orWhere('sku', $word)
+                                             ->orWhere('upc', $word);
+                                      })
+                                      ->orWhereHas('oemReferences', function ($oq) use ($word, $prefix, $wordBoundary) {
+                                          $oq->where('oem_code', $word)
+                                             ->orWhere('oem_code', 'ilike', $prefix)
+                                             ->orWhere('oem_code', 'ilike', $wordBoundary);
+                                      })
+                                      ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary) {
+                                          $aq->where('value', $word)
+                                             ->orWhere('value', 'ilike', $prefix)
+                                             ->orWhere('value', 'ilike', $wordBoundary);
+                                      });
+                            } else {
+                                $w = '%' . $word . '%';
+                                $productInfo->where('name', 'ilike', $w)
+                                      ->orWhere('sku_base', 'ilike', $w)
+                                      ->orWhereHas('variants', function ($vq) use ($w) {
+                                          $vq->where('sku', 'ilike', $w)
+                                             ->orWhere('upc', 'ilike', $w);
+                                      })
+                                      ->orWhereHas('oemReferences', function ($oq) use ($w) {
+                                          $oq->where('oem_code', 'ilike', $w);
+                                      })
+                                      ->orWhereHas('attributes', function ($aq) use ($w) {
+                                          $aq->where('value', 'ilike', $w);
+                                      });
+                            }
                         });
-                    } else {
+
+                        // 2. OR Matches Vehicle Info
                         $w = '%' . $word . '%';
-                        $fuzzy->where(function ($inner) use ($w) {
-                            $inner->where('name', 'ilike', $w)
-                                  ->orWhere('sku_base', 'ilike', $w)
-                                  ->orWhereHas('variants', function ($vq) use ($w) {
-                                      $vq->where('sku', 'ilike', $w)
-                                         ->orWhere('upc', 'ilike', $w);
-                                  })
-                                  ->orWhereHas('oemReferences', function ($oq) use ($w) {
-                                      $oq->where('oem_code', 'ilike', $w);
-                                  })
-                                  ->orWhereHas('attributes', function ($aq) use ($w) {
-                                      $aq->where('value', 'ilike', $w);
-                                  });
+                        $wordMatchQuery->orWhereHas('compatibleEngines', function ($eq) use ($w) {
+                            $eq->where('engine_code', 'ilike', $w)
+                               ->orWhereHas('model', function ($mq) use ($w) {
+                                   $mq->where('name', 'ilike', $w)
+                                      ->orWhereHas('make', function ($mkq) use ($w) {
+                                          $mkq->where('name', 'ilike', $w);
+                                      });
+                               });
                         });
-                    }
+
+                        // 3. OR Product is Universal and the word matches SOME vehicle in the database
+                        // This allows universal products to appear when searching for a specific car (e.g. "filtro silverado")
+                        $wordMatchQuery->orWhere(function ($uq) use ($w) {
+                            $uq->where('is_universal', true)
+                               ->where(function ($existsQuery) use ($w) {
+                                $existsQuery->whereExists(function ($q) use ($w) {
+                                        $q->select(\Illuminate\Support\Facades\DB::raw(1))->from('vehicle_makes')->where('name', 'ilike', $w);
+                                    })
+                                    ->orWhereExists(function ($q) use ($w) {
+                                        $q->select(\Illuminate\Support\Facades\DB::raw(1))->from('vehicle_models')->where('name', 'ilike', $w);
+                                    })
+                                    ->orWhereExists(function ($q) use ($w) {
+                                        $q->select(\Illuminate\Support\Facades\DB::raw(1))->from('vehicle_engines')->where('engine_code', 'ilike', $w);
+                                    });
+                            });
+                        });
+                    });
                 }
             });
 
