@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
-Route::prefix('purchase-orders')->group(function () {
+Route::prefix('purchase-orders')->middleware(['role:admin,manager,buyer', 'warehouse_context'])->group(function () {
     // Statistics
     Route::get('/statistics', [PurchaseOrderController::class, 'statistics']);
 

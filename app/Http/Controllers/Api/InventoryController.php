@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreInventoryRequest;
 use App\Models\Inventory;
 use App\Models\InventoryMovement;
 use App\Models\ProductInventory;
@@ -23,7 +24,7 @@ class InventoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Inventory::with(['product.brand', 'warehouse'])
+        $query = Inventory::with(['product.defaultVariant.brand', 'warehouse'])
             ->select('inventory.*');
 
         // Filter by warehouse
@@ -63,7 +64,7 @@ class InventoryController extends Controller
                     'product_id' => $item->product_id,
                     'product_name' => $item->product->name,
                     'product_sku' => $item->product->sku_base,
-                    'brand' => $item->product->brand->name ?? 'N/A',
+                    'brand' => $item->product->defaultVariant?->brand?->name ?? 'N/A',
                     'warehouse_id' => $item->warehouse_id,
                     'warehouse_name' => $item->warehouse->name,
                     'stock_available' => $item->stock_available,
@@ -120,7 +121,7 @@ class InventoryController extends Controller
      * Record a waste/loss adjustment.
      * POST /api/v1/inventory/waste
      */
-    public function storeWaste(Request $request): JsonResponse
+    public function storeWaste(StoreInventoryRequest $request): JsonResponse
     {
         $validated = $request->validate([
             'variant_id'   => 'required|exists:product_variants,id',

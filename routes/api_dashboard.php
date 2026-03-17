@@ -4,7 +4,7 @@ use App\Http\Controllers\Api\DashboardController;
 use Illuminate\Support\Facades\Route;
 
 // Dashboard Routes
-Route::prefix('dashboard')->group(function () {
+Route::prefix('dashboard')->middleware(['role:admin,manager,buyer,seller,cashier,assistant', 'warehouse_context'])->group(function () {
     // Get all dashboard data in one request
     Route::get('/', [DashboardController::class, 'index']);
     

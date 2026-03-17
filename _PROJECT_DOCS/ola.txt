@@ -1,0 +1,468 @@
+0:00Eh, a ver si se llama 1 estado activo. Eh,
+0:088 segundosentonces este pedazo que está acá,
+0:1212 segundosajá, viene con esto porque funciona para estos carros y este carro y agrego.
+0:2424 segundosOkay. Otras referencias cruzadas. Ajá.
+0:2929 segundostécnica especiales técnicas dos
+0:3535 segundosuno y entonces variante y precio no debería ir. Esto debería ir en otro módulo.
+0:4848 segundosOkay.
+0:4949 segundosEntonces acá yo veo que si yo quito esto, esto está como en highlighted,
+0:5757 segundospero no tiene nada.
+1:001 minutoY si yo creo el producto me va a salir error server error, pero es porque dice que tengo que poner un código acá,
+1:111 minuto y 11 segundos¿verdad? Yo creo que sí entraría.
+1:191 minuto y 19 segundosEntonces ese hay que ahora este filtro que está acá. Okay.
+1:281 minuto y 28 segundosSi yo voy a detalles a a lo otro que eh vamos a crear otro
+1:381 minuto y 38 segundosproducto de nuevo, digamos que si yo después de todo al final eh pongo el precio,
+1:461 minuto y 46 segundosentonces este es el precio de venta o este es el precio de el costo. Es el precio, el costo,
+1:541 minuto y 54 segundosel costo del producto. Sí.
+1:571 minuto y 57 segundosOkay. Entonces, si el costo vino un y con el siete vino un S, ese sería el costo.
+2:032 minutos y 3 segundosSería el precio. Okay. Si si yo lo compro a un dó,
+2:122 minutos y 12 segundos¿dónde yo pongo ese dólar? Si yo lo compro a dólar y lo quiero vender a 3,
+2:162 minutos y 16 segundos¿dónde pongo el dólar? ¿Y dónde pongo los 3? A ver, intento.
+2:232 minutos y 23 segundosEntonces, eh uno que es costo eh más ITBM y otro es
+2:312 minutos y 31 segundosque yo pueda poner la fórmula que quiera. Por ejemplo, si quiero que sea el costo
+2:392 minutos y 39 segundoseh por dos eh o que sea
+2:462 minutos y 46 segundosredondearlo siempre costo por dos
+2:532 minutos y 53 segundoso que lo o que siempre se redondee
+3:033 minutos y 3 segundosporque siempre se redondee al cero o que siempre se redondee para arriba.
+3:143 minutos y 14 segundosDigamos que uno, digamos que con 10 centavos, ¿no? Digamos que y 10 centavos, ¿verdad? $1 con 10 que es
+3:243 minutos y 24 segundosround no se va a redondear, se va a redondear a $ pero si pongo round up se va a redondear a $2 no importa lo que
+3:323 minutos y 32 segundossea. Digamos que si es 150 sí se va a redondear a $2 porque el cinco para arriba se redondea, cuatro para abajo no
+3:393 minutos y 39 segundosse redondea, ¿verdad? M o si yo quiero que sea esto y que
+3:473 minutos y 47 segundosy que qué sé yo que termine en decimales 0.88.
+3:543 minutos y 54 segundosEntonces es como un Yo voy a personalizar qué tipo de fórmula le quiero meter. Pues son fórmulas del Excel, ¿verdad?
+4:034 minutos y 3 segundosSí, sí, sí. Es porque eso se me hace mucho más fácil. Okay.
+4:074 minutos y 7 segundosA la hora de de de hacer una lista y automatizar los costos.
+4:134 minutos y 13 segundosEntonces íbamos y vamos y vamos producto entonces acá entonces si yo voy a
+4:224 minutos y 22 segundosmir ver detalles
+4:354 minutos y 35 segundosasí voy a editar datos técnicos.
+4:444 minutos y 44 segundosEs que estos datos técnicos deberían estar acá en la en la información principal. Okay.
+4:504 minutos y 50 segundosDato técnico, información principal básicamente es lo mismo.
+4:554 minutos y 55 segundosEh, foto precios e inventario.
+5:045 minutos y 4 segundosPero este precio inventario debería estar acá en variantes y referencia. Sí, en cada variante.
+5:115 minutos y 11 segundosEsto no debería ir acá. Esto debería ir acá. Entonces, sí, sí.
+5:205 minutos y 20 segundosAh, aló. Ah, oh,
+5:295 minutos y 29 segundosa ver. Ah, estábamos en información principal. Ah, estábamos en datos técnicos y yo decía que datos técnicos esta info debería estar del lado de acá.
+5:435 minutos y 43 segundosEntonces, estos bin, este bin debería estar en esta parte, acá arriba o acá abajo, pues,
+5:535 minutos y 53 segundoso sea, esto debería ser un solo menú y esto este bin debería ser un field dentro de de esto, pues
+6:016 minutos y 1 segundopara no tener tantos tantos menú. Entonces, este que está acá,
+6:106 minutos y 10 segundosprecios inventario, yo digo que debería estar en variantes y referencia porque la idea es que información
+6:176 minutos y 17 segundosprincipal es solamente la página de información.
+6:246 minutos y 24 segundosEntonces, en esta información general debería estar los atributos,
+6:326 minutos y 32 segundospero los atributos están aquí. Y si yo agrego una variante,
+6:406 minutos y 40 segundosmira. Y si yo agrego una variante,
+6:466 minutos y 46 segundoseh este valor es igual, este valor, o sea,
+6:516 minutos y 51 segundoseste valor es este valor. Por eso digo que esto ya es estándar. Esta información,
+6:596 minutos y 59 segundosinformación del producto debería estar en la información general del producto porque todos los variantes van a usar esta página de información.
+7:087 minutos y 8 segundosOkay. Todos eh tienen la misma especificación.
+7:147 minutos y 14 segundosAjá. Los mismos códigos y todo. Pues el código es igual, digamos que fil 01.
+7:227 minutos y 22 segundosEh, esto es como opcional.
+7:247 minutos y 24 segundosEntonces, lo otro que me di cuenta es que el yo creo que ustedeson el el código kit del producto que sea este
+7:337 minutos y 33 segundoscódigo que se porque este código no se puede repetir, ¿verdad? No,
+7:387 minutos y 38 segundospor eso. Entonces, esto no puede ser un un código key, esto debe ser un código normal, puede estar vacío, puede estar
+7:467 minutos y 46 segundosEntonces el código key debería ser uno de sistema random que que o o o ¿cómo es? Eh, CPU que se cree solo.
+7:577 minutos y 57 segundosSí,
+7:587 minutos y 58 segundosese debería ser el key. Esto no debería ser key. Porque para hacer un producto de esto, por ejemplo,
+8:078 minutos y 7 segundospor ejemplo, esto, mira, por ejemplo, este es el código del producto.
+8:128 minutos y 12 segundosSi si yo quito CTR y yo quito trify igual se puede, pues
+8:218 minutos y 21 segundosno me va a salir error porque el que ellos usan es este system ID, ¿ves? Este este es el código key de este producto.
+8:318 minutos y 31 segundosEste código key es random. O o ¿cómo que se llama?
+8:368 minutos y 36 segundosPlus. ¿Cómo que se llama? Plus es el ID. Eh eh incrementando incrementando por uno. Ajá.
+8:458 minutos y 45 segundosEsto, esto, esto lo hace sistema solo.
+8:478 minutos y 47 segundosCada vez que tú pones crear uno y si lo guardas se crea uno, pues.
+8:548 minutos y 54 segundosY digamos que si yo pongo, yo quito el CTR acá y yo quito el FreeF acá, que son los variantes,
+9:059 minutos y 5 segundossi tú ves no me va de error, es el mismo código. ¿Qué era? Gract.
+9:159 minutos y 15 segundosy trfe. Okay,
+9:269 minutos y 26 segundosentonces era eso. Eh,
+9:309 minutos y 30 segundosa ver, ¿qué más? Esto sería código alterno. Esto que está acá sería código alterno. Esto de ser código alterno. Y
+9:379 minutos y 37 segundoseste sería el código base que uno elige cuál quiere ser. Pues okay. Y esto es marca.
+9:449 minutos y 44 segundosEntonces, la idea de la marca, la idea de la marca es hacerlo desde acá, pues entonces vamos a decir este Q, este SQ
+9:539 minutos y 53 segundosiría acá y en vez de guion B sería el código, el código sería acá o el código
+10:0110 minutos y 1 segundosería acá y la marca sería acá. El código siempre va primero. Código,
+10:0610 minutos y 6 segundosmarca, código, marca. Entonces, todos tendrían eh digamos que este va a ser el delco.
+10:1310 minutos y 13 segundosEn teoría debería ser así y en teoría debería ser asá.
+10:1910 minutos y 19 segundosY acá hay otro. Pues en realidad este default no lo necesitamos, ¿okay? porque no tenemos un default,
+10:2910 minutos y 29 segundosporque eh la información principal es una información principal, no está no necesariamente tiene que tener eh
+10:3810 minutos y 38 segundosproductos, pues por ejemplo, digamos que si de repente yo consigo yo estoy buscando un filtro
+10:4810 minutos y 48 segundosaire para un para un qué sé yo, un Tesla,
+10:5410 minutos y 54 segundosy es Este código que está por acá es este CA076,
+11:0111 minutos y 1 segundo¿verdad? Yo lo que yo puedo hacer es crear el producto y ya yo sé que este producto yo lo tengo
+11:0911 minutos y 9 segundosque buscar y cuando me salga cuando yo encuentro un proveedor entonces yo pongo la información de los proveedores.
+11:1711 minutos y 17 segundosOkay. Okay. Pero ya tenemos la la hoja principal con toda la información que yo investigué y aquí sería el código este y
+11:2611 minutos y 26 segundoseste no tendría nada y sería un filtro de aire para un Tesla y yo lo voy llenando, pues. Alr.
+11:3311 minutos y 33 segundosObviamente este Tesla se llena desde desde ¿Dónde era? Desde acá.
+11:4311 minutos y 43 segundosPor eso digo que este dato técnico también ponlo acá, pues porque yo estaba pensando que si el si el formulario para
+11:5211 minutos y 52 segundoscrear un producto es si el formulario para crear un producto es así, yo diría que para editarlo
+12:0012 minutostambién es algo parecido porque el formulario de crear producto es totalmente diferente a a a al formulario de editar. producto,
+12:1612 minutos y 16 segundoso sea, ¿quieres que sea similar?
+12:1912 minutos y 19 segundosSí, sí, para que tenga para que tenga coherencia, porque eh para que tenga coherencia, algo así.
+12:2712 minutos y 27 segundosOkay. Okay.
+12:2812 minutos y 28 segundosPorque hay cosas buenas en en las cosas de producto y hay cosas buenas en en en editar.
+12:3712 minutos y 37 segundosEh, pero la idea es que básicamente tengan como las mismas funciones y para que sea más eh no varíe mucho, pues que
+12:4612 minutos y 46 segundostenga como un un tema, no sé cómo explicarlo. Okay. Eh, ¿qué fue lo otro que vi?
+12:5512 minutos y 55 segundosEntonces, digamos que, ¿cuál es la diferencia entre un punto de venta y una cotización?
+13:0113 minutos y 1 segundoEh, la cotización es antes de hacer la venta, por ejemplo, cuando usted
+13:0913 minutos y 9 segundosle muestra lo que le costaría al cliente, se lo manda, este, y ya después se puede mandar a venta.
+13:1713 minutos y 17 segundosOkay. Eh, yo estaba pensando en en hacer que sea cotización y de cotización se manda a venta, que fue lo que yo vi que
+13:2613 minutos y 26 segundoshabía. Ajá. Que era lo que dijiste como McDonald's, pues. Ajá. Ajá. Ajá.
+13:3113 minutos y 31 segundosEntonces, punto de venta estaría de más porque la forma correcta de de vender sería tú haces una cotización,
+13:3913 minutos y 39 segundossiempre comienza con cotización.
+13:4113 minutos y 41 segundosEntonces, digamos que este filtro de aire, este filtro de aire, ¿verdad?
+13:4813 minutos y 48 segundosYo quiero, okay, digamos que yo quiero saber cuáles son todos los productos que yo tengo ahorita mismo.
+13:5713 minutos y 57 segundosNo, no, no tengo forma porque mira,
+13:5913 minutos y 59 segundosdigamos que yo no sé qué qué quiero qué quiero buscar, ¿verdad? y me sale toda la lista, pues es lo que tengo acá
+14:1014 minutos y 10 segundosy ahí comienzo a ver eh a ver,
+14:1614 minutos y 16 segundosdigamos que vamos a la venta acá. Cuando yo creo una venta acá y yo digo, "Okay,
+14:2214 minutos y 22 segundos¿qué vas a buscar?" Filtro. Pero yo puedo poner enter primero sale la lista y después pongo filtro. Aire lance. Ahí
+14:3014 minutos y 30 segundosme sale. Entonces yo hago clic acá al producto y ahí me sale la info.
+14:4114 minutos y 41 segundosOkay. Ajá.
+14:4214 minutos y 42 segundosY de ahí yo escojo aquí. Mira, si tengo este, yo puedo seleccionarlo acá.
+14:5014 minutos y 50 segundosSi tengo varios,
+14:5414 minutos y 54 segundossi tengo varios, yo puedo seleccionar varios y los agrego.
+14:5914 minutos y 59 segundosSi yo tengo uno solo, yo puedo seleccionarlo, lo agrego o yo lo puedo agregar aquí directo.
+15:0715 minutos y 7 segundosO yo puedo entrar al cosa, ver la
+15:1515 minutos y 15 segundosinformación del producto y agregarlo. Okay, hay varias formas de agregarlo.
+15:2415 minutos y 24 segundosEntonces, lo que yo estaba viendo acá era que, por ejemplo, si yo filtro el del Honda, pues sí,
+15:3315 minutos y 33 segundosokay, eh, se agregó, pero si yo quiero ver la info de este producto, ¿cómo yo haría?
+15:4115 minutos y 41 segundosAh, okay.
+15:4215 minutos y 42 segundosSí, eso fue un error ahí que Entonces esto que está acá
+15:4915 minutos y 49 segundoseh este este esta cosa este opción de de flecha, yo digo que no funciona. Es
+15:5715 minutos y 57 segundosmejor que sea solamente un text en donde tú escribas esto. Pues, pero no. ¿Para qué es esto?
+16:0416 minutos y 4 segundosYo supongo que esto es como para para ¿Qué es esto? Es para lo del precio. Ah, este es el precio del producto. Sí,
+16:1216 minutos y 12 segundossí. Ah, okay, okay, okay. Pero es que es que
+16:1816 minutos y 18 segundosentonces, pero de esta manera, desde el punto de vista, eh, desde el punto de venta sale mejor. Eh, ¿cómo era? Filtro.
+16:2716 minutos y 27 segundosPor eso digo, pues este este es un formato y el otro es como un formato totalmente diferente, pero ambos tener
+16:3616 minutos y 36 segundoscomo la misma forma de buscar y agregar el producto.
+16:4116 minutos y 41 segundosEntonces sería como integrarlo las cotizaciones en el punto de venta.
+16:4716 minutos y 47 segundosSí, porque eh esto debería ser como un punto de venta. Sí. Ya, ya, ya, ya, ya. O sea, la función, o sea, la función,
+16:5716 minutos y 57 segundosespérate.
+16:5816 minutos y 58 segundosAjá. Mira, eh, tú quieres que, por ejemplo, ve para atrás,
+17:0217 minutos y 2 segundoseh, ve a cotizaciones, la parte de atrás de cotizaciones. Ajá. Tú quieres que, por ejemplo, eh, o sea,
+17:0817 minutos y 8 segundoscuando tú, vamos a decir que están todas esas cotizaciones, vamos a decir que la primera la primera que está fue la última que hiciste y esa está probada que no sé qué. Tú nada más quieres que
+17:1617 minutos y 16 segundosse le dé clic y ya pase al punto de venta, por ejemplo.
+17:2017 minutos y 20 segundosEh, no, no, no, no. Entonces, vamos a eso. Vamos a eso. O sea,
+17:2417 minutos y 24 segundoslo tienen bien implementado. Lo tienen bien implementado ahí. Eh,
+17:2817 minutos y 28 segundosnueva nueva cotización. Ajá. Se busca los productos, etcétera.
+17:3317 minutos y 33 segundosEntonces, en vez de poner di que guardar cotización,
+17:3717 minutos y 37 segundostienes guardar cotización. Eh, también tienes para enviar a enviar a venta y para enviar a, ¿cómo
+17:4617 minutos y 46 segundosque se llama? depósito los tres. Pues okay,
+17:5417 minutos y 54 segundosokay, espérate, eh.
+17:5717 minutos y 57 segundosY entonces si si manda los tres, digamos que si manda los tres, entonces aquí estaría los tres. Di que eh ¿Dónde está?
+18:0618 minutos y 6 segundosEste, ah, borrador lo tiene. Eh,
+18:0918 minutos y 9 segundosborrador enviado a caja, enviado a depósito. Si el depósito lo completa, ya depósito completado, una cosa así. Eh,
+18:1918 minutos y 19 segundoscaja ya ha cobrado y y y ya está aceptado, pues cuando la caja cobra ya está aceptado.
+18:2818 minutos y 28 segundosOkay.
+18:2918 minutos y 29 segundosO sea, enviar la cotización, por ejemplo, enviala a depósito,
+18:3518 minutos y 35 segundosluego de depósito a caja cuando ya te y luego que se cobre. Ajá. Okay, porque eso lo pueden hacer simultáneo.
+18:4318 minutos y 43 segundosEl que busca el pedido y el que hace la caja lo puede hacer simultáneo. Okay.
+18:5218 minutos y 52 segundosOkay. Entonces, se lle la nueva cotización,
+18:5618 minutos y 56 segundoseh, filtro aire y escojo el que tengo que escoger.
+19:0319 minutos y 3 segundosde válido hasta yo creo que no lo necesito o por lo menos no me lo ponga en mi versión.
+19:1219 minutos y 12 segundosO sea, quitar quitar la la expiración,
+19:1419 minutos y 14 segundospues se puede decir a quitar la expiración o dar la opción de quitarla.
+19:1819 minutos y 18 segundosAjá. Porque lo que pasa es que d un segundo,
+19:2419 minutos y 24 segundosporque lo que pasa es que yo estoy tratando de que todos los días esto,
+19:3319 minutos y 33 segundosdigamos que acá eh vemos que acá
+19:4219 minutos y 42 segundosyo estoy tratando de que todos los días eh no tenga esto, por ejemplo, Esto es,
+19:4919 minutos y 49 segundosesto está pendiente. No sé si se vendió, no sé si se cobró, no sé si se despachó,
+19:5519 minutos y 55 segundosesto está pendiente, esto está pendiente, ¿me explico?
+19:5919 minutos y 59 segundosEntonces, yo lo que quiero es que al día todo esto se esté completado. Digamos que esto lo se lo lo llevaron a crédito,
+20:0820 minutos y 8 segundosentonces lo cierro como crédito, una venta a crédito. Digamos que esto no más fue una cotización, no pasó nada. Yo voy acá,
+20:1920 minutos y 19 segundospum, y lo borro.
+20:2320 minutos y 23 segundosAjá. Digamos que este, ¿verdad? Dice que era, yo voy, pum, y lo borro. Era 85.
+20:2920 minutos y 29 segundosEste era la factura. Si yo pongo payment, aquí va a estar el número de factura. Entonces esta factura, mira,
+20:3820 minutos y 38 segundossi ves, va a decir que, mira, eh, tenemos pendiente esta factura. Yo digo,
+20:4420 minutos y 44 segundosah, no, esto fue una cotización, no lo necesitamos, lo borro. Y no va a aparecer mi cosa.
+20:5320 minutos y 53 segundosYa no tengo esa factura. Ahora está en cero, pero cero para mí significa que no hay nada. Pues
+21:0221 minutos y 2 segundosves. Entonces esto que está aquí yo lo tengo que cerrar, cerrar, cerrar, cerrar. Y entonces ya yo sé que ah,
+21:0821 minutos y 8 segundostodas mis transacciones del día ya están cerradas. Por eso es que yo no necesito eh fecha de inspiración porque no lo voy
+21:1521 minutos y 15 segundosa dejar abierto para no enredarme.
+21:1921 minutos y 19 segundosOkay. Vuelve vuelve vuelve al tema al tema, ¿no? El al punto porfa.
+21:2521 minutos y 25 segundosOkay. O sea, tú, por ejemplo, eh, por ejemplo, se le en vez de válido hasta en vez de eso, por ejemplo, poner una que
+21:3321 minutos y 33 segundosfecha límite 90 días, 60, 30 o no no no yo no lo necesito.
+21:3821 minutos y 38 segundosNo, no. Sí, sí, pero por ejemplo en vez de valido hasta cierta fecha por de 90 días, hasta 90 días, pero eh que haya tres opciones, por ejemplo, 60 30 para
+21:4621 minutos y 46 segundosel que lo requiera, pues, o o nunca borrar, pero eso estaría, pero yo digo que es esa opción debería estar en
+21:5521 minutos y 55 segundosadministración, o sea, que yo haga que qué yo quiero, ah quiere válido hasta quiere fecha de inspiración, digo, no, no, no, sí, sí, sí. Ah, okay.
+22:0422 minutos y 4 segundosEntonces, desde desde admin es que yo puedo desde admin,
+22:0922 minutos y 9 segundospues yo puedo elegir qué es qué cosas yo quiero, que no quiero.
+22:1422 minutos y 14 segundosOkay. Entonces, vale. Eh, o sea, eh esas opciones que son buenas eh para otros para porque no todos trabajan iguales,
+22:2622 minutos y 26 segundospues para mí yo lo trabajo de esa manera, entonces yo lo estoy yo estoy moldeando esto a cómo yo trabajo y cómo
+22:3422 minutos y 34 segundosquiero que sea, pues para que sea más eficiente para mí. Pero si digamos que esto lo de aspiración tú dices que ah de verdad eh nosotros lo usamos bastante entonces puedes hacerlo como opción.
+22:4322 minutos y 43 segundosPues okay,
+22:4522 minutos y 45 segundospero para mí yo prefiero que en vez de que sea esté ahí no lo uses, prefiero como que deshabilitarlo.
+22:5522 minutos y 55 segundosTener la opción de deshabilitar.
+22:5722 minutos y 57 segundos¿Prefieres hacerlo manualmente? Esto de caja abierta no debería estar porque esto esto solamente debería ser para caja, para rol de caja.
+23:0823 minutos y 8 segundosSí, pero se tiene ahí por o sea porque es la la porque es Sí, sí. Okay. Si es por admin. Sí, está bien.
+23:1723 minutos y 17 segundosEh, que esto lo que está acá está bueno.
+23:2223 minutos y 22 segundosEh, aquí lo que faltó marcas, ¿no? Pero aquí lo que faltó fue carros. Okay. Okay. Vehículos.
+23:3023 minutos y 30 segundosPonga si yo quiero exactamente cuál carro o si yo quiero eh, por ejemplo, el filtro sería si yo quiero Mitsubishi, yo
+23:3823 minutos y 38 segundoselijo el padre, pero si yo quiero específicamente el elijo Lancer, yo escojo Lancer. O si yo
+23:4723 minutos y 47 segundosquiero específicamente el nieto, yo voy por allá. Okay.
+23:5123 minutos y 51 segundosE ese filtro está bueno. O sea, por ejemplo, como que ese filtro sea como algo así que yo pueda elegir a a qué carro quiero hacer. Y lo otro que te
+23:5923 minutos y 59 segundosdije es también si digamos que lo que yo quiero es el motor, no el carro,
+24:0924 minutos y 9 segundos¿ves? Porque esto es padre, hijo, pero viene de de carro a de marca a carro a motor.
+24:1724 minutos y 17 segundosAjá.
+24:1924 minutos y 19 segundosDigamos que hay piezas que es motor primero, o sea, si es suspensión,
+24:2724 minutos y 27 segundosla prioridad es el modelo del carro que,
+24:3124 minutos y 31 segundoso sea, tú quieres tú quieres, por ejemplo, que sea un, o sea, por ejemplo,
+24:3424 minutos y 34 segundosel orden sería Mitsuishi, que es la marca,
+24:3824 minutos y 38 segundos¿no? Este orden está bien. Este orden está bien. Okay. Sería marca, carro y motor.
+24:4324 minutos y 43 segundosAjá. Está bien, esto está bien, esto es básico, pero digamos que yo quiero armar un motor que es 4G13,
+24:5424 minutos y 54 segundos¿me explico?
+24:5624 minutos y 56 segundosEntonces, eh no necesar a varios lancer y no necesariamente tengo que elegir qué lancer yo quiera,
+25:0425 minutos y 4 segundossino que yo quiero escoger es el el mismo motor. ¿Okay? Por ejemplo, mira,
+25:1125 minutos y 11 segundossi tú ves acá, si yo pongo filtro aire Lancer CS, no sale motor.
+25:1925 minutos y 19 segundosNo hay motor porque aplica para todos los motores de ese chasí.
+25:2625 minutos y 26 segundosPero si yo quiero pistones Lancer CS,
+25:3325 minutos y 33 segundos¿ves? Okay.
+25:3725 minutos y 37 segundos¿Ves que dice Mitsubishi Lancer? Y en teoría debería ir un motor.
+25:4325 minutos y 43 segundosSi yo quiero piezas de motor, primero viene el motor y luego el chasí. Okay.
+25:5425 minutos y 54 segundosPorque el chasí, o sea, cuando pieza el motor, el motor vale más que el chasí.
+26:0026 minutosPero si tú pides pieza de suspensión, por ejemplo,
+26:0826 minutos y 8 segundosuna B, yo no necesito, o sea, el motor es irrelevante porque todos los motores de esa generación usa la misma pieza,
+26:1926 minutos y 19 segundospero ese mismo carro no necesariamente usa el mismo motor como este, pues usa dos motores, pero es el mismo chasí.
+26:2926 minutos y 29 segundosTodo lo que es suspensión es Lancer CS, pero motor depende de qué motor tenga.
+26:3726 minutos y 37 segundos¿Me explico? Okay.
+26:4026 minutos y 40 segundosEntonces este este digamos que este es del 2000 al 2008. Este mismo motor le puede funcionar a un Lancer más viejo,
+26:4826 minutos y 48 segundosel del 1996 hasta el 2000. Entonces, eso, pues,
+26:5526 minutos y 55 segundoseh, ¿qué era lo otro? Ah, lo otro. Ah. Eh,
+27:0427 minutos y 4 segundosah, ah, estaba diciendo, por ejemplo,
+27:0627 minutos y 6 segundoseh, si ves acá que dice CS, eh, yo usualmente uso, por ejemplo, Lancer CS,
+27:1427 minutos y 14 segundospero muchos repuestos no van a hacer eso y lo van a hacer por año. Entonces, en vez de decir año 2000 hasta 2008,
+27:2427 minutos y 24 segundosque es este que está aquí, eh también se refiere como 00 a 08. Okay.
+27:3127 minutos y 31 segundosPero por lo general eh solamente con desde dónde comienza el año es suficiente.
+27:3827 minutos y 38 segundosEntonces se usan los dos últimos dígitos del año. Por ejemplo, si es 2024 usamos 24. Si es 1994
+27:4727 minutos y 47 segundosusamos 94. Así el dato no más. Entonces seguíamos acá
+27:5427 minutos y 54 segundostoda la marca. Ahora digamos que Ajá. Ajá. Se usa varios. Okay, eso está bien.
+28:0628 minutos y 6 segundosEh,
+28:0928 minutos y 9 segundosuso variante es variante es producto base y si tienen variantes sale otro modal.
+28:1828 minutos y 18 segundosA ver, agregar.
+28:2228 minutos y 22 segundosAh, vamos a ver este filtro. ¿Cómo yo chequeo? Ah, este tampoco tiene para
+28:3228 minutos y 32 segundosir a a ¿cómo que se llama? A los datos del producto, ¿verdad? Ah, no, todavía no. No tiene. Okay.
+28:4028 minutos y 40 segundosDigamos que vamos a ver ese inventario, ¿no? ¿Dónde era producto?
+28:4728 minutos y 47 segundosEste que está acá. Ah, tenemos. Ah,
+28:5028 minutos y 50 segundosvamos por el otro. Entonces, digamos que Ay, me di cuenta de que para usar, para
+28:5728 minutos y 57 segundospoder agregar otro tienes que guardarlo y entonces eh se pu se puede hacer otro punto venta. Eh, digamos que vamos a hacer el filtro.
+29:0829 minutos y 8 segundosFiltro. Aire C. No, este tiene dos, ¿verdad?
+29:1329 minutos y 13 segundosAh, ah, sí, sí, sí. Ah, perfecto. Esto está bueno. Esto está bueno. Y aquí escoges cuál quieres. Sí.
+29:2129 minutos y 21 segundosOkay. Eh, acuérdate de agregar el reorden para mandar proveedores de repente. Ah,
+29:3029 minutos y 30 segundosde esto quiero cuatro.
+29:3229 minutos y 32 segundosO sea, puedo hacer en la venta, pero también antes de hacer la venta puedo agregar cuánto le quiero enviar para hacer mi reorden.
+29:4129 minutos y 41 segundosOkay.
+29:4229 minutos y 42 segundosPor ejemplo, yo quiero ahorita mismo está en cero, pues digo, ah, voy a poner, voy a pedir cinco de esto. Voy a
+29:4929 minutos y 49 segundospedir cinco de este también. Y ya después ahí debería haber como un reporte de bajer o algo así.
+30:0030 minutosEh, ajá, ajá, ajá. Ah, esta es otra cosa que vi. Bueno, no está aquí.
+30:0730 minutos y 7 segundosAh. Ah, esto, ¿qué era?
+30:1730 minutos y 17 segundosEra lo iba a tener para cantidad, pero no. Este no lo necesita. Sí, lo voy a quitar.
+30:2330 minutos y 23 segundosAh, porque eh se puede agregar desde aquí. Se puede agregar aquí, eh. Tienes doble función, así que este no no se
+30:3230 minutos y 32 segundosnecesita. Este es suficiente y este también. Bueno, ponerlo manualmente.
+30:4030 minutos y 40 segundosOkay.
+30:4130 minutos y 41 segundosSí, también y también dependiendo porque si hay por ejemplo eh, como usted dice sale en cero
+30:5030 minutos y 50 segundosde agregar modal ese que usted dice de del back order.
+30:5530 minutos y 55 segundosAh, pero el backw se pondría desde desde el search, pues. Okay, vale.
+31:0331 minutos y 3 segundosEh,
+31:0531 minutos y 5 segundossí, porque no se va a agregar acá ya cuando está este. Eh, hay forma. Ah, ya, ya vi. Con impuestos, sin impuestos,
+31:1331 minutos y 13 segundospero no hay forma de editar el precio de venta, ¿verdad? No, este también lo pongo.
+31:1931 minutos y 19 segundosEh, depende depende del rol porque si es de vendedor no puede, pero si es admin debería poder a menos que le dé eh autorización a ciertos vendedores,
+31:3131 minutos y 31 segundosasí que depende también del rol eh en la Ah, era en cotización que yo lo vi.
+31:4431 minutos y 44 segundos¿Dónde estaba? Anot en guardar cotización. Entonces, ah, en cotizaciones guardadas estado.
+31:5731 minutos y 57 segundosEh, ¿a dónde fue que yo vi? Espérate,
+32:0432 minutos y 4 segundosHenry, una pregunta. ¿Tú has trabajado con moto? ¿Tú crees que esto sirva para lo mismo que un autorrepuesto de moto?
+32:1232 minutos y 12 segundosPero es que es que depende porque cuando yo te digo cuando yo me enfoco en
+32:1932 minutos y 19 segundosel precio es porque la la gente va a decir es un gasto que es innecesario para ello.
+32:2832 minutos y 28 segundosOkay. eh puede que su puede que su negocio no dé pues para ese para ese tipo de gasto, porque $100 tú piensas
+32:3732 minutos y 37 segundosque ah de verdad vale la pena, pero para un empresario o alguien o alguien que no
+32:4432 minutos y 44 segundosve el potencial de esto, va a decir que es un gasto, va a sentir como un gasto estoy ocupado,
+32:5232 minutos y 52 segundospero digo sin miedo se pregunta y y si está interesado,
+32:5732 minutos y 57 segundosno es que es que por ejemplo una de las personas que está interesada eh es un un autor respuesto y concesionaria de moto.
+33:0733 minutos y 7 segundosAh, ventas de moto nueva,
+33:0833 minutos y 8 segundos¿no? Ajá. Eh, nuevas de segunda y también repuesto.
+33:1233 minutos y 12 segundosAh, digo, tendrías que ver su desde su punto de vista.
+33:1633 minutos y 16 segundosEh, desde mi punto de vista yo sí te puedo garantizar cómo funcionan los autorrespuestos, qué se necesita, que no.
+33:2533 minutos y 25 segundosEh, obviamente primero desde mi punto de vista para tener un producto y después agregar las otras cosas extra, pues
+33:3333 minutos y 33 segundosporque si tú vas a preguntar a 10 personas diferentes y 10 personas tienen 10 formas diferentes de trabajar, tú no
+33:4033 minutos y 40 segundospuedes hacer 10 programas diferentes. Es que normalmente algunos programas son así, por ejemplo, los de, por ejemplo,
+33:4733 minutos y 47 segundosel que yo uso, yo lo investigué un poco y tiene dependiendo del sector en el que se trabaja, pues, porque por ejemplo un
+33:5433 minutos y 54 segundosun una tienda de ropa no te va a requerir muchísima cosa. No sé si me explico, pues, porque yo averigu Sí,
+34:0134 minutos y 1 segundopero eh es que es que todo tiene su pro y contra, pues depende cómo tú lo quieras trabajar.
+34:0734 minutos y 7 segundosAjá. Eh eh mi mi punto, por ejemplo,
+34:1134 minutos y 11 segundosLight Speed, pues si tú vas a Light Speed, ellos tienen, espérate,
+34:2434 minutos y 24 segundosellos tienen varios varios varios productos, tiene retail, tiene restaurante,
+34:3034 minutos y 30 segundosetcétera, etcétera, etcétera. Pues o sea, para tú tener todo esto, esos manés sí le han metido tiempo y y todo eso,
+34:4034 minutos y 40 segundospues. Y si es una empresa, una corporación internacional. Ajá. Me explico. Pero ellos van que, "Okay,
+34:4834 minutos y 48 segundos¿qué tú quieres hacer? ¿Tú quieres hacer restaurante?" Bueno, restaurante vas a hacer esto que está acá, pues esto aplica para ti.
+34:5634 minutos y 56 segundosO si quieres hacer eh ropa, este aplica para ti. Si quieres hacer autorrespuesto y taller, esto aplica para ti.
+35:0535 minutos y 5 segundosEh, yo digo que por ahora enfócate en más, comienza de chico.
+35:1335 minutos y 13 segundosTodo tiene todo lleva tiempo, pues no puedes crear algo de la noche a la mañana, es imposible. entiendo, pero eh
+35:2135 minutos y 21 segundoses que lo que quiere decirte es que ya partiendo de la base que tenemos, yo creo que, por ejemplo, simplemente limitando eh por ejemplo se limitando
+35:3035 minutos y 30 segundosciertas cosas ya, por ejemplo, puede estar otro tipo de producto, ¿no? Si me explico.
+35:3635 minutos y 36 segundosMm digo, hm,
+35:4135 minutos y 41 segundosprimero primero, o sea, obviamente es lo que te eh solamente quiero decirte que primero obviamente hay que enfocarse en este. Primero nos enfocamos en esto y ya
+35:5035 minutos y 50 segundosluego cuando por lo menos tú tú des el okay di que ah no está está perfecto o simplemente que hace detalle empezamos a trabajar en lo otro. Es lo que
+35:5735 minutos y 57 segundosy y lo otro que iba a mencionar y lo otro y lo otro que iba a mencionar eso eso de de partnership entre tres y yo creo que no me va a funcionar. Yo digo,
+36:0736 minutos y 7 segundoso sea, no no es no es bueno para ustedes. Pues yo digo que el split entre
+36:1336 minutos y 13 segundostres solamente sería la gente que yo que yo que yo le venda. Ajá.
+36:2036 minutos y 20 segundosLos de ustedes yo no necesito split de ustedes. Okay. Ah, okay. Okay.
+36:2436 minutos y 24 segundosOkay. Eh, comenzamos ahí. ¿Por qué yo quiero eso? Porque no es tanto el dinero, pero más que nada porque si yo
+36:3236 minutos y 32 segundosvoy a eh ofrecerle algo eh está es lo que yo uso, es mi negocio,
+36:4236 minutos y 42 segundoseh mi reputación y todo eso, pues. Okay.
+36:4636 minutos y 46 segundosEntonces, por eso yo digo que es muy importante la base de datos que no se pierda, que el cliente no lo pierda,
+36:5136 minutos y 51 segundosporque donde ellos lo pierdan, la cara voy a ser yo.
+36:5636 minutos y 56 segundosEntonces, cualquiera cosa la referencia va a ser conmigo, pues porque yo le estoy diciendo directamente que mira,
+37:0537 minutos y 5 segundospase lo que pase, invierte conmigo, yo me yo arreglo todo, ¿me explico?
+37:1137 minutos y 11 segundosEntonces, el seguro se lo estoy dando yo a esa a esos negocios,
+37:1737 minutos y 17 segundos¿entiendes? Entonces, más que nada es es tipo de control que yo quiero, pues porque digamos que ah, David, atiéndelo
+37:2637 minutos y 26 segundosy y ustedes no se entre ustedes y el nuevo cliente de autorrespuesto no se comunican bien, no se entienden bien,
+37:3637 minutos y 36 segundosporque uno más o menos yo sé qué se puede hacer, qué no se puede hacer, pero hay clientes que no son realistas, pues,
+37:4337 minutos y 43 segundosy piden cosas que son, piensa que es fácil, pero en realidad es difícil.
+37:4837 minutos y 48 segundosY entonces va a haber una mala comunicación ahí y todo se echa a perder, ¿me explico? Sí.
+37:5237 minutos y 52 segundosEntonces, eso es lo que yo quiero evitar porque yo sé que ya ellos son son, ¿cómo te digo, son unos clientes que ya yo los conozco, pues es mi rubro,
+38:0338 minutos y 3 segundospero si me dices di que eh vas a otros rubros o lo que sea, en realidad yo no voy a aportar nada porque uno eh no
+38:1338 minutos y 13 segundostengo experiencia ahí, dos tampoco programo en realidad no estoy haciendo nada y para yo agarrar un pedazo de ustedes, yo digo que no es justo, pues.
+38:2238 minutos y 22 segundosEntiendo, entiendo que ese split solamente sería para los clientes que yo agarre, que yo pueda contratar. Pues okay.
+38:3038 minutos y 30 segundosAhora, eh otra otra consulta, eh más o menos, como cuánto puede pesar una base de datos, por ejemplo, tu base de datos como alrededor de cuánto pesa.
+38:3838 minutos y 38 segundosEn realidad no sé. En realidad no sé,
+38:4238 minutos y 42 segundosporque quiero quiero quiero tener un aproximado porque dependiendo de eso también tenemos que sacar el el la cantidad, o sea, cuánto cuánta memoria va a tener el server.
+38:5138 minutos y 51 segundosEs que es que en realidad no sé porque eh las fotos los guardo, todos los guardo, pero
+38:5938 minutos y 59 segundoseh esto no tiene límite y tampoco me dice nada, pues,
+39:0339 minutos y 3 segundoso sea, es como ilimitado básicamente esto.
+39:0639 minutos y 6 segundosSí. Eh, okay. Es que es que por lo menos necesito saber eso. Si tú tienes tu base de datos, necesito saber más o menos cuánto pesa, porque con fotos y cosas
+39:1539 minutos y 15 segundosesas cosas debe pesar bastantito. Pues sí, yo sé que pesa bastante, por eso yo digo, pues por eso que tú me dices que no, que eh el hosting es barato. Yo yo
+39:2439 minutos y 24 segundossé que hosting no es barato, pero si tú dices que limitado,
+39:2739 minutos y 27 segundosno no no. Es que es que es que cuando fuimos a ver eh por ejemplo, el que el que más convenía creo que era de 300 GB. solamente.
+39:3939 minutos y 39 segundosEh, no, en realidad no te puedo decir cuánto es porque como te digo, yo no tengo no tengo que forma de bajar. Yo no
+39:4739 minutos y 47 segundostengo forma de bajar, yo tengo forma de bajar eh vamos a decir que esto pues solamente los datos
+39:5439 minutos y 54 segundoseste inventario. Pero si yo quiero bajar historial de, vamos a decir esto, pues, okay.
+40:0340 minutos y 3 segundosDigamos que esto yo lo puedo bajar acá.
+40:0540 minutos y 5 segundosExport, no sé qué es. Es un Excel, pero digamos que yo quiero bajar la foto, yo
+40:1240 minutos y 12 segundosquiero bajar los el historial de venda return o las compras que he hecho, ¿me explico?
+40:2140 minutos y 21 segundosTodo esto también es base de datos. Okay.
+40:2440 minutos y 24 segundosTodo eso, las ventas que he hecho, a qué cliente he hecho, ¿verdad? Todo eso es parte de la base de datos, pero no es que no tengo algo que ah se baje todo.
+40:3640 minutos y 36 segundosAhora yo sé, yo puedo preguntar, pero yo sé que ellos lo pueden hacer. Tendría que preguntar para ver cuánto me cuánto me sale,
+40:4540 minutos y 45 segundoscuánto pesa, pues, pero yo sé que pesa bastante porque cuando yo hago porque cuando yo hago customer service con ellos, es el customer service de ellos y son 24 horas por medio de chat,
+40:5640 minutos y 56 segundosllamadas o no sé qué. Ellos me dicen cada vez que buscan algo así complicado y yo le digo no sé qué y tratan de buscar el base de datos yo dije, "Ah,
+41:0541 minutos y 5 segundosdame un minuto que tu base de datos está más pesado que varios." Pues mm, por eso dice que es pesado. Okay, listo, listo.
+41:1441 minutos y 14 segundosPero lo que pasa es que, por ejemplo,
+41:1741 minutos y 17 segundosdigamos que digamos que esto que está aquí, pues
+41:2841 minutos y 28 segundosdigamos este este es el mismo producto, ¿verdad?
+41:3341 minutos y 33 segundosEntonces, este producto tiene foto. Este producto también tiene foto. Este producto también tiene foto. Por eso yo
+41:3941 minutos y 39 segundoste digo que hiciéramos uno que solamente es de de información y es una foto y una sola información para estos tres.
+41:4941 minutos y 49 segundosOkay. Por eso es que yo decía que que hiciéramos dividiéramos esto, pues eh lo que es
+41:5741 minutos y 57 segundosproducto y lo que es los variantes.
+42:0342 minutos y 3 segundosEntonces que el la variante agarre la info de del producto y esta todo esto usan la misma información de acá arriba.
+42:1242 minutos y 12 segundosMm.
+42:1342 minutos y 13 segundosEntonces, ah, y lo otro que también falta, digamos que digamos que yo quiero ver aquí estaba, ¿verdad? Digamos que yo
+42:2042 minutos y 20 segundosquiero era punto de venta, digamos que yo quiero ver los filtros aéreas que hay, ¿verdad?
+42:3442 minutos y 34 segundosEh, no salió, no sabe.
+42:4242 minutos y 42 segundos¿Cómo funciona eso tod?
+42:5242 minutos y 52 segundosSi este es filtro aire y este es filtro aire. Si yo pongo filtro aire.
+42:5642 minutos y 56 segundosAh, sí sale. Sí sale. Pero digamos que yo quiero ver cómo se llama, por ejemplo,
+43:0443 minutos y 4 segundosese no, pero digamos que yo quiero ver, mira, estos filtros, ¿verdad?
+43:0943 minutos y 9 segundosYo quiero saber cuánto mide este y cuánto mide este para verlos acá. Okay. Las especificaciones.
+43:1643 minutos y 16 segundosAjá. Eh, ¿dónde es que estaba? Hm.
+43:2443 minutos y 24 segundosEh, ¿cómo que se Ah, ver detalle? No, este no era. ¿Cómo era?
+43:3243 minutos y 32 segundosEh, okay. Aquí está la marca disponible, pero acá no tengo. Ahí está la cruzada,
+43:4143 minutos y 41 segundospero no encuentro el largo, el alto. Espérate.
+43:4943 minutos y 49 segundosDetalle,
+43:5143 minutos y 51 segundos¿no? ¿Cuál era el módulo que sí se podía ver?
+43:5543 minutos y 55 segundosNo, era eh, por ejemplo, era cuando tú creabas editar en editar.
+44:0044 minutosAh, en editar. Sí, crep la Ah, ah, okay, okay, okay. Editar si se ve. Entonces está el largo el no.
+44:0844 minutos y 8 segundosEntonces, la idea es que, por ejemplo,
+44:0944 minutos y 9 segundossi este fuera el otro producto y este es un producto y y acá hay varios productos, ve que ah lo quiero ordenar
+44:1744 minutos y 17 segundosde largo, de chico a grande y para ver cuál es el que yo el que lo puedo usar para si alguien me trae una muestra, por decir, pues,
+44:2844 minutos y 28 segundoso lo ordeno por wid o lo ordeno por high o lo filtro,
+44:3344 minutos y 33 segundoscualquiera de eso, pues, pero esto Este este point of view está bueno. Entonces este es otro tipo de de ver,
+44:4244 minutos y 42 segundospues,
+44:4444 minutos y 44 segundossi lo puedo ver de esta manera o lo puedo ver directamente desde Ajá.
+44:5144 minutos y 51 segundosDesde el producto cuando lo selecciono.
+44:5344 minutos y 53 segundosAjá. Eh, e este
+45:0145 minutos y 1 segundopunto de vista usualmente lo uso cuando alguien me trae la muestra y yo no lo tengo y lo quiero resolver, pues que yo
+45:0945 minutos y 9 segundosno sé qué no tengo ese carro, pero es algo parecido y quiero buscarte algo con las dimensiones, ahí es donde lo uso.
+45:1845 minutos y 18 segundosOkay. Okay.
+45:1945 minutos y 19 segundosAjá. Pero la mayoría es por Ya es directo. Ajá. La mayoría ya es directa, o sea, sería el caso de emergencia.
+45:2845 minutos y 28 segundosY aquí debería haber una foto, chico, como un icon. Okay.
+45:3345 minutos y 33 segundosEh, este OM estaría, pero este referencia OM estaría, pero estaría en la página principal.
+45:4145 minutos y 41 segundosOkay.
+45:4245 minutos y 42 segundosEh, a ver, ¿qué más? Eh, bueno, vamos a comenzar con eso porque lo otro que tampoco entiendo es el el el ¿cómo que
+45:5245 minutos y 52 segundosse llama este? Nueva entrada, porque yo vi que había una nueva entrada por lote y yo
+45:5945 minutos y 59 segundoscreo que vi otra cosa por acá, no me acuerdo cómo es la transferencia. Es es entre sucursales.
+46:0746 minutos y 7 segundosNo, no, no era movimiento. Bueno, no me acuerdo cómo era.
+46:1846 minutos y 18 segundosPor ahí lo veo de nuevo cuando es que lo est usando en en la mañana. Eh, pero para que tengas idea de cómo yo hago las compras, yo voy acá, yo entro acá,
+46:2846 minutos y 28 segundosentonces no tengo como info el lote, sino es que yo escojo mi vendedor,
+46:3346 minutos y 33 segundoseh, mi escojo mi proveedor, eh, supongo que escojo el almacén que lo quiero poner. Eh, la fecha de hoy, eh,
+46:4446 minutos y 44 segundosah, ah, ah, lo otro, lo otro, lo otro.
+46:4746 minutos y 47 segundosNo, no, no, no, no. Aguanta, aguanta. Lo otro que también era, digamos que si yo hago una nueva entrada y cuál era tipo
+46:5646 minutos y 56 segundosde referencia este este po significa purchase order. Sí, es compra.
+47:0347 minutos y 3 segundosOkay. Nada más se puede número y lo otro que también antes que se me
+47:1147 minutos y 11 segundosolvide es que aquí hay notas nota interna.
+47:2147 minutos y 21 segundosEh, acá también pon una nota para el producto, la que se pone en editar del producto,
+47:3047 minutos y 30 segundos¿verdad?
+47:3147 minutos y 31 segundosAh, digamos que es esto está bien, pero yo le quiero agregar di que eh está sucio,
+47:3847 minutos y 38 segundos¿verdad?
+47:4047 minutos y 40 segundosEs como nota de este producto, de esta línea de producto. Yo creo que aquí yo lo había y este es nota de producto y el otro es nota de la factura.
+47:5247 minutos y 52 segundosA ver, ¿cómo era? Nota de la factura. Yo me pierdo. Espérate. ¿Cómo? ¿Cómo acepto aquí?
+48:0248 minutos y 2 segundos¿Cómo el cambio? Este, ya se cambió. Sí, ya más. Mm.
+48:1248 minutos y 12 segundosAh, se se guarda solo.
+48:1648 minutos y 16 segundosAh, sí, sí, se guardó solo. Okay, está bueno. Eh, ¿cuál era?
+48:2748 minutos y 27 segundosAh, este para imprimir ticket. Ah, creo que era este. Ah, ah, sí. Nota. Notas.
+48:3648 minutos y 36 segundosAjá. Este es notas de la factura, pero este el que ve el cliente y debe haber una nota de la factura de interno. Eh,
+48:4548 minutos y 45 segundosbueno, este no tiene la opción como tenías en el otro en el en el punto de venta que yo puedo decidir si va con
+48:5348 minutos y 53 segundossiete o sine. O sea, este es como un punto de venta como este, pero diferente.
+49:0149 minutos y 1 segundoSería mejor reutilizar el punto de venta, ¿no? Este está mejor. Sí, esta más completa. Sí.
+49:0749 minutos y 7 segundosEh, de aquí que me gustaba.
+49:1249 minutos y 12 segundosDe aquí me gusta esto y me gusta esto, pero sí, el de acá estaba más completo. Eh, ¿qué más? Ah,
+49:2149 minutos y 21 segundosíbamos ah, íbamos por el por el venta.
+49:2349 minutos y 23 segundosEntonces, íbamos a por order. Vamos por acá. Escogemos el vendedor. Eh, este no lo uso.
+49:3249 minutos y 32 segundosEh, pero aquí sería una fecha. Sería la fecha. Shipping notes.
+49:3849 minutos y 38 segundosM, no lo uso. Usualmente uso este, pero aquí falta. Ah, este es el número de factura. Número de referencia será factura.
+49:5149 minutos y 51 segundosEl guarda. Aquí escojo lo que yo quiero.
+49:5949 minutos y 59 segundosEsto aquí pongo este es el precio de
+50:0650 minutos y 6 segundoseste es el precio de costo y este es el precio de venta y esta es
+50:1350 minutos y 13 segundosla cantidad. Entonces la cantidad que yo quiera y precio de venta. Ahora, este precio de
+50:2050 minutos y 20 segundosventa lo hacemos manual porque no tenemos una fórmula prehecha desde admin y ya sería así.
+50:3050 minutos y 30 segundosAh, lo otro que que se pueda que se pueda agregar, que se pueda mover.
+50:3750 minutos y 37 segundos¿Qué quiere decir? Por ejemplo, este fue el primero, este fue el segundo. Eh, yo quiero que moverlo como que agarrarlo,
+50:4550 minutos y 45 segundosarrastrarlo y que este sea el uno y este sea el dos. Okay, si es que se puede,
+50:5250 minutos y 52 segundosno es importante, pero ayuda.
+50:5750 minutos y 57 segundosEh, yo digo que comencemos con eso porque la verdad ni siquiera he podido eh ingresar producto y hacer un una venta, pues.
+51:0851 minutos y 8 segundosListo. Correctamente como como quiero. Okay.
+51:1251 minutos y 12 segundosOkay. Eh, lo otro, eh, no sé cómo están este tiempo ahorita mismo, pero eh yo sí
+51:1951 minutos y 19 segundosle puedo dedicar todo este mes, todas estas noches, así que si quieren tratar de sacar esto hasta este mes, yo digo
+51:2851 minutos y 28 segundosque yo estoy yo creo que mañana no puedo, mañana no puedo tener reunión. Si acaso te di te dije el mañana ni pasado, estaría ocupado en la noche.
+51:3951 minutos y 39 segundosOkay.
+51:3951 minutos y 39 segundosEh, podría ya el sábado, no sé si el sábado puede.
+51:4451 minutos y 44 segundosSí, sí, yo yo voy a tratar de jugar el sábado y el jueves, el jueves estoy libre, pero iría yo mismo ahí a tu tienda a ver qué tal.
+51:5151 minutos y 51 segundosDale. Eh, ahorita mismo, ahorita mismo.
+51:5451 minutos y 54 segundosY trae también una computadora. O puedes usar la computadora mía. Ah, no, la computadora.
+51:5951 minutos y 59 segundosEh, lo digo porque ahorita mismo que está que está caliente el tema. para no perder el hilo, pues. Okay. Sí, sí, sí, sí.
+52:0652 minutos y 6 segundosSi lo dejamos, si lo dejamos largo, ya se uno se desmotiva, uno pierde el ritmo y después se olvidan eh cómo íbamos.
+52:1552 minutos y 15 segundosSí, entiendo. Te iba a enseñar una cosa también. Mira,
+52:1952 minutos y 19 segundoseh, dale. Yo creo que ya yo terminé por hoy. Suficiente cambio para volver a probar.
+52:2652 minutos y 26 segundosOkay. Eh, se ve. Sí, sí, sí.
+52:3452 minutos y 34 segundosOkay. Mira, este este era el page que yo estaba haciendo más o menos para para el tipo de venta del producto. Pues aquí sale control total de su inventa de
+52:4352 minutos y 43 segundosautopartes, no sé qué. solicitar remo ta ta ta ta, características y eso y aquí están, por ejemplo, planes flexibles que
+52:5152 minutos y 51 segundosno sé qué pa lo cambié un poquito pues porque hablé un poquito con la con la ingeniera, pues, y también me dijo de
+52:5852 minutos y 58 segundosque incluso tengo que tratar de poner los precios un poco más eh atractivos, pues como es un producto nuevo y eso.
+53:0553 minutos y 5 segundosBueno, si si es por mí, no te preocupes,
+53:0953 minutos y 9 segundosyo no necesito esa página, yo cierro la venta.
+53:1153 minutos y 11 segundosOkay. Eh eh esto ya esto nos funciona ya cuando tengamos nuestro nuestros cinco o 10 primeros clientes ya hecho y ya tener la reputación prácticamente.
+53:2353 minutos y 23 segundosAjá. Pues ya tenemos la experiencia, ya tenemos a 10 clientes, 10 cinco clientes que ya sabemos,
+53:3053 minutos y 30 segundospodemos diferenciar y agarrar toda esa información de los cinco, cada uno va a tener su propia perspectiva y ahí
+53:3753 minutos y 37 segundoshacemos un producto. Ya de 5 a 10, de cco a 10 clientes, ya tenemos un producto bien fuerte que ya podemos vender a personas random. Alr. Bueno,
+53:4853 minutos y 48 segundospero de los que yo te digo, de los que yo te digo son personas que también es como parte del testing mío, pues
+53:5753 minutos y 57 segundosporque también quiero hacer un producto bueno que funcione para bastante, ya,
+54:0354 minutos y 3 segundospero más que nada grupo cercano, eh, más que es reputación, pues entiendo, entiendo, entiendo.
+54:1054 minutos y 10 segundosDe que salga bien y que yo dé un producto bueno, porque donde un producto malo, chuso. Sí, de reclamo.
+54:1854 minutos y 18 segundosSí, sí, sí. Esa no es la idea. Pues,
+54:2154 minutos y 21 segundospero bueno, era eso era lo que te iba a comentar ya para, por ejemplo, ya esta parte, o sea, como no habíamos tenido reunión y no habían muchos cambios, fui
+54:3054 minutos y 30 segundosadelantando estas cosas, pero ya ahora como los con los cambios que dijiste, bueno, vamos a darle prioridad a eso.
+54:3554 minutos y 35 segundosPues sí, vamos a darle prioridad para tener un producto ya hecho eh de una forma ya estable.
+54:4454 minutos y 44 segundosEh, básate bastante en en el en el programa que yo tengo porque me gusta bastante. Okay.
+54:5254 minutos y 52 segundosLo único lo único que falta son esos detalles, así que detalles hacerlo mejor, pues. Entonces,
+55:0055 minutosbásate un 80% de lo que tenemos ahorita mismo y entonces los otros 20 son los nuevos las nuevas formas que estamos haciendo.
+55:1055 minutos y 10 segundosEntonces, esta es la idea. Entonces,
+55:1155 minutos y 11 segundoscuando llegas, eh, tratas de tú hacer una venta para que tú más o menos veas lo que te estoy diciendo. Listo.
+55:2155 minutos y 21 segundosListo. Eh, entonces, ¿hasta qué? Jueves, ¿eh? Sí,
+55:2755 minutos y 27 segundosdale. Eh, si ya tienen los cambios hechos, me avisan y de ahí van los los feedbacks.
+55:3255 minutos y 32 segundosDale, de aquí creo podemos tenerlo ya para el miércoles.
+55:3655 minutos y 36 segundosDale, dale. Y ahí comienza a probar y ahí vamos, ¿eh? La idea es de que yo lo estoy grabando,
+55:4455 minutos y 44 segundospero yo estoy escuchando que mi voz está bien bajito cuando yo grabo y ya ahí vemos. Vale, listo.

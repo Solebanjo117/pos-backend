@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreSupplierRequest;
 use App\Models\Supplier;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -79,7 +80,7 @@ class SupplierController extends Controller
      * POST /api/v1/suppliers
      * Create new supplier
      */
-    public function store(Request $request): JsonResponse
+    public function store(StoreSupplierRequest $request): JsonResponse
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreUserRequest;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -27,7 +28,7 @@ class UserController extends Controller
     /**
      * Create a new user with a role.
      */
-    public function store(Request $request): JsonResponse
+    public function store(StoreUserRequest $request): JsonResponse
     {
         $validated = $request->validate([
             'name'                  => 'required|string|max:255',
@@ -157,12 +158,6 @@ class UserController extends Controller
                 'current_warehouse'    => null,
                 'allowed_warehouses'   => [],
             ]);
-        }
-
-        // Auto-correct: if current_warehouse_id is not set or not allowed, fix it
-        $effectiveId = $user->getEffectiveWarehouseId();
-        if ($effectiveId !== $user->current_warehouse_id) {
-            $user->update(['current_warehouse_id' => $effectiveId]);
         }
 
         $allowedWarehouses = $user->isAdmin()

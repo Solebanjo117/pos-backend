@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
-Route::prefix('suppliers')->group(function () {
+Route::prefix('suppliers')->middleware('role:admin,manager,buyer')->group(function () {
     // Dropdown (all active, no pagination)
     Route::get('/all', [SupplierController::class, 'all']);
 

@@ -6,7 +6,7 @@ use App\Http\Controllers\Api\ProductCompatibilityController;
 use Illuminate\Support\Facades\Route;
 
 // Product Routes
-Route::prefix('products')->group(function () {
+Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix('products')->group(function () {
     // CRUD Principal
     Route::get('/next-sku', [ProductController::class, 'nextSku']);
     Route::get('/', [ProductController::class, 'index']);

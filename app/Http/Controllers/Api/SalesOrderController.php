@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\PosCheckoutRequest;
 use App\Services\SalesOrderService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -72,7 +73,7 @@ class SalesOrderController extends Controller
      * POST /api/sales-orders
      * Create new sales order
      */
-    public function store(Request $request): JsonResponse
+    public function store(PosCheckoutRequest $request): JsonResponse
     {
         try {
             $validated = $request->validate([
@@ -86,6 +87,7 @@ class SalesOrderController extends Controller
                 'payment_status'    => 'nullable|in:pending,partial,paid,refunded',
                 'initial_payment'   => 'nullable|numeric|min:0',
                 'notes'             => 'nullable|string|max:5000',
+                'internal_notes'    => 'nullable|string|max:5000',
                 'audit_logs'        => 'nullable|array',
                 'payments'          => 'nullable|array',
                 'payments.*.amount' => 'required_with:payments|numeric|min:0.01',
@@ -255,6 +257,7 @@ class SalesOrderController extends Controller
                 'shipping_cost' => 'nullable|numeric|min:0',
                 'payment_method' => 'nullable|in:cash,card,transfer,credit,multiple',
                 'notes' => 'nullable|string',
+                'internal_notes' => 'nullable|string',
                 'items' => 'nullable|array',
                 'items.*.product_id' => 'required|exists:products,id',
                 'items.*.variant_id' => 'nullable|exists:product_variants,id',

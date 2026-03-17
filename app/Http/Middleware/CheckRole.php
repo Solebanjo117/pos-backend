@@ -19,6 +19,12 @@ class CheckRole
         if (! $user) {
             return response()->json([
                 'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        if (! $user->is_active) {
+            return response()->json([
+                'message' => 'Forbidden. User is inactive.',
             ], 403);
         }
 

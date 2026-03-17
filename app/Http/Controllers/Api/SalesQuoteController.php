@@ -77,6 +77,7 @@ class SalesQuoteController extends Controller
             'date'                     => 'nullable|date',
             'valid_until'              => 'nullable|date|after_or_equal:date',
             'notes'                    => 'nullable|string',
+            'internal_notes'           => 'nullable|string',
             'items'                    => 'required|array|min:1',
             'items.*.product_id'       => 'required|exists:products,id',
             'items.*.variant_id'       => 'nullable|exists:product_variants,id',
@@ -90,13 +91,14 @@ class SalesQuoteController extends Controller
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
-                    'customer_id'  => $validated['customer_id'] ?? null,
-                    'user_id'      => $request->user()->id,
-                    'warehouse_id' => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
-                    'date'         => $validated['date'] ?? now(),
-                    'valid_until'  => $validated['valid_until'] ?? now()->addDays(15),
-                    'status'       => 'draft',
-                    'notes'        => $validated['notes'] ?? null,
+                    'customer_id'    => $validated['customer_id'] ?? null,
+                    'user_id'        => $request->user()->id,
+                    'warehouse_id'   => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
+                    'date'           => $validated['date'] ?? now(),
+                    'valid_until'    => $validated['valid_until'] ?? now()->addDays(15),
+                    'status'         => 'draft',
+                    'notes'          => $validated['notes'] ?? null,
+                    'internal_notes' => $validated['internal_notes'] ?? null,
                 ]);
 
                 foreach ($validated['items'] as $itemData) {
@@ -141,6 +143,7 @@ class SalesQuoteController extends Controller
             'warehouse_id'             => 'nullable|exists:warehouses,id',
             'valid_until'              => 'nullable|date',
             'notes'                    => 'nullable|string',
+            'internal_notes'           => 'nullable|string',
             'status'                   => 'nullable|in:draft,sent,accepted,rejected',
             'items'                    => 'nullable|array|min:1',
             'items.*.product_id'       => 'required|exists:products,id',
@@ -154,7 +157,7 @@ class SalesQuoteController extends Controller
 
         try {
             DB::transaction(function () use ($quote, $validated) {
-                $quote->update(collect($validated)->only(['customer_id', 'warehouse_id', 'valid_until', 'notes', 'status'])->toArray());
+                $quote->update(collect($validated)->only(['customer_id', 'warehouse_id', 'valid_until', 'notes', 'internal_notes', 'status'])->toArray());
 
                 if (isset($validated['items'])) {
                     $quote->items()->delete();
@@ -194,6 +197,7 @@ class SalesQuoteController extends Controller
             'customer_id'              => 'nullable|exists:customers,id',
             'warehouse_id'             => 'nullable|exists:warehouses,id',
             'notes'                    => 'nullable|string',
+            'internal_notes'           => 'nullable|string',
             'items'                    => 'required|array|min:1',
             'items.*.product_id'       => 'required|exists:products,id',
             'items.*.variant_id'       => 'nullable|exists:product_variants,id',
@@ -207,13 +211,14 @@ class SalesQuoteController extends Controller
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
-                    'customer_id'  => $validated['customer_id'] ?? null,
-                    'user_id'      => $request->user()->id,
-                    'warehouse_id' => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
-                    'date'         => now(),
-                    'valid_until'  => null, // No expiry by default (configurable from admin)
-                    'status'       => 'draft',
-                    'notes'        => $validated['notes'] ?? null,
+                    'customer_id'    => $validated['customer_id'] ?? null,
+                    'user_id'        => $request->user()->id,
+                    'warehouse_id'   => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
+                    'date'           => now(),
+                    'valid_until'    => null, // No expiry by default (configurable from admin)
+                    'status'         => 'draft',
+                    'notes'          => $validated['notes'] ?? null,
+                    'internal_notes' => $validated['internal_notes'] ?? null,
                 ]);
 
                 foreach ($validated['items'] as $itemData) {

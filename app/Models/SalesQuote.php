@@ -30,6 +30,7 @@ class SalesQuote extends Model
         'total',
         'converted_order_id',
         'notes',
+        'internal_notes',
     ];
 
     protected $casts = [

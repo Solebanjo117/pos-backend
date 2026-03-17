@@ -3,7 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\ReportController;
 
-Route::prefix('reports')->group(function () {
+Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context'])->group(function () {
     Route::get('/stock-levels', [ReportController::class, 'stockLevels']);
     Route::get('/movement-history', [ReportController::class, 'movementHistory']);
     

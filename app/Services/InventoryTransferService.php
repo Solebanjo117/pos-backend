@@ -49,30 +49,35 @@ class InventoryTransferService
         return DB::transaction(function () use ($transfer) {
             foreach ($transfer->items as $item) {
                 // Validate stock availability
-                $inventory = ProductInventory::where('product_id', $item->product_id)
-                    ->where('warehouse_id', $transfer->from_warehouse_id)
-                    ->when($item->variant_id, fn($q) => $q->where('variant_id', $item->variant_id))
-                    ->first();
+                $inventoryQuery = ProductInventory::where('warehouse_id', $transfer->from_warehouse_id)
+                    ->when(
+                        $item->variant_id,
+                        fn ($q) => $q->where('variant_id', $item->variant_id),
+                        fn ($q) => $q->where('product_id', $item->product_id),
+                    );
+                $inventory = $inventoryQuery->first();
 
-                $available = $inventory ? $inventory->quantity : 0;
+                $available = $inventory ? $inventory->quantity_available : 0;
                 if ($available < $item->quantity) {
                     $productName = $item->product->name ?? "ID:{$item->product_id}";
                     throw new \Exception("Stock insuficiente para {$productName}. Disponible: {$available}, Solicitado: {$item->quantity}");
                 }
 
                 // Deduct from origin
-                $inventory->decrement('quantity', $item->quantity);
+                $inventory->decrement('quantity_available', $item->quantity);
 
                 // Record outbound movement
                 InventoryMovement::create([
                     'product_id' => $item->product_id,
                     'variant_id' => $item->variant_id,
                     'warehouse_id' => $transfer->from_warehouse_id,
-                    'type' => 'out',
+                    'destination_warehouse_id' => $transfer->to_warehouse_id,
+                    'movement_type' => 'out',
                     'quantity' => $item->quantity,
                     'reference_type' => 'transfer',
                     'reference_id' => $transfer->id,
                     'reason' => "Transferencia salida → {$transfer->toWarehouse->name} ({$transfer->reference})",
+                    'user_id' => $transfer->created_by,
                 ]);
             }
 
@@ -103,21 +108,23 @@ class InventoryTransferService
                         'warehouse_id' => $transfer->to_warehouse_id,
                         'variant_id' => $item->variant_id,
                     ],
-                    ['quantity' => 0, 'min_stock' => 0, 'max_stock' => 0]
+                    ['quantity_available' => 0, 'quantity_reserved' => 0]
                 );
 
-                $inventory->increment('quantity', $item->quantity);
+                $inventory->increment('quantity_available', $item->quantity);
 
                 // Record inbound movement
                 InventoryMovement::create([
                     'product_id' => $item->product_id,
                     'variant_id' => $item->variant_id,
                     'warehouse_id' => $transfer->to_warehouse_id,
-                    'type' => 'in',
+                    'destination_warehouse_id' => $transfer->from_warehouse_id,
+                    'movement_type' => 'in',
                     'quantity' => $item->quantity,
                     'reference_type' => 'transfer',
                     'reference_id' => $transfer->id,
                     'reason' => "Transferencia entrada ← {$transfer->fromWarehouse->name} ({$transfer->reference})",
+                    'user_id' => $receivedByUserId,
                 ]);
             }
 

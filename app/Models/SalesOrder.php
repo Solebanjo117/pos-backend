@@ -28,6 +28,7 @@ class SalesOrder extends Model
         'payment_status',
         'payment_method',
         'notes',
+        'internal_notes',
         'audit_logs',
     ];
 

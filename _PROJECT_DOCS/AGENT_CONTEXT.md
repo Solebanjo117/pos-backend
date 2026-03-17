@@ -163,7 +163,7 @@ Autenticación: sesión por cookie funcionando en producción con dominio .herme
 Rate limiting: routes/api.php aplica `throttle:120,1` al grupo `v1`.
 Form Requests: existen 8 Form Requests en pos-backend/app/Http/Requests/ frente a 35 controladores en pos-backend/app/Http/Controllers/Api/.
 Tests: pos-backend/tests/Feature/ tiene 15 archivos (P0+P1+P2+example); última corrida conjunta P0+P1+P2: 28 passed, 1 skipped (58 assertions); pos-frontend/tests/Feature/ tiene 12 archivos y cubre auth, dashboard, settings y example.
-Cache/Queue: config/cache.php usa `database` como store por defecto; config/queue.php usa `database` como conexión por defecto y `database-uuids` para failed jobs (migración a Redis no aplicada: redis-cli no disponible en entorno).
+Cache/Queue: config/cache.php usa `redis` como store (CACHE_STORE=redis en .env); config/queue.php usa `redis` como conexión (QUEUE_CONNECTION=redis en .env) con phpredis client en 127.0.0.1:6379 (migración a Redis aplicada ✓).
 Store settings: store_tax_rate y modules_work_orders_enabled expuestos como settings configurables (con defaults vía seeder).
 Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json, resources/js/app.ts, resources/js/services/api/client.ts ni en el barrido de resources/js/composables/.
 
@@ -181,7 +181,7 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
   FASE 2 — Tests y observabilidad (P1, paralela con F1)
     [x] Módulo 2.1: 10 tests P1
     [x] Módulo 2.2: Logging estructurado + RequestTimingMiddleware
-    [ ] Módulo 2.3: Migrar cache/queue a Redis (opcional por entorno, omitido: Redis no disponible)
+    [x] Módulo 2.3: Migrar cache/queue a Redis (CACHE_STORE=redis, QUEUE_CONNECTION=redis, phpredis en 127.0.0.1:6379)
   
   FASE 3 — Configuraciones de tienda y hardcodeados
     [x] Módulo 3.1: Auditoría de valores hardcodeados
@@ -199,3 +199,135 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
   FASE 6 — Stripe/Square [requiere F1 completa]
   FASE 7 — Sanctum tokens [requiere F6]
   FASE 8 — QuickBooks/Xero [requiere todo estable]
+
+---
+
+## Auditoría de requerimientos cliente — 17 de marzo de 2026 (rev.2)
+
+### R01 — Formulario crear vs editar producto son inconsistentes
+  R01 | ⚠️ Parcial | Create.vue (790 líneas) y Edit.vue (867 líneas) son estructuralmente DIFERENTES.
+  - Create tiene: pricing integrado, inventario inicial, selector categoría/marca, specs técnicas dinámicas
+  - Edit tiene: galería multi-imagen, AttributeManager externo, OemReferenceManager, AlternativeManager
+  - Edit NO tiene: pricing en formulario, inventario, selector categoría/marca
+  Qué falta: unificar en componente base ProductForm.vue compartido.
+
+  Archivos: pos-frontend/resources/js/pages/Products/Create.vue, pos-frontend/resources/js/pages/Products/Edit.vue
+
+### R02 — Datos técnicos fusionados con información principal
+  R02 | ⚠️ Parcial | Create.vue muestra atributos técnicos fusionados en sección "Datos del Producto" (líneas 526-541) sin tabs separadas. Sin embargo, Edit.vue NO muestra sección visible de especificaciones técnicas (AttributeManager importado pero no renderizado).
+  Qué falta: agregar sección de especificaciones técnicas visible en Edit.vue.
+
+  Archivos: pos-frontend/resources/js/pages/Products/Create.vue, pos-frontend/resources/js/pages/Products/Edit.vue
+
+### R03 — Precio e inventario dentro de cada variante
+  R03 | ✅ Implementado | ProductVariant.php (líneas 50-64) tiene pricing(): HasOne y inventory(): HasMany por variante. VariantManager.vue permite definir precio e inventario inicial por variante individualmente. Arquitectura dual: Product O Variant pueden tener pricing/inventory.
+
+  Archivos: pos-backend/app/Models/ProductVariant.php, pos-backend/app/Models/ProductPricing.php, pos-backend/app/Models/ProductInventory.php, pos-frontend/resources/js/components/Products/VariantManager.vue
+
+### R04 — Código de producto no es el key único del sistema
+  R04 | ✅ Implementado | SKU es 'nullable|string' sin unique constraint. Migraciones 2026_03_11 y 2026_03_12 eliminaron constraints de SKU y UPC. Key único es ID autogenerado (BIGINT autoincrement).
+
+  Archivos: pos-backend/app/Http/Requests/StoreProductRequest.php:31-32, pos-backend/database/migrations/2026_03_12_011851_drop_sku_unique_from_product_variants_table.php
+
+### R05 — Precio de venta editable en POS según rol
+  R05 | ⚠️ Parcial | Frontend valida rol en ProductTable.vue:81-86 (solo admin/manager ven campo editable; otros ven candado). Backend NO valida rol - cualquier usuario puede enviar unit_price via API directa.
+  Qué falta: validación de rol en SalesOrderController antes de aceptar precio override.
+
+  Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:81-86, pos-backend/app/Http/Controllers/Api/SalesOrderController.php:100
+
+### R06 — Flujo siempre comienza con cotización
+  R06 | ❌ Ausente | POST /sales-orders acepta items directamente sin quote_id. POS permite venta directa O cotización (ambas opcionales). processSale() en usePOS.ts:506-542 crea orden sin referencia a cotización.
+  Qué falta: obligar flujo cotización → venta; venta directa no debería permitirse.
+
+  Archivos: pos-backend/routes/api_sales_orders.php:24, pos-frontend/resources/js/composables/usePOS.ts:506-542
+
+### R07 — Estados del flujo de cotización
+  R07 | ✅ Implementado | SalesQuote.php:16 define 9 estados: draft, sent, sent_to_deposit, sent_to_cashier, accepted, collected, rejected, expired, converted. Controller tiene métodos sendToDeposit():248, sendToCashier():267, markCollected():286, convert():322.
+
+  Archivos: pos-backend/app/Models/SalesQuote.php:16, pos-backend/app/Http/Controllers/Api/SalesQuoteController.php:248-322
+
+### R08 — Expiración de cotización configurable desde settings
+  R08 | ✅ Implementado | quote_expiration_days en StoreSettingController.php:45 ($allowed). useStoreSettings.ts:16 documenta: 0=disabled, 15/30/60/90 días. Endpoint: PUT /api/v1/store-settings.
+
+  Archivos: pos-backend/app/Http/Controllers/Api/StoreSettingController.php:45, pos-frontend/resources/js/composables/useStoreSettings.ts:16-33
+
+### R09 — Ver especificaciones del producto desde POS/cotización
+  R09 | ⚠️ Parcial | ProductDetailModal accesible desde CARRITO via clic derecho/long-press (ProductTable.vue:49-58). Desde BÚSQUEDA (ProductSearchModal.vue) solo hay badges resumidos de key_attributes (líneas 277-290), sin opción de ver detalle completo antes de agregar.
+  Qué falta: botón "Ver detalle" en ProductSearchModal antes de agregar al carrito.
+
+  Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:49-58, pos-frontend/resources/js/components/POS/ProductSearchModal.vue:277-290
+
+### R10 — Filtro de vehículos: marca → modelo → motor + búsqueda directa por motor
+  R10 | ⚠️ Parcial | VehicleSelector.vue implementa cascada estricta 4 niveles: Marca→Modelo→Serie→Motor (líneas 117-144 selectores deshabilitados en cascada). Backend VehicleEngineController:15-54 SÍ soporta búsqueda directa por engine_code/displacement/fuel_type pero el frontend NO lo expone.
+  Qué falta: campo de búsqueda libre de motor en VehicleSelector que use endpoint /vehicle-engines?search=.
+
+  Archivos: pos-frontend/resources/js/components/VehicleSelector.vue:117-144, pos-backend/app/Http/Controllers/Api/VehicleEngineController.php:15-54
+
+### R11 — Años con dos dígitos en compatibilidad vehicular
+  R11 | ❌ Ausente | Migración usa tipo MySQL YEAR (4 dígitos: 1901-2155). VehicleModel.php castea como integer. getYearRangeAttribute() retorna "2020-2024" sin transformación.
+  Qué falta: función de formateo para mostrar años abreviados (94, 00, 08) en UI.
+
+  Archivos: pos-backend/database/migrations/2026_02_11_000015_create_vehicle_models_table.php, pos-backend/app/Models/VehicleModel.php
+
+### R12 — Thumbnail del producto en listados y búsqueda POS
+  R12 | ✅ Implementado | ProductCard.vue muestra image_url con fallback SVG (lista:63-70, grid:143-152). ProductSearchModal.vue:240-253 muestra thumbnail 40x40 en tabla de resultados.
+
+  Archivos: pos-frontend/resources/js/components/Products/ProductCard.vue:63-152, pos-frontend/resources/js/components/POS/ProductSearchModal.vue:240-253
+
+### R13 — Nota interna separada de nota para el cliente
+  R13 | ❌ Ausente | SalesQuote.php:32 y SalesOrder.php:30 solo tienen campo 'notes' en fillable. Migraciones solo definen text('notes'). SalesQuotes/Create.vue:350-358 un solo textarea.
+  Qué falta: campo 'internal_notes' en migraciones, modelos y formularios; excluir de documentos impresos.
+
+  Archivos: pos-backend/app/Models/SalesQuote.php:32, pos-backend/app/Models/SalesOrder.php:30, pos-frontend/resources/js/pages/SalesQuotes/Create.vue:350-358
+
+### R14 — Reorden desde cotización/venta
+  R14 | ❌ Ausente | SmartReorder existe como módulo separado (/purchase-orders/smart-reorder). QuickPurchaseModal aparece en ProductSearchModal SOLO cuando stock=0 (líneas 302-310), no desde carrito/cotización.
+  Qué falta: botón "Marcar para reorden" en cada línea del carrito POS para crear back order sin salir de pantalla.
+
+  Archivos: pos-frontend/resources/js/components/POS/ProductSearchModal.vue:302-310, pos-frontend/resources/js/pages/PurchaseOrders/SmartReorder.vue
+
+### R15 — Reordenar líneas de productos en cotización
+  R15 | ✅ Implementado | vuedraggable v4.1.0 instalado. ProductTable.vue:92-98 envuelve tabla en <draggable> con handle=".drag-handle". GripVertical icon visible en línea 127 con title="Arrastrar para reordenar". usePOS.ts:374-377 reorderCart() sincroniza nuevo orden.
+
+  Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:92-127, pos-frontend/resources/js/composables/usePOS.ts:374-377
+
+---
+
+## Resumen de auditoría
+
+**Total de requerimientos:** 15
+
+| Estado | Cant | Requerimientos |
+|--------|------|----------------|
+| ✅ Implementados | 6 | R03, R04, R07, R08, R12, R15 |
+| ⚠️ Parciales | 5 | R01, R02, R05, R09, R10 |
+| ❌ Ausentes | 4 | R06, R11, R13, R14 |
+
+### Detalle de Parciales
+
+| Req | Qué existe | Qué falta |
+|-----|-----------|-----------|
+| R01 | Ambos formularios funcionan | Unificar estructura; pricing/inventario/categoría en Edit |
+| R02 | Create tiene specs fusionadas | Edit no muestra sección de especificaciones |
+| R05 | Control de rol en frontend | Validación de rol en backend API |
+| R09 | Modal detalle desde carrito | Botón "Ver detalle" en búsqueda |
+| R10 | Cascada marca→modelo→motor | Búsqueda directa de motor sin modelo |
+
+### Orden de implementación recomendado
+
+**Fase P0 — Críticos para primera venta (13h)**
+1. R06 (8h) — Flujo obligatorio cotización → venta
+2. R05 (2h) — Validación de rol en backend para editar precio
+3. R13 (3h) — Campo internal_notes en cotización/venta
+
+**Fase P1 — Completitud operativa (15h)**
+4. R01 (6h) — Unificar formularios crear/editar producto
+5. R02 (2h) — Agregar sección specs técnicas a Edit.vue
+6. R10 (4h) — Búsqueda directa de motor en VehicleSelector
+7. R09 (3h) — Botón "Ver detalle" en ProductSearchModal
+
+**Fase P2 — Nice-to-have (10h)**
+8. R14 (6h) — Botón back order desde línea de carrito
+9. R11 (4h) — Soporte años 2 dígitos (requiere migración)
+
+**Auditoría completada — 17 de marzo de 2026, sin modificaciones al código.**
