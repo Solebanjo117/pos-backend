@@ -29,6 +29,7 @@ class DatabaseSeeder extends Seeder
             WarehouseSeeder::class,
             AttributeDefinitionSeeder::class,
             CategorySeeder::class,
+            DefaultSettingsSeeder::class,
         ]);
         
         $this->command->info('✅ Datos base creados');
