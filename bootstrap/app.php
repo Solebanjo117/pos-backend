@@ -15,12 +15,17 @@ return Application::configure(basePath: dirname(__DIR__))
         // Register role middleware alias
         $middleware->alias([
             'role' => \App\Http\Middleware\CheckRole::class,
+            'warehouse_context' => \App\Http\Middleware\EnforceWarehouseContext::class,
         ]);
         
         // Exclude API routes from CSRF verification
         $middleware->validateCsrfTokens(except: [
             'api/*',
         ]);
+
+        $middleware->appendToGroup('api',
+            \App\Http\Middleware\RequestTimingMiddleware::class
+        );
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
