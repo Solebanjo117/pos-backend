@@ -52,6 +52,11 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     require __DIR__ . '/api_sales_quotes.php';
 
     // ---------------------------------------------------------------
+    // Work Orders: all authenticated roles
+    // ---------------------------------------------------------------
+    require __DIR__ . '/api_work_orders.php';
+
+    // ---------------------------------------------------------------
     // Purchasing: buyer, manager, admin
     // ---------------------------------------------------------------
     require __DIR__ . '/api_purchase_orders.php';
