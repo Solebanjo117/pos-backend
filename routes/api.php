@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
-Route::middleware(['web'])->prefix('v1')->group(function () {
+Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(function () {
 
     // ---------------------------------------------------------------
     // Public to all authenticated users
