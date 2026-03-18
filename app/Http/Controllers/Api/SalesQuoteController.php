@@ -88,6 +88,26 @@ class SalesQuoteController extends Controller
             'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
         ]);
 
+        // ── Enforce price override permission (R05) ──
+        $userRole = $request->user()->role ?? '';
+        $canOverridePrice = in_array($userRole, ['admin', 'manager']);
+
+        if (!$canOverridePrice && !empty($validated['items'])) {
+            foreach ($validated['items'] as &$item) {
+                $pricingQuery = \App\Models\ProductPricing::query();
+                if (!empty($item['variant_id'])) {
+                    $pricingQuery->where('variant_id', $item['variant_id']);
+                } else {
+                    $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
+                }
+                $systemPrice = $pricingQuery->value('base_price');
+                if ($systemPrice !== null) {
+                    $item['unit_price'] = (float) $systemPrice;
+                }
+            }
+            unset($item);
+        }
+
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
@@ -155,6 +175,26 @@ class SalesQuoteController extends Controller
             'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
         ]);
 
+        // ── Enforce price override permission (R05) ──
+        $userRole = $request->user()->role ?? '';
+        $canOverridePrice = in_array($userRole, ['admin', 'manager']);
+
+        if (!$canOverridePrice && !empty($validated['items'])) {
+            foreach ($validated['items'] as &$item) {
+                $pricingQuery = \App\Models\ProductPricing::query();
+                if (!empty($item['variant_id'])) {
+                    $pricingQuery->where('variant_id', $item['variant_id']);
+                } else {
+                    $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
+                }
+                $systemPrice = $pricingQuery->value('base_price');
+                if ($systemPrice !== null) {
+                    $item['unit_price'] = (float) $systemPrice;
+                }
+            }
+            unset($item);
+        }
+
         try {
             DB::transaction(function () use ($quote, $validated) {
                 $quote->update(collect($validated)->only(['customer_id', 'warehouse_id', 'valid_until', 'notes', 'internal_notes', 'status'])->toArray());
@@ -207,6 +247,26 @@ class SalesQuoteController extends Controller
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
         ]);
+
+        // ── Enforce price override permission (R05) ──
+        $userRole = $request->user()->role ?? '';
+        $canOverridePrice = in_array($userRole, ['admin', 'manager']);
+
+        if (!$canOverridePrice && !empty($validated['items'])) {
+            foreach ($validated['items'] as &$item) {
+                $pricingQuery = \App\Models\ProductPricing::query();
+                if (!empty($item['variant_id'])) {
+                    $pricingQuery->where('variant_id', $item['variant_id']);
+                } else {
+                    $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
+                }
+                $systemPrice = $pricingQuery->value('base_price');
+                if ($systemPrice !== null) {
+                    $item['unit_price'] = (float) $systemPrice;
+                }
+            }
+            unset($item);
+        }
 
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
