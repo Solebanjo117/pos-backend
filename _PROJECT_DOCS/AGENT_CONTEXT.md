@@ -230,10 +230,9 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
   Archivos: pos-backend/app/Http/Requests/StoreProductRequest.php:31-32, pos-backend/database/migrations/2026_03_12_011851_drop_sku_unique_from_product_variants_table.php
 
 ### R05 — Precio de venta editable en POS según rol
-  R05 | ⚠️ Parcial | Frontend valida rol en ProductTable.vue:81-86 (solo admin/manager ven campo editable; otros ven candado). Backend NO valida rol - cualquier usuario puede enviar unit_price via API directa.
-  Qué falta: validación de rol en SalesOrderController antes de aceptar precio override.
+  R05 | ✅ Implementado | Frontend valida rol en ProductTable.vue:82-85 (solo admin/manager ven campo editable; otros ven candado). Backend valida rol en SalesOrderController y SalesQuoteController antes de aceptar precio override; usuarios sin permiso reciben precio del sistema desde ProductPricing.base_price.
 
-  Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:81-86, pos-backend/app/Http/Controllers/Api/SalesOrderController.php:100
+  Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:82-85, pos-backend/app/Http/Controllers/Api/SalesOrderController.php:171-191, pos-backend/app/Http/Controllers/Api/SalesQuoteController.php:90-106
 
 ### R06 — Flujo siempre comienza con cotización
   R06 | ❌ Ausente | POST /sales-orders acepta items directamente sin quote_id. POS permite venta directa O cotización (ambas opcionales). processSale() en usePOS.ts:506-542 crea orden sin referencia a cotización.
@@ -275,10 +274,9 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
   Archivos: pos-frontend/resources/js/components/Products/ProductCard.vue:63-152, pos-frontend/resources/js/components/POS/ProductSearchModal.vue:240-253
 
 ### R13 — Nota interna separada de nota para el cliente
-  R13 | ❌ Ausente | SalesQuote.php:32 y SalesOrder.php:30 solo tienen campo 'notes' en fillable. Migraciones solo definen text('notes'). SalesQuotes/Create.vue:350-358 un solo textarea.
-  Qué falta: campo 'internal_notes' en migraciones, modelos y formularios; excluir de documentos impresos.
+  R13 | ✅ Implementado | SalesQuote.php y SalesOrder.php tienen 'internal_notes' en fillable. Migración 2026_03_17_120000 agrega columna a ambas tablas. Controllers (store/update/storeFromPos) validan y guardan internal_notes. Frontend SalesQuotes/Create.vue y Edit.vue tienen campo "Nota Interna" con aviso de no aparecer en documentos.
 
-  Archivos: pos-backend/app/Models/SalesQuote.php:32, pos-backend/app/Models/SalesOrder.php:30, pos-frontend/resources/js/pages/SalesQuotes/Create.vue:350-358
+  Archivos: pos-backend/app/Models/SalesQuote.php:33, pos-backend/app/Models/SalesOrder.php:31, pos-backend/database/migrations/2026_03_17_120000_add_internal_notes_to_sales_quotes_and_orders.php, pos-frontend/resources/js/pages/SalesQuotes/Create.vue:361-372, pos-frontend/resources/js/pages/SalesQuotes/Edit.vue:376-384
 
 ### R14 — Reorden desde cotización/venta
   R14 | ❌ Ausente | SmartReorder existe como módulo separado (/purchase-orders/smart-reorder). QuickPurchaseModal aparece en ProductSearchModal SOLO cuando stock=0 (líneas 302-310), no desde carrito/cotización.
@@ -293,15 +291,15 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 
 ---
 
-## Resumen de auditoría
+## Resumen de auditoría (actualizado 17-mar-2026)
 
 **Total de requerimientos:** 15
 
 | Estado | Cant | Requerimientos |
 |--------|------|----------------|
-| ✅ Implementados | 6 | R03, R04, R07, R08, R12, R15 |
-| ⚠️ Parciales | 5 | R01, R02, R05, R09, R10 |
-| ❌ Ausentes | 4 | R06, R11, R13, R14 |
+| ✅ Implementados | 8 | R03, R04, R05, R07, R08, R12, R13, R15 |
+| ⚠️ Parciales | 4 | R01, R02, R09, R10 |
+| ❌ Ausentes | 3 | R06, R11, R14 |
 
 ### Detalle de Parciales
 
@@ -309,16 +307,15 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 |-----|-----------|-----------|
 | R01 | Ambos formularios funcionan | Unificar estructura; pricing/inventario/categoría en Edit |
 | R02 | Create tiene specs fusionadas | Edit no muestra sección de especificaciones |
-| R05 | Control de rol en frontend | Validación de rol en backend API |
 | R09 | Modal detalle desde carrito | Botón "Ver detalle" en búsqueda |
 | R10 | Cascada marca→modelo→motor | Búsqueda directa de motor sin modelo |
 
 ### Orden de implementación recomendado
 
-**Fase P0 — Críticos para primera venta (13h)**
-1. R06 (8h) — Flujo obligatorio cotización → venta
-2. R05 (2h) — Validación de rol en backend para editar precio
-3. R13 (3h) — Campo internal_notes en cotización/venta
+**Fase P0 — Críticos para primera venta (8h)**
+1. ~~R05 (2h) — Validación de rol en backend para editar precio~~ ✅ Completado
+2. ~~R13 (3h) — Campo internal_notes en cotización/venta~~ ✅ Completado
+3. R06 (8h) — Flujo obligatorio cotización → venta
 
 **Fase P1 — Completitud operativa (15h)**
 4. R01 (6h) — Unificar formularios crear/editar producto
