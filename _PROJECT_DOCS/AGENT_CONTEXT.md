@@ -162,7 +162,7 @@ pos-frontend/tests/Unit/ExampleTest.php → prueba unitaria de ejemplo del front
 Autenticación: sesión por cookie funcionando en producción con dominio .hermexpos.app compartido entre hermexpos.app y api.hermexpos.app.
 Rate limiting: routes/api.php aplica `throttle:120,1` al grupo `v1`.
 Form Requests: existen 8 Form Requests en pos-backend/app/Http/Requests/ frente a 35 controladores en pos-backend/app/Http/Controllers/Api/.
-Tests: pos-backend/tests/Feature/ tiene 15 archivos (P0+P1+P2+example); última corrida conjunta P0+P1+P2: 28 passed, 1 skipped (58 assertions); pos-frontend/tests/Feature/ tiene 12 archivos y cubre auth, dashboard, settings y example.
+Tests: pos-backend/tests/Feature/ tiene 15 archivos (P0+P1+P2+example); última corrida completa backend (`php artisan test --stop-on-failure`): 31 passed (61 assertions). En pos-frontend la última corrida (`php artisan test --stop-on-failure`) falló en Auth/AuthenticationTest por `no such table: activity_log` (SQLite de tests), no por rutas web.
 Cache/Queue: config/cache.php usa `redis` como store (CACHE_STORE=redis en .env); config/queue.php usa `redis` como conexión (QUEUE_CONNECTION=redis en .env) con phpredis client en 127.0.0.1:6379 (migración a Redis aplicada ✓).
 Store settings: store_tax_rate y modules_work_orders_enabled expuestos como settings configurables (con defaults vía seeder).
 Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json, resources/js/app.ts, resources/js/services/api/client.ts ni en el barrido de resources/js/composables/.
@@ -197,6 +197,7 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
     [x] Fase 4 completa (P0+P1+P2 verde, TS errors 15 → 15, build ✓)
   FASE 5 — PWA/offline [requiere F2 completa]
   FASE 6 — Stripe/Square [requiere F1 completa]
+    ✅ Correcciones críticas (seeders, auth rutas, TS errors)
   FASE 7 — Sanctum tokens [requiere F6]
   FASE 8 — QuickBooks/Xero [requiere todo estable]
 
@@ -328,3 +329,21 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 9. R11 (4h) — Soporte años 2 dígitos (requiere migración)
 
 **Auditoría completada — 17 de marzo de 2026, sin modificaciones al código.**
+
+## Correcciones críticas pre-lanzamiento — 2026-03-18
+
+- Módulo C1 (seeders):
+  - Se eliminó la doble invocación de `VehicleSeeder` en `DatabaseSeeder` (solo queda una llamada).
+  - `VehicleSeeder` se hizo idempotente reemplazando todas las inserciones `create()` por `firstOrCreate()`.
+  - También se corrigieron seeders con restricciones `unique`: `BrandSeeder` (`name`), `SupplierSeeder` (`name`), `WarehouseSeeder` (`code`), `CategorySeeder` (`slug`) y `DemoDataSeeder` para `ProductBatch` (`product_id` + `batch_number`) y `WarehouseBatch` (`warehouse_id` + `product_batch_id`).
+  - Verificación: `php artisan db:seed --force` pasó en ejecuciones consecutivas; backend tests P0 y suite completa en verde.
+
+- Módulo C2 (auth rutas web):
+  - Se identificaron como públicas y se protegieron con `auth`: `/suppliers*`, `/purchase-orders*` y `/accounts-payable`.
+  - Se usó el patrón existente `Route::middleware(['auth'])->group(...)` sin introducir estructura nueva.
+  - Verificación manual: `/login` sigue accesible sin sesión y `/purchase-orders` redirige a login sin sesión.
+
+- Módulo C3 (TypeScript):
+  - Errores nuevos identificados: `resources/js/pages/PurchaseOrders/Receive.vue` y `resources/js/pages/PurchaseOrders/Show.vue` por uso de `product.sku` inexistente en el tipo.
+  - Corrección mínima: reemplazo de `sku` por `sku_base` en ambos archivos.
+  - Resultado: TS errors bajaron de 17 a 15 (`Found 15 errors in 4 files`, quedando solo los preexistentes de Products/SalesOrders + TwoFactor), build frontend OK.
