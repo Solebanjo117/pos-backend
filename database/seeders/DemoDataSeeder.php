@@ -123,25 +123,31 @@ class DemoDataSeeder extends Seeder
                 $expiryDate = $mfgDate->copy()->addMonths(rand(6, 24));
                 $batchNumber = 'LOT-' . strtoupper(substr($variant->sku, 0, 4)) . '-' . $mfgDate->format('Ym') . '-' . str_pad($b + 1, 2, '0', STR_PAD_LEFT);
 
-                $batch = ProductBatch::create([
-                    'product_id' => $variant->product_id,
-                    'batch_number' => $batchNumber,
-                    'manufacturing_date' => $mfgDate,
-                    'expiry_date' => $expiryDate,
-                    'cost' => rand(5, 60),
-                    'supplier_id' => $suppliers->isNotEmpty() ? $suppliers->random()->id : null,
-                ]);
+                $batch = ProductBatch::firstOrCreate(
+                    ['product_id' => $variant->product_id, 'batch_number' => $batchNumber],
+                    [
+                        'manufacturing_date' => $mfgDate,
+                        'expiry_date' => $expiryDate,
+                        'cost' => rand(5, 60),
+                        'supplier_id' => $suppliers->isNotEmpty() ? $suppliers->random()->id : null,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]
+                );
 
                 // Distribute batch across 1-3 warehouses
                 $batchWarehouses = $warehouses->random(min(rand(1, 3), $warehouses->count()));
                 foreach ($batchWarehouses as $wh) {
                     $qty = rand(5, 40);
-                    WarehouseBatch::create([
-                        'warehouse_id' => $wh->id,
-                        'product_batch_id' => $batch->id,
-                        'quantity' => $qty,
-                        'quantity_reserved' => 0,
-                    ]);
+                    WarehouseBatch::firstOrCreate(
+                        ['warehouse_id' => $wh->id, 'product_batch_id' => $batch->id],
+                        [
+                            'quantity' => $qty,
+                            'quantity_reserved' => 0,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]
+                    );
                 }
                 $batchCount++;
             }

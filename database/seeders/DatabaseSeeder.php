@@ -30,12 +30,16 @@ class DatabaseSeeder extends Seeder
             AttributeDefinitionSeeder::class,
             CategorySeeder::class,
             DefaultSettingsSeeder::class,
+            DemoDataSeeder::class,
+            InventoryMovementSeeder::class,
+            ProductInventorySeeder::class,
+            ProductSeeder::class,
+            UserSeeder::class,
+            VehicleSeeder::class,
+            
         ]);
         
         $this->command->info('✅ Datos base creados');
-        
-        // Vehicle data
-        $this->call(VehicleSeeder::class);
         $this->command->info('✅ Vehículos creados');
         
         // Products with all relationships

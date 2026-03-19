@@ -58,7 +58,19 @@ class SupplierSeeder extends Seeder
         ];
 
         foreach ($suppliers as $supplier) {
-            Supplier::create($supplier);
+            Supplier::firstOrCreate(
+                ['name' => $supplier['name']],
+                [
+                    'contact_name' => $supplier['contact_name'] ?? null,
+                    'email' => $supplier['email'] ?? null,
+                    'phone' => $supplier['phone'] ?? null,
+                    'address' => $supplier['address'] ?? null,
+                    'payment_terms' => $supplier['payment_terms'] ?? null,
+                    'status' => $supplier['status'] ?? 'active',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]
+            );
         }
     }
 }
