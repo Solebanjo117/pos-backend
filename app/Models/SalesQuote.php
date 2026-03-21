@@ -24,6 +24,7 @@ class SalesQuote extends Model
         'date',
         'valid_until',
         'status',
+        'sent_to_cashier_at',
         'subtotal',
         'tax_amount',
         'discount_amount',
@@ -34,12 +35,13 @@ class SalesQuote extends Model
     ];
 
     protected $casts = [
-        'date'            => 'date',
-        'valid_until'     => 'date',
-        'subtotal'        => 'decimal:2',
-        'tax_amount'      => 'decimal:2',
-        'discount_amount' => 'decimal:2',
-        'total'           => 'decimal:2',
+        'date'                => 'date',
+        'valid_until'         => 'date',
+        'sent_to_cashier_at'  => 'datetime',
+        'subtotal'            => 'decimal:2',
+        'tax_amount'          => 'decimal:2',
+        'discount_amount'     => 'decimal:2',
+        'total'               => 'decimal:2',
     ];
 
     protected $appends = ['formatted_total', 'status_label'];
@@ -135,7 +137,10 @@ class SalesQuote extends Model
         if (!in_array($this->status, ['draft', 'sent', 'sent_to_deposit'])) {
             return false;
         }
-        return $this->update(['status' => 'sent_to_cashier']);
+        return $this->update([
+            'status' => 'sent_to_cashier',
+            'sent_to_cashier_at' => now(),
+        ]);
     }
 
     public function markCollected(): bool

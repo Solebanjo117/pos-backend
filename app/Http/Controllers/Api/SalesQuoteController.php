@@ -365,6 +365,23 @@ class SalesQuoteController extends Controller
     }
 
     /**
+     * GET /api/sales-quotes/pending-at-cashier
+     */
+    public function pendingAtCashier(Request $request): JsonResponse
+    {
+        $quotes = SalesQuote::with(['customer', 'user', 'items.product'])
+            ->where('warehouse_id', $request->header('X-Warehouse-Id'))
+            ->where('status', 'sent_to_cashier')
+            ->orderBy('sent_to_cashier_at', 'asc')
+            ->get();
+
+        return response()->json([
+            'data'  => $quotes,
+            'count' => $quotes->count(),
+        ]);
+    }
+
+    /**
      * DELETE /api/sales-quotes/{id}
      */
     public function destroy(int $id): JsonResponse
