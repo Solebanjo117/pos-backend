@@ -369,8 +369,11 @@ class SalesQuoteController extends Controller
      */
     public function pendingAtCashier(Request $request): JsonResponse
     {
+        $warehouseId = $request->header('X-Warehouse-Id')
+            ?? $request->user()?->current_warehouse_id;
+
         $quotes = SalesQuote::with(['customer', 'user', 'items.product'])
-            ->where('warehouse_id', $request->header('X-Warehouse-Id'))
+            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
             ->where('status', 'sent_to_cashier')
             ->orderBy('sent_to_cashier_at', 'asc')
             ->get();

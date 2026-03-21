@@ -30,19 +30,19 @@ class DemoDataSeeder extends Seeder
         $this->command->info('🌱 Creando datos de demostración...');
 
         // ── 1. USERS ──
-        $admin = User::firstOrCreate(
+        $admin = User::updateOrCreate(
             ['email' => 'admin@hermes.com'],
             ['name' => 'Admin Principal', 'username' => 'admin', 'password' => bcrypt('password'), 'role' => 'admin', 'is_active' => true]
         );
-        $cashier = User::firstOrCreate(
+        $cashier = User::updateOrCreate(
             ['email' => 'cajero@hermes.com'],
             ['name' => 'María López', 'username' => 'maria', 'password' => bcrypt('password'), 'role' => 'cashier', 'is_active' => true]
         );
-        $seller = User::firstOrCreate(
+        $seller = User::updateOrCreate(
             ['email' => 'vendedor@hermes.com'],
             ['name' => 'Carlos Pérez', 'username' => 'carlos', 'password' => bcrypt('password'), 'role' => 'seller', 'is_active' => true]
         );
-        $this->command->info('✅ 3 usuarios creados (admin, cajero, vendedor)');
+        $this->command->info('✅ 3 usuarios creados/actualizados (admin, cajero, vendedor)');
 
         // ── 2. CUSTOMERS ──
         $customers = [];
