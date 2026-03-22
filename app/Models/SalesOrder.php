@@ -330,23 +330,35 @@ class SalesOrder extends Model
         }
         $this->save();
 
-        // Reduce customer debt
+        // Reduce customer debt (or apply store_credit)
         if ($this->customer_id) {
             $customer = \App\Models\Customer::find($this->customer_id);
             if ($customer) {
                 $balanceBefore = (float) $customer->current_balance;
-                $customer->current_balance = $balanceBefore - $amount;
+
+                // For store_credit, we INCREASE the balance (use up the credit)
+                // For other methods, we DECREASE the balance (reduce debt)
+                if ($method === 'store_credit') {
+                    // Store credit: balance is negative, add amount to bring it closer to 0
+                    $customer->current_balance = $balanceBefore + $amount;
+                    $transactionType = 'store_credit_used';
+                    $description = "Saldo a favor aplicado a venta {$this->order_number}";
+                } else {
+                    $customer->current_balance = $balanceBefore - $amount;
+                    $transactionType = 'payment';
+                    $description = "Abono a venta {$this->order_number}";
+                }
                 $customer->save();
 
                 \App\Models\CustomerTransaction::create([
                     'customer_id'      => $customer->id,
-                    'type'             => 'payment',
+                    'type'             => $transactionType,
                     'reference_type'   => 'sales_order_payment',
                     'reference_id'     => $payment->id,
                     'amount'           => $amount,
                     'balance_before'   => $balanceBefore,
                     'balance_after'    => $customer->current_balance,
-                    'description'      => "Abono a venta {$this->order_number}",
+                    'description'      => $description,
                     'transaction_date' => $paidAt ?? now(),
                     'created_by'       => auth()->id(),
                 ]);

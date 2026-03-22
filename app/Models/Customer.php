@@ -48,6 +48,8 @@ class Customer extends Model
         'current_balance' => 0,
     ];
 
+    protected $appends = ['store_credit', 'has_store_credit'];
+
     /**
      * Get customer transactions
      */
@@ -82,6 +84,22 @@ class Customer extends Model
     public function getAvailableCredit(): float
     {
         return max(0, $this->credit_limit - $this->current_balance);
+    }
+
+    /**
+     * Get store credit (saldo a favor - when current_balance is negative)
+     */
+    public function getStoreCreditAttribute(): float
+    {
+        return $this->current_balance < 0 ? abs((float) $this->current_balance) : 0.0;
+    }
+
+    /**
+     * Check if customer has store credit (saldo a favor)
+     */
+    public function getHasStoreCreditAttribute(): bool
+    {
+        return $this->current_balance < 0;
     }
 
     /**

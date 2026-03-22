@@ -56,6 +56,7 @@ class CustomerTransaction extends Model
             'payment' => 'Pago',
             'credit_note' => 'Nota de Crédito',
             'adjustment' => 'Ajuste',
+            'store_credit_used' => 'Saldo a Favor Utilizado',
             default => $this->type,
         };
     }

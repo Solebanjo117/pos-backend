@@ -57,6 +57,9 @@ pos-backend/app/Http/Requests/StoreSupplierRequest.php → valida creación de p
 pos-backend/app/Http/Requests/UpdateProductRequest.php → valida actualización parcial de producto y pricing.
 pos-backend/app/Http/Requests/UpdateWarehouseRequest.php → valida actualización parcial de sucursal con unicidad de código ignorando el registro actual.
 pos-backend/app/Models/ → directorio de modelos Eloquent para productos, inventario, compras, ventas, vehículos, usuarios y sucursales.
+pos-backend/app/Models/Customer.php → modelo Customer con store_credit (saldo a favor) y has_store_credit como atributos computados via $appends.
+pos-backend/app/Models/SalesOrder.php → modelo SalesOrder; método addPayment soporta store_credit como método de pago que incrementa el balance del cliente.
+pos-backend/app/Models/CustomerTransaction.php → modelo CustomerTransaction con tipo store_credit_used para registrar uso de saldo a favor.
 pos-backend/tests/Feature/ → directorio de feature tests backend con ejemplo base y suite P0.
 pos-backend/tests/Browser/ExampleTest.php → prueba browser de ejemplo.
 pos-backend/tests/Browser/LoginTest.php → prueba browser del login.
@@ -125,9 +128,12 @@ pos-frontend/resources/js/composables/useWarehouses.ts → composable para opera
 pos-frontend/resources/js/composables/useWorkOrders.ts → composable para CRUD de work orders y transición de estado vía apiClient.
 pos-frontend/resources/js/pages/ → árbol de páginas Inertia/Vue para auth, dashboard, POS, inventario, compras, ventas, reportes, vehículos, settings y catálogos.
 pos-frontend/resources/js/pages/WorkOrders/Index.vue → listado de work orders con tabla Folio/Vehículo/Estado/Sucursal/Fecha, filtro por estado y búsqueda por texto.
-pos-frontend/resources/js/pages/POS/Index.vue → página principal POS; soporta props quoteMode/quoteId para modo cotización (sin checkout). Valida checkout por stock y consulta sesión activa.
+pos-frontend/resources/js/pages/POS/Index.vue → página principal POS; soporta props quoteMode/quoteId para modo cotización (sin checkout), returnMode/orderId para modo devolución. Valida checkout por stock, consulta sesión activa y permite usar saldo a favor (store_credit) en pagos.
 pos-frontend/resources/js/pages/POS/CashierQueue.vue → interfaz dedicada al cajero con grid de cotizaciones pendientes y polling en vivo de los tiempos transcurridos.
 pos-frontend/resources/js/pages/SalesQuotes/Editor.vue → componente shell que renderiza la pantalla del POS en modo edición de cotizaciones (`quoteMode=true`).
+pos-frontend/resources/js/pages/SalesOrders/ReturnEditor.vue → componente shell que renderiza POS en modo devolución (`returnMode=true`) cargando items de la orden como cantidades negativas.
+pos-frontend/resources/js/components/POS/ActionButtons.vue → botones de acción del POS; "Cobrar" unificado que abre modal de pago (reemplazo de 4 botones separados).
+pos-frontend/resources/js/pages/Customers/Show.vue → detalle del cliente con sección "Saldo a Favor" cuando el cliente tiene current_balance negativo (store_credit).
 pos-frontend/resources/js/pages/Settings/Store.vue → UI de configuración de tienda; ahora incluye sección Fiscal (store_tax_rate) y sección Módulos (modules_work_orders_enabled).
 pos-frontend/resources/js/components/ → árbol de componentes Vue para shell de aplicación, POS, productos, dashboard, vehículos y librería ui.
 pos-frontend/tests/Feature/Auth/AuthenticationTest.php → prueba feature de autenticación.
