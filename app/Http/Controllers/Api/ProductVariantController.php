@@ -224,8 +224,10 @@ class ProductVariantController extends Controller
                 }
             }
 
-            // Update variant-level attributes if provided
-            if (isset($validated['attributes'])) {
+            // Update variant-level attributes if provided and non-empty.
+            // Guard against empty array: calling assignVariantAttributes([]) would
+            // delete all existing attributes and recreate nothing — data loss.
+            if (isset($validated['attributes']) && !empty($validated['attributes'])) {
                 $this->productService->assignVariantAttributes($variant, $validated['attributes']);
             }
 
