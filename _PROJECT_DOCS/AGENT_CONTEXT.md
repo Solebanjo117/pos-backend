@@ -97,7 +97,9 @@ pos-frontend/resources/js/composables/useDashboard.ts → composable para datos 
 pos-frontend/resources/js/composables/useInitials.ts → helper/composable para obtener iniciales de nombre.
 pos-frontend/resources/js/composables/useInventory.ts → composable para operaciones de inventario.
 pos-frontend/resources/js/composables/useInventoryMovements.ts → composable para movimientos de inventario.
+pos-frontend/resources/js/composables/useCashierQueue.ts → composable para polling en tiempo real y contador para la bandeja Cola de Caja.
 pos-frontend/resources/js/composables/usePOS.ts → composable POS con persistencia de sesiones y carrito en localStorage; ahora incluye available_stock en cada línea de carrito para validar checkout por stock.
+pos-frontend/resources/js/components/POS/ProductTable.vue → tabla del carrito POS con filas expandibles; incluye QuickPurchaseModal para reabasto rápido cuando available_stock <= 0; emite reorder-success para actualizar stock en padre.
 pos-frontend/resources/js/composables/usePosSession.ts → composable para sesión activa de POS; ahora sincroniza/limpia estado en localStorage según la sesión real devuelta por backend.
 pos-frontend/resources/js/composables/usePosSettings.ts → composable de configuración POS con fallback de sucursal en localStorage.
 pos-frontend/resources/js/composables/useProductAttributes.ts → composable que consulta y muta atributos de producto vía apiClient.
@@ -107,7 +109,9 @@ pos-frontend/resources/js/composables/usePurchaseOrders.ts → composable para �
 pos-frontend/resources/js/composables/useReports.ts → composable para reportes.
 pos-frontend/resources/js/composables/useSalesOrders.ts → composable para órdenes de venta.
 pos-frontend/resources/js/composables/useStoreSettings.ts → composable que lee y actualiza store settings y logo vía apiClient.
-pos-frontend/resources/js/components/AppSidebar.vue → navegación principal; ahora filtra entradas de work orders cuando modules_work_orders_enabled es false.
+pos-frontend/resources/js/components/AppSidebar.vue → navegación principal; filtra secciones por rol (POS: admin/manager/cashier; Compras/Inventario: admin/manager/buyer; Reportes/Catálogo: admin/manager; Cotizaciones/Productos: seller incluido; Administración: solo admin). Filtra work orders cuando modules_work_orders_enabled es false.
+pos-frontend/resources/js/components/NavMain.vue → componente base de navegación recursivo, adaptado para soportar badges numéricos opcionales.
+pos-frontend/resources/js/types/navigation.ts → definiciones TS de items del menú; incluye propiedad `badge`.
 pos-frontend/resources/js/composables/useSuppliers.ts → composable para proveedores.
 pos-frontend/resources/js/composables/useToast.ts → composable de toasts en memoria para success, error, warning e info.
 pos-frontend/resources/js/composables/useTwoFactorAuth.ts → composable para flujos de two-factor authentication.
@@ -121,7 +125,9 @@ pos-frontend/resources/js/composables/useWarehouses.ts → composable para opera
 pos-frontend/resources/js/composables/useWorkOrders.ts → composable para CRUD de work orders y transición de estado vía apiClient.
 pos-frontend/resources/js/pages/ → árbol de páginas Inertia/Vue para auth, dashboard, POS, inventario, compras, ventas, reportes, vehículos, settings y catálogos.
 pos-frontend/resources/js/pages/WorkOrders/Index.vue → listado de work orders con tabla Folio/Vehículo/Estado/Sucursal/Fecha, filtro por estado y búsqueda por texto.
-pos-frontend/resources/js/pages/POS/Index.vue → página principal POS; ahora valida checkout por stock y consulta sesión activa una sola vez después de inicializar sucursal.
+pos-frontend/resources/js/pages/POS/Index.vue → página principal POS; soporta props quoteMode/quoteId para modo cotización (sin checkout). Valida checkout por stock y consulta sesión activa.
+pos-frontend/resources/js/pages/POS/CashierQueue.vue → interfaz dedicada al cajero con grid de cotizaciones pendientes y polling en vivo de los tiempos transcurridos.
+pos-frontend/resources/js/pages/SalesQuotes/Editor.vue → componente shell que renderiza la pantalla del POS en modo edición de cotizaciones (`quoteMode=true`).
 pos-frontend/resources/js/pages/Settings/Store.vue → UI de configuración de tienda; ahora incluye sección Fiscal (store_tax_rate) y sección Módulos (modules_work_orders_enabled).
 pos-frontend/resources/js/components/ → árbol de componentes Vue para shell de aplicación, POS, productos, dashboard, vehículos y librería ui.
 pos-frontend/tests/Feature/Auth/AuthenticationTest.php → prueba feature de autenticación.
@@ -166,6 +172,11 @@ Tests: pos-backend/tests/Feature/ tiene 15 archivos (P0+P1+P2+example); última 
 Cache/Queue: config/cache.php usa `redis` como store (CACHE_STORE=redis en .env); config/queue.php usa `redis` como conexión (QUEUE_CONNECTION=redis en .env) con phpredis client en 127.0.0.1:6379 (migración a Redis aplicada ✓).
 Store settings: store_tax_rate y modules_work_orders_enabled expuestos como settings configurables (con defaults vía seeder).
 Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json, resources/js/app.ts, resources/js/services/api/client.ts ni en el barrido de resources/js/composables/.
+Roles: admin, manager, seller, cashier, buyer, assistant — seller formalizado en UI (label "Vendedor", orden correcto en selector, badge verde en listo de usuarios, validación backend ya incluida en StoreUserRequest).
+Quote Editor: /quotes/create y /quotes/{id}/edit renderizan SalesQuotes/Editor.vue que importa POS/Index.vue con quoteMode=true (sin checkout/caja). SalesQuotes/Index.vue redirige a estas rutas en vez de /pos.
+Sidebar por rol: seller ve Cotizaciones, Productos (lectura), Clientes, Dashboard, Vehículos. Cashier ve POS, Cierres de Caja, Cotizaciones (lectura), Dashboard, Clientes. Admin/Manager ven todo.
+API role middleware: api_pos_sessions.php (open/close/movements: admin,manager,cashier). api_sales_quotes.php (store/update/sendTo: admin,manager,seller; convert/collect: admin,manager,cashier; destroy: admin,manager).
+Web route protection: /pos requiere role:admin,manager,cashier; /quotes/* requiere role:admin,manager,seller.
 
 ### 6. Fases pendientes
 
@@ -206,19 +217,19 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 ## Auditoría de requerimientos cliente — 17 de marzo de 2026 (rev.2)
 
 ### R01 — Formulario crear vs editar producto son inconsistentes
-  R01 | ⚠️ Parcial | Create.vue (790 líneas) y Edit.vue (867 líneas) son estructuralmente DIFERENTES.
-  - Create tiene: pricing integrado, inventario inicial, selector categoría/marca, specs técnicas dinámicas
-  - Edit tiene: galería multi-imagen, AttributeManager externo, OemReferenceManager, AlternativeManager
-  - Edit NO tiene: pricing en formulario, inventario, selector categoría/marca
-  Qué falta: unificar en componente base ProductForm.vue compartido.
+  R01 | 🚧 N/A — Descartado por decisión de diseño | Create.vue y Edit.vue operan bajo paradigmas fundamentalmente diferentes.
+  - Create: recolecta todo en arrays locales y envía un único payload al guardar.
+  - Edit: CRUD inmediato por API para compatibilidad, VINs, imágenes, OEM refs y atributos.
+  Extraer un componente compartido (VehicleCompatibilitySection) duplicaría la complejidad en lugar de reducirla, ya que la estructura de datos, el flujo de guardado y las interacciones de UI son distintas por diseño. Ambos formularios funcionan correctamente de manera independiente.
 
   Archivos: pos-frontend/resources/js/pages/Products/Create.vue, pos-frontend/resources/js/pages/Products/Edit.vue
 
 ### R02 — Datos técnicos fusionados con información principal
-  R02 | ⚠️ Parcial | Create.vue muestra atributos técnicos fusionados en sección "Datos del Producto" (líneas 526-541) sin tabs separadas. Sin embargo, Edit.vue NO muestra sección visible de especificaciones técnicas (AttributeManager importado pero no renderizado).
-  Qué falta: agregar sección de especificaciones técnicas visible en Edit.vue.
+  R02 | ✅ Implementado | Create.vue muestra atributos técnicos fusionados inline en sección "Datos del Producto". Edit.vue ahora tiene la sección "Especificaciones Técnicas" visible con `AttributeManager` renderizado directamente en el template, permitiendo ver, agregar, editar y eliminar atributos.
+  Fix previo (2026-03-21): VariantManager.vue hereda atributos de la última variante existente con deep copy.
+  Fix final (2026-03-21): AttributeManager añadido al template de Edit.vue con `Wrench` y `Globe` icons importados.
 
-  Archivos: pos-frontend/resources/js/pages/Products/Create.vue, pos-frontend/resources/js/pages/Products/Edit.vue
+  Archivos: pos-frontend/resources/js/pages/Products/Create.vue, pos-frontend/resources/js/pages/Products/Edit.vue, pos-frontend/resources/js/components/Products/AttributeManager.vue
 
 ### R03 — Precio e inventario dentro de cada variante
   R03 | ✅ Implementado | ProductVariant.php (líneas 50-64) tiene pricing(): HasOne y inventory(): HasMany por variante. VariantManager.vue permite definir precio e inventario inicial por variante individualmente. Arquitectura dual: Product O Variant pueden tener pricing/inventory.
@@ -236,10 +247,10 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
   Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:82-85, pos-backend/app/Http/Controllers/Api/SalesOrderController.php:171-191, pos-backend/app/Http/Controllers/Api/SalesQuoteController.php:90-106
 
 ### R06 — Flujo siempre comienza con cotización
-  R06 | ❌ Ausente | POST /sales-orders acepta items directamente sin quote_id. POS permite venta directa O cotización (ambas opcionales). processSale() en usePOS.ts:506-542 crea orden sin referencia a cotización.
-  Qué falta: obligar flujo cotización → venta; venta directa no debería permitirse.
+  R06 | 🚫 N/A | Descartado por decisión de diseño. El POS permite tanto venta directa de mostrador como ventas cerradas a partir de cotizaciones, brindando flexibilidad para la coexistencia de roles (vendedores vs cajeros expedidores).
+  Qué falta: Nada. Se decidió intencionalmente mantener la flexibilidad híbrida actual.
 
-  Archivos: pos-backend/routes/api_sales_orders.php:24, pos-frontend/resources/js/composables/usePOS.ts:506-542
+  Archivos: pos-backend/routes/api_sales_orders.php, pos-frontend/resources/js/composables/usePOS.ts
 
 ### R07 — Estados del flujo de cotización
   R07 | ✅ Implementado | SalesQuote.php:16 define 9 estados: draft, sent, sent_to_deposit, sent_to_cashier, accepted, collected, rejected, expired, converted. Controller tiene métodos sendToDeposit():248, sendToCashier():267, markCollected():286, convert():322.
@@ -280,10 +291,9 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
   Archivos: pos-backend/app/Models/SalesQuote.php:33, pos-backend/app/Models/SalesOrder.php:31, pos-backend/database/migrations/2026_03_17_120000_add_internal_notes_to_sales_quotes_and_orders.php, pos-frontend/resources/js/pages/SalesQuotes/Create.vue:361-372, pos-frontend/resources/js/pages/SalesQuotes/Edit.vue:376-384
 
 ### R14 — Reorden desde cotización/venta
-  R14 | ❌ Ausente | SmartReorder existe como módulo separado (/purchase-orders/smart-reorder). QuickPurchaseModal aparece en ProductSearchModal SOLO cuando stock=0 (líneas 302-310), no desde carrito/cotización.
-  Qué falta: botón "Marcar para reorden" en cada línea del carrito POS para crear back order sin salir de pantalla.
+  R14 | ✅ Implementado | ProductTable.vue tiene botón "Abastecer desde aquí" en fila expandible cuando available_stock <= 0. Usa QuickPurchaseModal con lookup de producto desde props.products. QuickPurchaseModal incluye fallback variants[0].pricing.cost para obtener costo cuando product.pricing.cost no está disponible en listados.
 
-  Archivos: pos-frontend/resources/js/components/POS/ProductSearchModal.vue:302-310, pos-frontend/resources/js/pages/PurchaseOrders/SmartReorder.vue
+  Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue (import, state, openQuickPurchase, handlePurchaseSuccess, botón en línea 331-349, modal al final), pos-frontend/resources/js/components/POS/QuickPurchaseModal.vue (resetForm línea 59 con fallback variants)
 
 ### R15 — Reordenar líneas de productos en cotización
   R15 | ✅ Implementado | vuedraggable v4.1.0 instalado. ProductTable.vue:92-98 envuelve tabla en <draggable> con handle=".drag-handle". GripVertical icon visible en línea 127 con title="Arrastrar para reordenar". usePOS.ts:374-377 reorderCart() sincroniza nuevo orden.
@@ -292,22 +302,21 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 
 ---
 
-## Resumen de auditoría (actualizado 17-mar-2026)
+## Resumen de auditoría (actualizado 21-mar-2026)
 
 **Total de requerimientos:** 15
 
 | Estado | Cant | Requerimientos |
 |--------|------|----------------|
-| ✅ Implementados | 8 | R03, R04, R05, R07, R08, R12, R13, R15 |
-| ⚠️ Parciales | 4 | R01, R02, R09, R10 |
-| ❌ Ausentes | 3 | R06, R11, R14 |
+| ✅| Implementados | 10 | R02, R03, R04, R05, R07, R08, R12, R13, R14, R15 |
+| Parciales | 2 | R09, R10 |
+| Ausentes | 1 | R11 |
+| N/A / Descarte | 2 | R01, R06 |
 
 ### Detalle de Parciales
 
 | Req | Qué existe | Qué falta |
 |-----|-----------|-----------|
-| R01 | Ambos formularios funcionan | Unificar estructura; pricing/inventario/categoría en Edit |
-| R02 | Create tiene specs fusionadas | Edit no muestra sección de especificaciones |
 | R09 | Modal detalle desde carrito | Botón "Ver detalle" en búsqueda |
 | R10 | Cascada marca→modelo→motor | Búsqueda directa de motor sin modelo |
 
@@ -316,16 +325,16 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 **Fase P0 — Críticos para primera venta (8h)**
 1. ~~R05 (2h) — Validación de rol en backend para editar precio~~ ✅ Completado
 2. ~~R13 (3h) — Campo internal_notes en cotización/venta~~ ✅ Completado
-3. R06 (8h) — Flujo obligatorio cotización → venta
+3. ~~R06 (8h) — Flujo obligatorio cotización → venta~~ (Descartado)
 
 **Fase P1 — Completitud operativa (15h)**
-4. R01 (6h) — Unificar formularios crear/editar producto
-5. R02 (2h) — Agregar sección specs técnicas a Edit.vue
+4. ~~R01 (6h) — Unificar formularios crear/editar producto~~ (N/A — descartado por diferencias fundamentales)
+5. ~~R02 (2h) — Agregar sección specs técnicas a Edit.vue~~ ✅ Completado
 6. R10 (4h) — Búsqueda directa de motor en VehicleSelector
 7. R09 (3h) — Botón "Ver detalle" en ProductSearchModal
 
 **Fase P2 — Nice-to-have (10h)**
-8. R14 (6h) — Botón back order desde línea de carrito
+8. ~~R14 (6h) — Botón back order desde línea de carrito~~ ✅ Completado
 9. R11 (4h) — Soporte años 2 dígitos (requiere migración)
 
 **Auditoría completada — 17 de marzo de 2026, sin modificaciones al código.**
@@ -345,5 +354,31 @@ Frontend offline: no encontré service worker, IndexedDB ni PWA en package.json,
 
 - Módulo C3 (TypeScript):
   - Errores nuevos identificados: `resources/js/pages/PurchaseOrders/Receive.vue` y `resources/js/pages/PurchaseOrders/Show.vue` por uso de `product.sku` inexistente en el tipo.
-  - Corrección mínima: reemplazo de `sku` por `sku_base` en ambos archivos.
   - Resultado: TS errors bajaron de 17 a 15 (`Found 15 errors in 4 files`, quedando solo los preexistentes de Products/SalesOrders + TwoFactor), build frontend OK.
+
+## Correcciones de Roles, Caja y Vendedores — 2026-03-20
+
+- **Roles & Permisos:**
+  - `DemoDataSeeder.php` modificado para usar `updateOrCreate` en usuarios, forzando los roles correctos en cada seed.
+  - Rutas web `/products/create` y `/products/{product}/edit` protegidas con middleware de rol para prevenir acceso de vendedores.
+  - El campo `username` se añadió al `$fillable` en `User.php` del frontend para permitir guardar en edición de perfil.
+- **Bodegas y Operaciones:**
+  - `SalesQuoteController@pendingAtCashier` usa `current_warehouse_id` del usuario como fallback si el header `X-Warehouse-Id` falta (evita 403s innecesarios en frontend).
+- **Flujo POS / Cotizaciones:**
+  - Los vendedores ya no son redirigidos forzosamente a "/pos" al darle "Enviar a Caja" desde el listado.
+  - En la lista de Órdenes de Venta se removió el botón "Nueva Orden", forzando que toda venta nazca de la interfaz POS.
+  - **Conversión POS a Caja:** El módulo POS (`usePOS.ts`, `sales-order.ts`) ahora inyecta recursivamente el `source_quote_id` de la sesión base durante el checkout en `processSale()`. `SalesOrderController@store` lo recibe, y `SalesOrderService@create` localiza la cotización, la mapea vía `converted_order_id` y ejecuta `markCollected()`. Esto purga la cotización exitosamente de la bandeja "Cola de Caja" tras la facturación.
+
+## Correcciones de Producto/Variantes — 2026-03-21
+
+- **Pre-llenado de atributos en nueva variante (VariantManager.vue):**
+  - `openCreateModal()` ahora usa `[...displayVariants.value].reverse().find(...)` para tomar la **última** variante con atributos en lugar de la primera.
+  - Se reemplazó copia superficial `.map()` por `structuredClone()` para garantizar deep copy y evitar mutación cruzada entre variantes.
+  - Build `✓`, TS errors 15 → 15 (sin nuevos errores), commit `fix(products): pre-fill variant attrs from last existing variant`.
+
+- **Borrado silencioso de atributos al guardar variante (2026-03-21):**
+  - Bug: `ProductVariantController::update()` llamaba `assignVariantAttributes()` aunque el payload trajera `attributes: []`, borrando todos los atributos existentes sin error visible.
+  - Fix A — backend (`ProductVariantController.php` línea 228): añadida condición `!empty($validated['attributes'])` para no ejecutar el delete/recreate innecesariamente.
+  - Fix B — frontend (`VariantManager.vue` `handleSubmit`): el payload de UPDATE solo incluye la clave `attributes` cuando hay al menos un atributo válido (`name + value` no vacíos); para CREATE se incluye siempre.
+  - P0 (5/5 ✓), P1 (14/14 ✓), build ✓, 0 errores TS nuevos.
+  - Commits: `fix(variants): prevent silent attribute deletion on save without changes` (backend) y `fix(variants): omit attributes from payload when none were modified` (frontend).
