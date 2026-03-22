@@ -36,11 +36,11 @@ class DemoDataSeeder extends Seeder
         );
         $cashier = User::updateOrCreate(
             ['email' => 'cajero@hermes.com'],
-            ['name' => 'María López', 'username' => 'maria', 'password' => bcrypt('password'), 'role' => 'cashier', 'is_active' => true]
+            ['name' => 'María López', 'username' => 'cashier', 'password' => bcrypt('password'), 'role' => 'cashier', 'is_active' => true]
         );
         $seller = User::updateOrCreate(
             ['email' => 'vendedor@hermes.com'],
-            ['name' => 'Carlos Pérez', 'username' => 'carlos', 'password' => bcrypt('password'), 'role' => 'seller', 'is_active' => true]
+            ['name' => 'Carlos Pérez', 'username' => 'seller', 'password' => bcrypt('password'), 'role' => 'seller', 'is_active' => true]
         );
         $this->command->info('✅ 3 usuarios creados/actualizados (admin, cajero, vendedor)');
 
@@ -203,7 +203,11 @@ class DemoDataSeeder extends Seeder
                         'status' => 'completed',
                         'payment_status' => 'paid',
                         'payment_method' => $selectedMethod,
-                        'subtotal' => 0, 'tax_amount' => 0, 'discount_amount' => 0, 'shipping_cost' => 0, 'total' => 0,
+                        'subtotal' => 0,
+                        'tax_amount' => 0,
+                        'discount_amount' => 0,
+                        'shipping_cost' => 0,
+                        'total' => 0,
                     ]);
 
                     foreach ($usedVariants as $variant) {
@@ -242,9 +246,16 @@ class DemoDataSeeder extends Seeder
                         $customer->current_balance = $balanceBefore + $total;
                         $customer->save();
                         CustomerTransaction::create([
-                            'customer_id' => $customer->id, 'type' => 'sale', 'reference_type' => 'sales_order', 'reference_id' => $order->id,
-                            'amount' => $total, 'balance_before' => $balanceBefore, 'balance_after' => $customer->current_balance,
-                            'description' => "Venta a crédito {$order->order_number}", 'transaction_date' => $paidAt, 'created_by' => $sessionUser->id,
+                            'customer_id' => $customer->id,
+                            'type' => 'sale',
+                            'reference_type' => 'sales_order',
+                            'reference_id' => $order->id,
+                            'amount' => $total,
+                            'balance_before' => $balanceBefore,
+                            'balance_after' => $customer->current_balance,
+                            'description' => "Venta a crédito {$order->order_number}",
+                            'transaction_date' => $paidAt,
+                            'created_by' => $sessionUser->id,
                         ]);
                     } else {
                         SalesOrderPayment::create(['sales_order_id' => $order->id, 'amount' => $total, 'method' => $selectedMethod, 'notes' => 'Pago POS' . ($selectedMethod === 'card' ? ' [visa]' : ''), 'paid_at' => $paidAt, 'created_by' => $sessionUser->id]);
@@ -259,9 +270,15 @@ class DemoDataSeeder extends Seeder
                         if ($inv) $inv->decrement('quantity_available', $item->quantity);
 
                         InventoryMovement::create([
-                            'product_id' => $item->product_id, 'variant_id' => $item->variant_id, 'warehouse_id' => $warehouse->id,
-                            'movement_type' => 'out', 'quantity' => $item->quantity, 'reference_type' => 'sale', 'reference_id' => $order->id,
-                            'notes' => "Venta {$order->order_number}", 'user_id' => $sessionUser->id,
+                            'product_id' => $item->product_id,
+                            'variant_id' => $item->variant_id,
+                            'warehouse_id' => $warehouse->id,
+                            'movement_type' => 'out',
+                            'quantity' => $item->quantity,
+                            'reference_type' => 'sale',
+                            'reference_id' => $order->id,
+                            'notes' => "Venta {$order->order_number}",
+                            'user_id' => $sessionUser->id,
                         ]);
                     }
 
@@ -304,19 +321,29 @@ class DemoDataSeeder extends Seeder
             for ($i = 0; $i < 3; $i++) {
                 $customer = $customers[array_rand($customers)];
                 $quote = SalesQuote::create([
-                    'customer_id' => $customer->id, 'user_id' => $seller->id, 'warehouse_id' => $warehouse->id,
-                    'date' => now()->subDays(rand(1, 14)), 'valid_until' => now()->addDays(rand(-5, 15)),
+                    'customer_id' => $customer->id,
+                    'user_id' => $seller->id,
+                    'warehouse_id' => $warehouse->id,
+                    'date' => now()->subDays(rand(1, 14)),
+                    'valid_until' => now()->addDays(rand(-5, 15)),
                     'status' => $quoteStatuses[array_rand($quoteStatuses)],
-                    'subtotal' => 0, 'tax_amount' => 0, 'discount_amount' => 0, 'total' => 0,
+                    'subtotal' => 0,
+                    'tax_amount' => 0,
+                    'discount_amount' => 0,
+                    'total' => 0,
                     'notes' => "Cotización - {$warehouse->name}",
                 ]);
                 foreach ($variants->random(rand(1, 3)) as $variant) {
                     $pricing = $variant->pricing->first();
                     SalesQuoteItem::create([
-                        'sales_quote_id' => $quote->id, 'product_id' => $variant->product_id, 'variant_id' => $variant->id,
-                        'warehouse_id' => $warehouse->id, 'quantity' => rand(1, 5),
+                        'sales_quote_id' => $quote->id,
+                        'product_id' => $variant->product_id,
+                        'variant_id' => $variant->id,
+                        'warehouse_id' => $warehouse->id,
+                        'quantity' => rand(1, 5),
                         'unit_price' => $pricing ? (float) $pricing->base_price : rand(20, 150),
-                        'discount_percent' => rand(0, 1) ? rand(5, 15) : 0, 'tax_percent' => rand(0, 1) ? 7 : 0,
+                        'discount_percent' => rand(0, 1) ? rand(5, 15) : 0,
+                        'tax_percent' => rand(0, 1) ? 7 : 0,
                     ]);
                 }
             }
@@ -334,12 +361,18 @@ class DemoDataSeeder extends Seeder
                     $status = $poStatuses[$statusIdx];
 
                     $po = PurchaseOrder::create([
-                        'supplier_id' => $supplier->id, 'warehouse_id' => $warehouse->id, 'user_id' => $admin->id,
+                        'supplier_id' => $supplier->id,
+                        'warehouse_id' => $warehouse->id,
+                        'user_id' => $admin->id,
                         'status' => $status,
                         'payment_status' => $status === 'received' ? 'paid' : ($status === 'partial' ? 'partial' : 'pending'),
-                        'order_date' => $poDate, 'expected_date' => $poDate->copy()->addDays(rand(3, 14)),
+                        'order_date' => $poDate,
+                        'expected_date' => $poDate->copy()->addDays(rand(3, 14)),
                         'received_date' => in_array($status, ['received', 'partial']) ? $poDate->copy()->addDays(rand(3, 10)) : null,
-                        'subtotal' => 0, 'tax_amount' => 0, 'shipping_cost' => rand(0, 1) ? rand(15, 50) : 0, 'total' => 0,
+                        'subtotal' => 0,
+                        'tax_amount' => 0,
+                        'shipping_cost' => rand(0, 1) ? rand(15, 50) : 0,
+                        'total' => 0,
                         'notes' => "OC - {$warehouse->name}",
                     ]);
 
@@ -352,8 +385,13 @@ class DemoDataSeeder extends Seeder
                         $subtotal += $lineTotal;
 
                         PurchaseOrderItem::create([
-                            'purchase_order_id' => $po->id, 'product_id' => $variant->product_id, 'variant_id' => $variant->id,
-                            'quantity_ordered' => $qty, 'quantity_received' => $qtyReceived, 'unit_cost' => $cost, 'subtotal' => $lineTotal,
+                            'purchase_order_id' => $po->id,
+                            'product_id' => $variant->product_id,
+                            'variant_id' => $variant->id,
+                            'quantity_ordered' => $qty,
+                            'quantity_received' => $qtyReceived,
+                            'unit_cost' => $cost,
+                            'subtotal' => $lineTotal,
                         ]);
 
                         if ($qtyReceived > 0) {
@@ -364,9 +402,15 @@ class DemoDataSeeder extends Seeder
                             $inv->increment('quantity_available', $qtyReceived);
 
                             InventoryMovement::create([
-                                'product_id' => $variant->product_id, 'variant_id' => $variant->id, 'warehouse_id' => $warehouse->id,
-                                'movement_type' => 'in', 'quantity' => $qtyReceived, 'reference_type' => 'purchase', 'reference_id' => $po->id,
-                                'notes' => "Recepción OC {$po->po_number}", 'user_id' => $admin->id,
+                                'product_id' => $variant->product_id,
+                                'variant_id' => $variant->id,
+                                'warehouse_id' => $warehouse->id,
+                                'movement_type' => 'in',
+                                'quantity' => $qtyReceived,
+                                'reference_type' => 'purchase',
+                                'reference_id' => $po->id,
+                                'notes' => "Recepción OC {$po->po_number}",
+                                'user_id' => $admin->id,
                             ]);
                         }
                     }
@@ -394,9 +438,15 @@ class DemoDataSeeder extends Seeder
                 $dc->current_balance = $balanceBefore + $debtAmount;
                 $dc->save();
                 CustomerTransaction::create([
-                    'customer_id' => $dc->id, 'type' => 'sale', 'reference_type' => 'manual_adjustment',
-                    'amount' => $debtAmount, 'balance_before' => $balanceBefore, 'balance_after' => $dc->current_balance,
-                    'description' => "Saldo pendiente de ventas anteriores", 'transaction_date' => now()->subDays(rand(3, 10)), 'created_by' => $admin->id,
+                    'customer_id' => $dc->id,
+                    'type' => 'sale',
+                    'reference_type' => 'manual_adjustment',
+                    'amount' => $debtAmount,
+                    'balance_before' => $balanceBefore,
+                    'balance_after' => $dc->current_balance,
+                    'description' => "Saldo pendiente de ventas anteriores",
+                    'transaction_date' => now()->subDays(rand(3, 10)),
+                    'created_by' => $admin->id,
                 ]);
             }
         }
@@ -408,9 +458,15 @@ class DemoDataSeeder extends Seeder
         $dc->current_balance = $balanceBefore - $partialPayment;
         $dc->save();
         CustomerTransaction::create([
-            'customer_id' => $dc->id, 'type' => 'payment', 'reference_type' => 'manual_payment',
-            'amount' => $partialPayment, 'balance_before' => $balanceBefore, 'balance_after' => $dc->current_balance,
-            'description' => "Abono parcial en efectivo", 'transaction_date' => now()->subDays(1), 'created_by' => $admin->id,
+            'customer_id' => $dc->id,
+            'type' => 'payment',
+            'reference_type' => 'manual_payment',
+            'amount' => $partialPayment,
+            'balance_before' => $balanceBefore,
+            'balance_after' => $dc->current_balance,
+            'description' => "Abono parcial en efectivo",
+            'transaction_date' => now()->subDays(1),
+            'created_by' => $admin->id,
         ]);
         $this->command->info('✅ 3 clientes con deudas');
 
