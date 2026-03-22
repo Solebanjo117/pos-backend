@@ -77,7 +77,7 @@ class SalesOrderService
     public function create(array $data): SalesOrder
     {
         return DB::transaction(function () use ($data) {
-            $userId = $data['user_id'] ?? auth()->id();
+            $userId = $data['user_id'] ?? \Illuminate\Support\Facades\Auth::id();
             
             if (!$userId) {
                 throw new \Exception('No se pudo determinar el usuario. Por favor, inicie sesión nuevamente.');
@@ -180,6 +180,15 @@ class SalesOrderService
                 $order->confirm(); 
             } else {
                 $order->update(['status' => $requestedStatus]);
+            }
+
+            // ── Convert Sales Quote if applicable ──
+            if (!empty($data['source_quote_id'])) {
+                $quote = \App\Models\SalesQuote::find($data['source_quote_id']);
+                if ($quote) {
+                    $quote->markCollected();
+                    $quote->update(['converted_order_id' => $order->id]);
+                }
             }
 
             $order->refresh();
@@ -302,7 +311,7 @@ class SalesOrderService
                 'reference_type' => 'sale',
                 'reference_id' => $order->id,
                 'notes' => "Agregado post-venta a Orden {$order->order_number}",
-                'user_id' => auth()->id(),
+                'user_id' => \Illuminate\Support\Facades\Auth::id(),
                 'date' => now(),
             ]);
 
@@ -344,7 +353,7 @@ class SalesOrderService
                         'balance_after'    => $customer->current_balance,
                         'description'      => "Cargo por producto agregado a venta {$order->order_number}",
                         'transaction_date' => now(),
-                        'created_by'       => auth()->id(),
+                        'created_by'       => \Illuminate\Support\Facades\Auth::id(),
                     ]);
                 }
             }

@@ -18,6 +18,7 @@ class PosCheckoutRequest extends FormRequest
             'customer_id'             => 'nullable|exists:customers,id',
             'date'                    => 'nullable|date',
             'status'                  => 'nullable|in:draft,pending,confirmed',
+            'source_quote_id'         => 'nullable|exists:sales_quotes,id',
             'discount_amount'         => 'nullable|numeric|min:0',
             'shipping_cost'           => 'nullable|numeric|min:0',
             'payment_method'          => 'nullable|in:cash,card,transfer,credit,multiple',
