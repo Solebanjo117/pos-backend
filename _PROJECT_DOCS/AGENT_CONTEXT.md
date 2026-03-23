@@ -388,3 +388,33 @@ Web route protection: /pos requiere role:admin,manager,cashier; /quotes/* requie
   - Fix B — frontend (`VariantManager.vue` `handleSubmit`): el payload de UPDATE solo incluye la clave `attributes` cuando hay al menos un atributo válido (`name + value` no vacíos); para CREATE se incluye siempre.
   - P0 (5/5 ✓), P1 (14/14 ✓), build ✓, 0 errores TS nuevos.
   - Commits: `fix(variants): prevent silent attribute deletion on save without changes` (backend) y `fix(variants): omit attributes from payload when none were modified` (frontend).
+
+## Sesión Fix — confirm() carga solo monto pendiente + crédito dedicado en modal POS (2026-03-22)
+
+- **Backend — `SalesOrder.php` (`confirm()`):**
+  - Se corrigió el cargo al balance del cliente para usar solo monto pendiente:
+    - Antes: siempre sumaba `total` completo.
+    - Ahora: calcula `amountPaid = payments()->sum('amount')` y `amountToBill = max(0, total - amountPaid)`.
+  - Solo crea `CustomerTransaction` tipo `sale` cuando `amountToBill > 0`.
+  - Resultado: ventas totalmente pagadas ya no generan cargo `sale`; pagos parciales cargan únicamente el saldo pendiente.
+
+- **Backend — Tests P2 (`tests/Feature/P2/CustomerBalanceTest.php`):**
+  - Casos cubiertos:
+    1) venta a crédito puro (genera 1 cargo `sale`),
+    2) venta pagada completa (sin cargo `sale`),
+    3) venta con pago parcial (cargo solo por pendiente),
+    4) venta con `store_credit` (sin deuda incorrecta).
+  - Ejecución: 4/4 tests en verde.
+
+- **Frontend — `PaymentMethods.vue`:**
+  - Se eliminó `creditoCliente` del `PAYMENT_TYPES`.
+  - No había lógica especial adicional asociada a `creditoCliente`; solo estaba definido como método en el array.
+
+- **Frontend — `POS/Index.vue` (modal de cobro):**
+  - Se agregó sección dedicada **"Crédito del Cliente"** visible solo con cliente seleccionado.
+  - Muestra límite, crédito disponible, balance actual, saldo a favor y días de crédito.
+  - Se agregó `creditToCharge` (ref) y `creditAvailable` (computed).
+  - El input de crédito usa tope `min(creditAvailable, remainingToPay)` y botón "Máximo".
+  - `totalPaid` ahora incluye `creditToCharge`.
+  - `paymentsArray` agrega método `credit` cuando `creditToCharge > 0`.
+  - `creditToCharge` se resetea al cerrar modal y al cambiar cliente.

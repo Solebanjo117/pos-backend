@@ -257,26 +257,33 @@ class SalesOrder extends Model
 
         $this->status = 'confirmed';
 
-        // Charge debt to customer if applicable
+        // Charge pending amount to customer, excluding all payments already made
         if ($this->customer_id) {
             $customer = \App\Models\Customer::find($this->customer_id);
             if ($customer) {
-                $balanceBefore = (float) $customer->current_balance;
-                $customer->current_balance = $balanceBefore + (float) $this->total;
-                $customer->save();
+                // Charge only the amount that remains unpaid (total - all payments)
+                $amountPaid = (float) $this->payments()->sum('amount');
+                $amountToBill = max(0, (float) $this->total - $amountPaid);
 
-                \App\Models\CustomerTransaction::create([
-                    'customer_id'      => $customer->id,
-                    'type'             => 'sale',
-                    'reference_type'   => 'sales_order',
-                    'reference_id'     => $this->id,
-                    'amount'           => (float) $this->total,
-                    'balance_before'   => $balanceBefore,
-                    'balance_after'    => $customer->current_balance,
-                    'description'      => "Cargo por venta {$this->order_number}",
-                    'transaction_date' => now(),
-                    'created_by'       => auth()->id(),
-                ]);
+                // Only create transaction if there's an amount to bill
+                if ($amountToBill > 0) {
+                    $balanceBefore = (float) $customer->current_balance;
+                    $customer->current_balance = $balanceBefore + $amountToBill;
+                    $customer->save();
+
+                    \App\Models\CustomerTransaction::create([
+                        'customer_id'      => $customer->id,
+                        'type'             => 'sale',
+                        'reference_type'   => 'sales_order',
+                        'reference_id'     => $this->id,
+                        'amount'           => $amountToBill,
+                        'balance_before'   => $balanceBefore,
+                        'balance_after'    => $customer->current_balance,
+                        'description'      => "Cargo por venta {$this->order_number}",
+                        'transaction_date' => now(),
+                        'created_by'       => auth()->id(),
+                    ]);
+                }
             }
         }
 
