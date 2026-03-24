@@ -123,9 +123,16 @@ class UserController extends Controller
             ], 200);
         }
 
-        $validated = $request->validate([
-            'warehouse_id' => 'required|exists:warehouses,id',
-        ]);
+        \Illuminate\Support\Facades\Log::info('setWarehouseContext called with payload:', $request->all());
+
+        try {
+            $validated = $request->validate([
+                'warehouse_id' => 'required|exists:warehouses,id',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            \Illuminate\Support\Facades\Log::error('setWarehouseContext validation failed:', $e->errors());
+            throw $e;
+        }
 
         // Validate access
         if (! $user->hasWarehouseAccess((int) $validated['warehouse_id'])) {

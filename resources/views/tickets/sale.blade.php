@@ -152,7 +152,12 @@
                     @case('card') Tarjeta @break
                     @case('transfer') Transferencia @break
                     @case('credit') Crédito @break
-                    @default {{ $payment->method }}
+                    @case('store_credit') Saldo a Favor @break
+                    @case('visa') Visa @break
+                    @case('mastercard') Mastercard @break
+                    @case('amex') Amex @break
+                    @case('transferencia') Transferencia @break
+                    @default {{ ucfirst($payment->method) }}
                 @endswitch
             </td>
             <td class="right">${{ number_format($payment->amount, 2) }}</td>

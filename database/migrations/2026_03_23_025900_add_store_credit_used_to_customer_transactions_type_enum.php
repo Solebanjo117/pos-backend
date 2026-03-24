@@ -49,10 +49,11 @@ return new class extends Migration
             DB::statement('CREATE INDEX customer_transactions_type_index ON customer_transactions(type)');
             DB::statement('CREATE INDEX customer_transactions_transaction_date_index ON customer_transactions(transaction_date)');
             DB::statement('CREATE INDEX customer_transactions_reference_type_reference_id_index ON customer_transactions(reference_type, reference_id)');
-        } else {
-            // MySQL/PostgreSQL: use ALTER TABLE
+        } elseif ($driver === 'mysql') {
+            // MySQL: use ALTER TABLE with ENUM
             DB::statement("ALTER TABLE customer_transactions MODIFY COLUMN type ENUM('sale', 'payment', 'credit_note', 'adjustment', 'store_credit_used') NOT NULL");
         }
+        // PostgreSQL: column is VARCHAR, validation at Laravel level - no schema change needed
     }
 
     /**
@@ -96,8 +97,9 @@ return new class extends Migration
             DB::statement('CREATE INDEX customer_transactions_type_index ON customer_transactions(type)');
             DB::statement('CREATE INDEX customer_transactions_transaction_date_index ON customer_transactions(transaction_date)');
             DB::statement('CREATE INDEX customer_transactions_reference_type_reference_id_index ON customer_transactions(reference_type, reference_id)');
-        } else {
+        } elseif ($driver === 'mysql') {
             DB::statement("ALTER TABLE customer_transactions MODIFY COLUMN type ENUM('sale', 'payment', 'credit_note', 'adjustment') NOT NULL");
         }
+        // PostgreSQL: no-op
     }
 };

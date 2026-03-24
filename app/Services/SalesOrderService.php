@@ -15,7 +15,7 @@ class SalesOrderService
      */
     public function getAll(array $filters = []): LengthAwarePaginator
     {
-        $query = SalesOrder::with(['customer', 'user', 'items.product', 'items.warehouse']);
+        $query = SalesOrder::with(['customer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns']);
 
         // Apply filters
         if (isset($filters['status'])) {
@@ -67,7 +67,7 @@ class SalesOrderService
      */
     public function getById(int $id): ?SalesOrder
     {
-        return SalesOrder::with(['customer', 'user', 'items.product', 'items.warehouse'])
+        return SalesOrder::with(['customer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns'])
             ->findOrFail($id);
     }
 

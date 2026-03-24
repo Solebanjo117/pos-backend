@@ -192,6 +192,38 @@ class SalesReturn extends Model
         $this->status = 'approved';
         $this->save();
 
+        // 3. Update the original sales order's payment_status
+        $order = $this->salesOrder;
+        if ($order) {
+            // Recalculate payment_status based on current payments
+            $amountPaid = (float) $order->payments()
+                ->whereNotIn('method', ['credit'])
+                ->sum('amount');
+
+            // Check if entire order was returned
+            $totalReturned = (float) \App\Models\SalesReturn::where('sales_order_id', $order->id)
+                ->where('status', 'approved')
+                ->sum('total_amount');
+
+            if ($totalReturned >= (float) $order->total) {
+                // All items returned - mark as refunded
+                $order->payment_status = 'refunded';
+            } else {
+                // Partial return - recalculate based on payments
+                $effectiveTotal = (float) $order->total - $totalReturned;
+
+                if ($amountPaid <= 0) {
+                    $order->payment_status = 'pending';
+                } elseif ($amountPaid >= $effectiveTotal) {
+                    $order->payment_status = 'paid';
+                } else {
+                    $order->payment_status = 'partial';
+                }
+            }
+
+            $order->save();
+        }
+
         return true;
     }
 

@@ -20,11 +20,25 @@ class SalesReturnController extends Controller
         $order = SalesOrder::findOrFail($orderId);
 
         $returns = SalesReturn::where('sales_order_id', $orderId)
-            ->with(['items.product', 'items.variant', 'user'])
+            ->with(['items.product', 'items.variant', 'user', 'items.seller'])
             ->orderBy('created_at', 'desc')
             ->get();
 
-        return response()->json($returns);
+        $data = $returns->map(function ($return) {
+            $mapped = $return->toArray();
+            $mapped['processed_by_name'] = $return->user ? $return->user->name : 'Sistema';
+            $mapped['processed_at'] = $return->created_at->toISOString();
+            
+            $mapped['items'] = $return->items->map(function ($item) {
+                $mappedItem = $item->toArray();
+                $mappedItem['seller_name'] = $item->seller ? $item->seller->name : null;
+                return $mappedItem;
+            });
+
+            return $mapped;
+        });
+
+        return response()->json($data);
     }
 
     /**
@@ -58,6 +72,7 @@ class SalesReturnController extends Controller
             'items.*.sales_order_item_id' => 'required|exists:sales_order_items,id',
             'items.*.quantity'            => 'required|integer|min:1',
             'items.*.user_id'             => 'nullable|exists:users,id',
+            'items.*.seller_id'           => 'nullable|exists:users,id',
         ]);
 
         // Validate quantities don't exceed what was sold (minus already returned)
@@ -122,6 +137,7 @@ class SalesReturnController extends Controller
                         'unit_price'          => $unitAfterDiscount,
                         'subtotal'            => $subtotal,
                         'user_id'             => $returnItem['user_id'] ?? auth()->id(),
+                        'seller_id'           => $returnItem['seller_id'] ?? $orderItem->seller_id,
                     ]);
 
                     $totalAmount += $subtotal;

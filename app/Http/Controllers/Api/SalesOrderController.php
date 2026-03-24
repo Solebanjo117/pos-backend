@@ -510,4 +510,190 @@ class SalesOrderController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * PATCH /api/sales-orders/{id}/add-items
+     * Update existing order, adding missing items, updating quantities, generating payments and inventory difference.
+     */
+    public function addItemsToExistingOrder(Request $request, int $id): JsonResponse
+    {
+        try {
+            $validated = $request->validate([
+                'items' => 'required|array',
+                'items.*.product_id' => 'required|exists:products,id',
+                'items.*.variant_id' => 'nullable|exists:product_variants,id',
+                'items.*.warehouse_id' => 'required|exists:warehouses,id',
+                'items.*.qty' => 'required|integer|min:1',
+                'items.*.price' => 'required|numeric|min:0',
+                'items.*.seller_id' => 'nullable|exists:users,id',
+                'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
+                'items.*.tax_percent' => 'nullable|numeric|min:0|max:100',
+                'payment' => 'nullable|array',
+                'payment.*.method' => 'required|string',
+                'payment.*.amount' => 'required|numeric|min:0',
+                'payment.*.notes' => 'nullable|string',
+            ]);
+
+            $order = \App\Models\SalesOrder::findOrFail($id);
+
+            DB::transaction(function() use ($validated, $order) {
+                foreach ($validated['items'] as $item) {
+                    $query = $order->items()->where('product_id', $item['product_id']);
+                    if (!empty($item['variant_id'])) {
+                        $query->where('variant_id', $item['variant_id']);
+                    } else {
+                        $query->whereNull('variant_id');
+                    }
+                    
+                    $existing = $query->first();
+
+                    $diffQty = $item['qty'];
+                    
+                    if ($existing) {
+                        $diffQty = $item['qty'] - $existing->quantity;
+                        if ($diffQty > 0) {
+                            $existing->update(['quantity' => $item['qty']]);
+                            // Deduct diff from inventory
+                            $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
+                                ->where('product_id', $item['product_id'])
+                                ->when(!empty($item['variant_id']), function($q) use ($item) {
+                                    $q->where('variant_id', $item['variant_id']);
+                                }, function($q) {
+                                    $q->whereNull('variant_id');
+                                })->first();
+                                
+                            if ($inventory) {
+                                $inventory->decrement('quantity_available', $diffQty);
+                            }
+                        }
+                    } else {
+                        // New item
+                        $subtotal = $item['qty'] * $item['price'];
+                        $discount = $subtotal * (($item['discount_percent'] ?? 0) / 100);
+                        $tax = ($subtotal - $discount) * (($item['tax_percent'] ?? 0) / 100);
+                        
+                        $pricing = \App\Models\ProductPricing::where('product_id', $item['product_id'])
+                            ->when(!empty($item['variant_id']), function($q) use ($item) {
+                                $q->where('variant_id', $item['variant_id']);
+                            }, function($q) {
+                                $q->whereNull('variant_id');
+                            })->first();
+                            
+                        $order->items()->create([
+                            'product_id' => $item['product_id'],
+                            'variant_id' => $item['variant_id'],
+                            'warehouse_id' => $item['warehouse_id'],
+                            'quantity' => $item['qty'],
+                            'unit_price' => $item['price'],
+                            'unit_cost' => $pricing ? $pricing->cost : 0,
+                            'discount_percent' => $item['discount_percent'] ?? 0,
+                            'tax_percent' => $item['tax_percent'] ?? 0,
+                            'seller_id' => $item['seller_id'] ?? null,
+                            'subtotal' => $subtotal,
+                            'discount_amount' => $discount,
+                            'tax_amount' => $tax,
+                            'total' => $subtotal - $discount + $tax,
+                        ]);
+
+                        // Deduct all from inventory
+                        $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
+                            ->where('product_id', $item['product_id'])
+                            ->when(!empty($item['variant_id']), function($q) use ($item) {
+                                $q->where('variant_id', $item['variant_id']);
+                            }, function($q) {
+                                $q->whereNull('variant_id');
+                            })->first();
+                            
+                        if ($inventory) {
+                            $inventory->decrement('quantity_available', $item['qty']);
+                        }
+                    }
+                }
+
+                // Recalculate order total properly
+                $orderTotal = 0;
+                $orderTax = 0;
+                $orderDiscount = 0;
+                $orderSubtotal = 0;
+
+                foreach ($order->items()->get() as $dbItem) {
+                    $itemSubtotal = $dbItem->quantity * $dbItem->unit_price;
+                    $itemDiscount = $itemSubtotal * ($dbItem->discount_percent / 100);
+                    $itemTax = ($itemSubtotal - $itemDiscount) * ($dbItem->tax_percent / 100);
+                    
+                    $orderSubtotal += $itemSubtotal;
+                    $orderDiscount += $itemDiscount;
+                    $orderTax += $itemTax;
+                    $orderTotal += ($itemSubtotal - $itemDiscount + $itemTax);
+                    
+                    $dbItem->update([
+                        'subtotal' => $itemSubtotal,
+                        'discount_amount' => $itemDiscount,
+                        'tax_amount' => $itemTax,
+                        'total' => $itemSubtotal - $itemDiscount + $itemTax
+                    ]);
+                }
+
+                $finalTotal = $orderTotal + $order->shipping_cost - $order->discount_amount;
+                
+                $logs = $order->audit_logs ?? [];
+                $logs[] = [
+                    'action' => 'order_modified',
+                    'metadata' => [
+                        'items_count' => count($validated['items'] ?? []),
+                        'total_diff'  => $finalTotal - $order->total,
+                        'user_id'     => auth()->id(),
+                        'user_name'   => auth()->user() ? auth()->user()->name : 'Sistema'
+                    ],
+                    'timestamp' => now()->toISOString()
+                ];
+                
+                $order->update([
+                    'total' => $finalTotal,
+                    'tax_amount' => $orderTax,
+                    'subtotal' => $orderSubtotal,
+                    'audit_logs' => $logs
+                ]);
+
+                // Register payments
+                if (!empty($validated['payment'])) {
+                    foreach ($validated['payment'] as $payment) {
+                        $order->addPayment(
+                            amount: (float)$payment['amount'],
+                            method: $payment['method'],
+                            notes: $payment['notes'] ?? 'Cobro por diferencia (Modificación de Orden)'
+                        );
+
+                        // Reduce customer debt / apply store credit immediately (addPayment handles normal payments but NOT credit)
+                        // Actually, addPayment inside SalesOrder DOES reduce customer debt automatically for normal methods!
+                        // BUT for store_credit, it increases balance. For credit, it's skipped.
+                        // Since `confirm()` already ran in the past, we need to manually adjust for `credit`.
+                        if ($payment['method'] === 'credit' && $order->customer_id) {
+                            $customer = \App\Models\Customer::find($order->customer_id);
+                            if ($customer) {
+                                $customer->current_balance += $payment['amount'];
+                                $customer->save();
+                            }
+                        }
+                    }
+                    $totalPaid = $order->payments()->sum('amount');
+                    if ($totalPaid >= $order->total) {
+                        $order->update(['payment_status' => 'paid']);
+                    } else if ($totalPaid > 0) {
+                        $order->update(['payment_status' => 'partial']);
+                    }
+                }
+            });
+
+            return response()->json([
+                'message' => 'Items added and order updated successfully.',
+                'data' => clone $order,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Error al agregar ítems a la orden existente.',
+                'error' => $e->getMessage(),
+            ], 422);
+        }
+    }
 }

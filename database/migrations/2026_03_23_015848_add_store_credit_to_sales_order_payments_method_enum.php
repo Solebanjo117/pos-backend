@@ -47,10 +47,11 @@ return new class extends Migration
             DB::statement('CREATE INDEX sales_order_payments_sales_order_id_index ON sales_order_payments(sales_order_id)');
             DB::statement('CREATE INDEX sales_order_payments_paid_at_index ON sales_order_payments(paid_at)');
             DB::statement('CREATE INDEX sales_order_payments_method_index ON sales_order_payments(method)');
-        } else {
-            // MySQL/PostgreSQL: use ALTER TABLE
+        } elseif ($driver === 'mysql') {
+            // MySQL: use ALTER TABLE with ENUM
             DB::statement("ALTER TABLE sales_order_payments MODIFY COLUMN method ENUM('cash', 'card', 'transfer', 'credit', 'store_credit') NOT NULL");
         }
+        // PostgreSQL: column is VARCHAR, validation at Laravel level - no schema change needed
     }
 
     /**
@@ -89,8 +90,9 @@ return new class extends Migration
             DB::statement('CREATE INDEX sales_order_payments_sales_order_id_index ON sales_order_payments(sales_order_id)');
             DB::statement('CREATE INDEX sales_order_payments_paid_at_index ON sales_order_payments(paid_at)');
             DB::statement('CREATE INDEX sales_order_payments_method_index ON sales_order_payments(method)');
-        } else {
+        } elseif ($driver === 'mysql') {
             DB::statement("ALTER TABLE sales_order_payments MODIFY COLUMN method ENUM('cash', 'card', 'transfer', 'credit') NOT NULL");
         }
+        // PostgreSQL: no-op
     }
 };

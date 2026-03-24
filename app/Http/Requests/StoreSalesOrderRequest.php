@@ -27,7 +27,7 @@ class StoreSalesOrderRequest extends FormRequest
             'audit_logs'              => 'nullable|array',
             'payments'                => 'nullable|array',
             'payments.*.amount'       => 'required_with:payments|numeric|min:0.01',
-            'payments.*.method'       => 'required_with:payments|in:cash,card,transfer,credit,visa,mastercard,amex,clave,yappy,transferencia,notaCredito,creditoCliente',
+            'payments.*.method'       => 'required_with:payments|in:cash,card,transfer,credit,store_credit,visa,mastercard,amex,clave,yappy,transferencia,notaCredito,creditoCliente',
             'payments.*.notes'        => 'nullable|string',
             'items'                   => 'nullable|array',
             'items.*.product_id'      => 'required|exists:products,id',

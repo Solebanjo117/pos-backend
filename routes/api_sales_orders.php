@@ -25,6 +25,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
     Route::get('/{id}', [SalesOrderController::class, 'show']);
     Route::put('/{id}', [SalesOrderController::class, 'update']);
     Route::delete('/{id}', [SalesOrderController::class, 'destroy']);
+    Route::patch('/{id}/add-items', [SalesOrderController::class, 'addItemsToExistingOrder']);
 
     // Order lifecycle
     Route::post('/{id}/confirm', [SalesOrderController::class, 'confirm']);

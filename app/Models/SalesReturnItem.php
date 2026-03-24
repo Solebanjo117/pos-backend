@@ -19,6 +19,7 @@ class SalesReturnItem extends Model
         'unit_price',
         'subtotal',
         'user_id',
+        'seller_id',
     ];
 
     protected $casts = [
@@ -54,6 +55,11 @@ class SalesReturnItem extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(\App\Models\User::class, 'user_id');
+    }
+
+    public function seller(): BelongsTo
+    {
+        return $this->belongsTo(\App\Models\User::class, 'seller_id');
     }
 
     // ==================== ACCESSORS ====================

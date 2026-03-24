@@ -1,3 +1,6 @@
+## Documentación relacionada
+- Patrones del proyecto: _PROJECT_DOCS/PATTERNS.md
+- Bugs resueltos y reglas derivadas: _PROJECT_DOCS/LESSONS_LEARNED.md
 ### 1. Stack técnico confirmado
 
 - Backend (composer.json): PHP ^8.2, laravel/framework ^12.0, laravel/tinker ^2.10.1, barryvdh/laravel-dompdf, maatwebsite/excel, picqer/php-barcode-generator, spatie/laravel-activitylog.
@@ -58,7 +61,7 @@ pos-backend/app/Http/Requests/UpdateProductRequest.php → valida actualización
 pos-backend/app/Http/Requests/UpdateWarehouseRequest.php → valida actualización parcial de sucursal con unicidad de código ignorando el registro actual.
 pos-backend/app/Models/ → directorio de modelos Eloquent para productos, inventario, compras, ventas, vehículos, usuarios y sucursales.
 pos-backend/app/Models/Customer.php → modelo Customer con store_credit (saldo a favor) y has_store_credit como atributos computados via $appends.
-pos-backend/app/Models/SalesOrder.php → modelo SalesOrder; método addPayment soporta store_credit como método de pago que incrementa el balance del cliente.
+pos-backend/app/Models/SalesOrder.php → modelo SalesOrder; método addPayment soporta store_credit como método de pago que incrementa el balance del cliente; método confirm() ahora calcula amount_to_bill = total - store_credit_used para no duplicar cargos cuando se usa saldo a favor.
 pos-backend/app/Models/CustomerTransaction.php → modelo CustomerTransaction con tipo store_credit_used para registrar uso de saldo a favor.
 pos-backend/tests/Feature/ → directorio de feature tests backend con ejemplo base y suite P0.
 pos-backend/tests/Browser/ExampleTest.php → prueba browser de ejemplo.
@@ -78,6 +81,8 @@ pos-backend/tests/Feature/P1/WarehouseIsolationTest.php → prueba P1 de aislami
 pos-backend/tests/Feature/P1/PurchaseOrderFlowTest.php → prueba P1 de rechazo de OC con payload vacío.
 pos-backend/tests/Feature/P1/SuppliersTest.php → prueba P1 de validación de proveedor sin nombre.
 pos-backend/database/seeders/DefaultSettingsSeeder.php → define defaults de configuración para store_tax_rate y modules_work_orders_enabled.
+pos-backend/database/migrations/2026_03_23_015848_add_store_credit_to_sales_order_payments_method_enum.php → migración que agrega 'store_credit' al enum de métodos de pago en sales_order_payments (compatible con SQLite y MySQL/PostgreSQL).
+pos-backend/database/migrations/2026_03_23_025900_add_store_credit_used_to_customer_transactions_type_enum.php → migración que agrega 'store_credit_used' al enum de tipos de transacción en customer_transactions (compatible con SQLite y MySQL/PostgreSQL).
 pos-backend/tests/Unit/ExampleTest.php → prueba unitaria de ejemplo del backend.
 pos-backend/app/Models/WorkOrder.php → modelo WorkOrder con estados, transiciones, folio auto-generado y relaciones a customer, warehouse, creator, assignee e items.
 pos-backend/app/Models/WorkOrderItem.php → modelo WorkOrderItem con relaciones a WorkOrder, Product, ProductVariant y Warehouse.
@@ -86,6 +91,7 @@ pos-backend/app/Http/Requests/StoreWorkOrderRequest.php → valida creación de 
 pos-backend/app/Http/Controllers/Api/WorkOrderController.php → controlador CRUD + status transition para work orders; descuenta inventario en store y lo restaura en cancel/delete.
 pos-backend/routes/api_work_orders.php → 6 rutas: GET/POST /work-orders, GET/PUT/DELETE /work-orders/{id}, POST /work-orders/{id}/transition.
 pos-backend/tests/Feature/P2/WorkOrderTest.php → 9 tests P2: creación mínima, folio auto-generado, decremento de inventario, validaciones, listado paginado, transición de estado, transición inválida y restauración de stock al cancelar.
+pos-backend/tests/Feature/P2/CustomerBalanceTest.php → 4 tests P2: venta a crédito puro genera 1 transacción 'sale', venta pagada completamente no genera cargo al balance, pago parcial carga solo monto pendiente, venta con store_credit calcula balance correctamente sin duplicar cargos.
 pos-frontend/package.json → define scripts de build/dev/lint/format y dependencias reales del frontend Vue/Inertia.
 pos-frontend/config/fortify.php → configuración de Fortify incluyendo limiters.login para rate limiting del login.
 pos-frontend/resources/js/app.ts → bootstrap de la app Inertia/Vue y carga inicial del tema.
@@ -128,7 +134,7 @@ pos-frontend/resources/js/composables/useWarehouses.ts → composable para opera
 pos-frontend/resources/js/composables/useWorkOrders.ts → composable para CRUD de work orders y transición de estado vía apiClient.
 pos-frontend/resources/js/pages/ → árbol de páginas Inertia/Vue para auth, dashboard, POS, inventario, compras, ventas, reportes, vehículos, settings y catálogos.
 pos-frontend/resources/js/pages/WorkOrders/Index.vue → listado de work orders con tabla Folio/Vehículo/Estado/Sucursal/Fecha, filtro por estado y búsqueda por texto.
-pos-frontend/resources/js/pages/POS/Index.vue → página principal POS; soporta props quoteMode/quoteId para modo cotización (sin checkout), returnMode/orderId para modo devolución. Valida checkout por stock, consulta sesión activa y permite usar saldo a favor (store_credit) en pagos.
+pos-frontend/resources/js/pages/POS/Index.vue → página principal POS; soporta props quoteMode/quoteId para modo cotización (sin checkout), returnMode/orderId para modo devolución. Valida checkout por stock, consulta sesión activa. Permite usar saldo a favor (store_credit) en pagos con sección dedicada que muestra límite, disponible, balance y días de crédito. Input 'cobrar a crédito' con validación de máximo (mínimo de disponible y pendiente).
 pos-frontend/resources/js/pages/POS/CashierQueue.vue → interfaz dedicada al cajero con grid de cotizaciones pendientes y polling en vivo de los tiempos transcurridos.
 pos-frontend/resources/js/pages/SalesQuotes/Editor.vue → componente shell que renderiza la pantalla del POS en modo edición de cotizaciones (`quoteMode=true`).
 pos-frontend/resources/js/pages/SalesOrders/ReturnEditor.vue → componente shell que renderiza POS en modo devolución (`returnMode=true`) cargando items de la orden como cantidades negativas.

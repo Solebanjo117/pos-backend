@@ -42,7 +42,7 @@ class SalesOrder extends Model
         'audit_logs' => 'array',
     ];
 
-    protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due'];
+    protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'total_returned'];
 
     // ==================== RELATIONSHIPS ====================
     
@@ -69,6 +69,11 @@ class SalesOrder extends Model
     public function payments(): HasMany
     {
         return $this->hasMany(SalesOrderPayment::class)->orderBy('paid_at', 'asc');
+    }
+
+    public function returns(): HasMany
+    {
+        return $this->hasMany(\App\Models\SalesReturn::class, 'sales_order_id');
     }
 
     // ==================== SCOPES ====================
@@ -120,7 +125,22 @@ class SalesOrder extends Model
 
     public function getAmountDueAttribute(): float
     {
-        return max(0, (float) $this->total - $this->amount_paid);
+        // Calculate total amount returned (approved returns only)
+        $totalReturned = $this->total_returned;
+
+        // Effective total after returns
+        $effectiveTotal = (float) $this->total - $totalReturned;
+
+        // Amount still owed
+        return max(0, $effectiveTotal - $this->amount_paid);
+    }
+
+    public function getTotalReturnedAttribute(): float
+    {
+        if ($this->relationLoaded('returns')) {
+            return (float) $this->returns->where('status', 'approved')->sum('total_amount');
+        }
+        return (float) $this->returns()->where('status', 'approved')->sum('total_amount');
     }
 
     public function getStatusLabelAttribute(): string
@@ -261,8 +281,11 @@ class SalesOrder extends Model
         if ($this->customer_id) {
             $customer = \App\Models\Customer::find($this->customer_id);
             if ($customer) {
-                // Charge only the amount that remains unpaid (total - all payments)
-                $amountPaid = (float) $this->payments()->sum('amount');
+                // Charge only the amount that remains unpaid (total - real payments)
+                // Note: 'credit' method is NOT real money received, only registers intent
+                $amountPaid = (float) $this->payments()
+                    ->whereNotIn('method', ['credit'])
+                    ->sum('amount');
                 $amountToBill = max(0, (float) $this->total - $amountPaid);
 
                 // Only create transaction if there's an amount to bill
@@ -288,7 +311,21 @@ class SalesOrder extends Model
         }
 
         $this->save();
-        
+
+        // Recalculate payment_status after confirming
+        $amountPaid = (float) $this->payments()
+            ->whereNotIn('method', ['credit'])
+            ->sum('amount');
+
+        if ($amountPaid <= 0) {
+            $this->payment_status = 'pending';
+        } elseif ($amountPaid >= (float) $this->total) {
+            $this->payment_status = 'paid';
+        } else {
+            $this->payment_status = 'partial';
+        }
+        $this->save();
+
         // Auto-complete if payment is already received (POS sales)
         if ($this->payment_status === 'paid') {
             $this->complete();
@@ -338,7 +375,8 @@ class SalesOrder extends Model
         $this->save();
 
         // Reduce customer debt (or apply store_credit)
-        if ($this->customer_id) {
+        // Note: 'credit' method does NOT modify balance here because confirm() already handles it
+        if ($this->customer_id && $method !== 'credit') {
             $customer = \App\Models\Customer::find($this->customer_id);
             if ($customer) {
                 $balanceBefore = (float) $customer->current_balance;
