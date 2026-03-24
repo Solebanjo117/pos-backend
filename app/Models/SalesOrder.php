@@ -118,9 +118,9 @@ class SalesOrder extends Model
     public function getAmountPaidAttribute(): float
     {
         if ($this->relationLoaded('payments')) {
-            return (float) $this->payments->sum('amount');
+            return (float) $this->payments->where('method', '!==', 'credit')->sum('amount');
         }
-        return (float) $this->payments()->sum('amount');
+        return (float) $this->payments()->where('method', '!=', 'credit')->sum('amount');
     }
 
     public function getAmountDueAttribute(): float
@@ -353,7 +353,7 @@ class SalesOrder extends Model
      * Register a payment (cash, card, transfer, or credit).
      * Updates payment_status and, for credit payments, adjusts customer balance.
      */
-    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null): SalesOrderPayment
+    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false): SalesOrderPayment
     {
         $payment = $this->payments()->create([
             'amount'     => $amount,
@@ -364,7 +364,7 @@ class SalesOrder extends Model
         ]);
 
         // Recalculate payment_status
-        $paid = (float) $this->payments()->sum('amount');
+        $paid = (float) $this->payments()->where('method', '!=', 'credit')->sum('amount');
         if ($paid <= 0) {
             $this->payment_status = 'pending';
         } elseif ($paid >= (float) $this->total) {
@@ -374,42 +374,49 @@ class SalesOrder extends Model
         }
         $this->save();
 
-        // Reduce customer debt (or apply store_credit)
-        // Note: 'credit' method does NOT modify balance here because confirm() already handles it
-        if ($this->customer_id && $method !== 'credit') {
+        if ($this->customer_id) {
             $customer = \App\Models\Customer::find($this->customer_id);
             if ($customer) {
-                $balanceBefore = (float) $customer->current_balance;
+                $balanceBefore = $customer->current_balance;
 
-                // For store_credit, we INCREASE the balance (use up the credit)
-                // For other methods, we DECREASE the balance (reduce debt)
+                // store_credit SIEMPRE afecta balance, incluso en checkout
                 if ($method === 'store_credit') {
-                    // Store credit: balance is negative, add amount to bring it closer to 0
-                    $customer->current_balance = $balanceBefore + $amount;
-                    $transactionType = 'store_credit_used';
-                    $description = "Saldo a favor aplicado a venta {$this->order_number}";
-                } else {
-                    $customer->current_balance = $balanceBefore - $amount;
-                    $transactionType = 'payment';
-                    $description = "Abono a venta {$this->order_number}";
+                    $customer->current_balance += $amount; // El saldo a favor se gasta asumiéndose negativo o a la par
+                    $customer->save();
+                    
+                    \App\Models\CustomerTransaction::create([
+                        'customer_id'      => $customer->id,
+                        'type'             => 'store_credit_used',
+                        'amount'           => $amount,
+                        'balance_before'   => $balanceBefore,
+                        'balance_after'    => $customer->current_balance,
+                        'reference_type'   => 'sales_order',
+                        'reference_id'     => $this->id,
+                        'description'      => "Saldo a favor aplicado a venta {$this->order_number}",
+                        'transaction_date' => now(),
+                    ]);
+                } elseif ($method !== 'credit' && !$isCheckout) {
+                    // Si es cobro normal (efectivo/tarjeta/transferencia), solo baja el balance general 
+                    // si NO es un pago efectuado el día del Checkout original
+                    $customer->current_balance -= $amount;
+                    $customer->save();
+                    
+                    \App\Models\CustomerTransaction::create([
+                        'customer_id'      => $customer->id,
+                        'type'             => 'payment',
+                        'amount'           => $amount,
+                        'balance_before'   => $balanceBefore,
+                        'balance_after'    => $customer->current_balance,
+                        'reference_type'   => 'sales_order',
+                        'reference_id'     => $this->id,
+                        'description'      => "Abono a venta {$this->order_number}",
+                        'transaction_date' => now(),
+                    ]);
                 }
-                $customer->save();
-
-                \App\Models\CustomerTransaction::create([
-                    'customer_id'      => $customer->id,
-                    'type'             => $transactionType,
-                    'reference_type'   => 'sales_order_payment',
-                    'reference_id'     => $payment->id,
-                    'amount'           => $amount,
-                    'balance_before'   => $balanceBefore,
-                    'balance_after'    => $customer->current_balance,
-                    'description'      => $description,
-                    'transaction_date' => $paidAt ?? now(),
-                    'created_by'       => auth()->id(),
-                ]);
+                // Si $isCheckout === true y el método != store_credit:
+                // No tocar balance. confirm() se encargará del cargo neto al facturar la venta.
             }
         }
-
         // Auto-complete if fully paid and already confirmed
         if ($this->payment_status === 'paid' && in_array($this->status, ['confirmed', 'processing'])) {
             $this->complete();

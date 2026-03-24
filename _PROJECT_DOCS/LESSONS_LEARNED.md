@@ -213,3 +213,26 @@ Aprovechar el sistema multi-cart existente:
 Nunca llamar clearCart() al inicializar un modo alternativo del POS.
 Crear una sesión paralela y destruirla al salir — el estado del cajero
 es intocable.
+## LL-009 — Wrapper de Inertia sin layout hereda el error de LL-001
+
+**Área:** Frontend / Inertia / Vue 3
+**Archivos afectados:** EditOrderEditor.vue
+
+**Regla derivada**
+Todo componente wrapper que Inertia renderiza como página DEBE declarar
+su propio layout. Patrón obligatorio para cualquier *Editor.vue nuevo:
+
+import AppLayout from '@/layouts/AppLayout.vue'
+defineOptions({ layout: AppLayout })
+
+Aplica a: ReturnEditor.vue, EditOrderEditor.vue, y cualquier wrapper futuro.
+
+## LL-010 — Reducción de cantidades en editMode debe delegarse a returns
+
+**Área:** Backend + Frontend / SalesOrder edit flow
+
+**Regla derivada**
+editMode solo permite aumentar cantidades o agregar productos nuevos.
+Cualquier reducción pertenece al flujo de devoluciones (/returns/{id}).
+Validar en frontend (input min = originalQty) Y en backend (rechazar
+diff negativo con 422).

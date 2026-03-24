@@ -655,26 +655,37 @@ class SalesOrderController extends Controller
                     'audit_logs' => $logs
                 ]);
 
-                // Register payments
+                // 2. Crear cargo en cuenta del cliente por la diferencia
+                $diffTotal = $finalTotal - $orderTotal;
+                if ($diffTotal > 0 && $order->customer_id) {
+                    $customer = \App\Models\Customer::find($order->customer_id);
+                    if ($customer) {
+                        \App\Models\CustomerTransaction::create([
+                            'customer_id'      => $customer->id,
+                            'type'             => 'sale',
+                            'amount'           => $diffTotal,
+                            'balance_before'   => $customer->current_balance,
+                            'balance_after'    => $customer->current_balance + $diffTotal,
+                            'description'      => 'Cargo por Modificación de Venta ' . $order->order_number,
+                            'reference_type'   => 'sales_order_modification',
+                            'reference_id'     => $order->id,
+                            'transaction_date' => now(),
+                            'created_by'       => auth()->id(),
+                        ]);
+                        $customer->current_balance += $diffTotal;
+                        $customer->save();
+                    }
+                }
+
+                // 3. Register payments (with isCheckout = false to properly offset the debt charge above)
                 if (!empty($validated['payment'])) {
                     foreach ($validated['payment'] as $payment) {
                         $order->addPayment(
                             amount: (float)$payment['amount'],
                             method: $payment['method'],
-                            notes: $payment['notes'] ?? 'Cobro por diferencia (Modificación de Orden)'
+                            notes: $payment['notes'] ?? 'Cobro por diferencia (Modificación de Orden)',
+                            isCheckout: false
                         );
-
-                        // Reduce customer debt / apply store credit immediately (addPayment handles normal payments but NOT credit)
-                        // Actually, addPayment inside SalesOrder DOES reduce customer debt automatically for normal methods!
-                        // BUT for store_credit, it increases balance. For credit, it's skipped.
-                        // Since `confirm()` already ran in the past, we need to manually adjust for `credit`.
-                        if ($payment['method'] === 'credit' && $order->customer_id) {
-                            $customer = \App\Models\Customer::find($order->customer_id);
-                            if ($customer) {
-                                $customer->current_balance += $payment['amount'];
-                                $customer->save();
-                            }
-                        }
                     }
                     $totalPaid = $order->payments()->sum('amount');
                     if ($totalPaid >= $order->total) {

@@ -151,7 +151,8 @@ class SalesOrderService
                         $order->addPayment(
                             amount: (float)$payment['amount'],
                             method: $payment['method'] ?? 'cash',
-                            notes: $payment['notes'] ?? 'Pago POS'
+                            notes: $payment['notes'] ?? 'Pago POS',
+                            isCheckout: true
                         );
                     }
                 }
@@ -161,7 +162,8 @@ class SalesOrderService
                     $order->addPayment(
                         amount: (float)$data['initial_payment'],
                         method: $data['payment_method'],
-                        notes: 'Pago inicial POS'
+                        notes: 'Pago inicial POS',
+                        isCheckout: true
                     );
                 }
             } else {
@@ -170,7 +172,8 @@ class SalesOrderService
                     $order->addPayment(
                         amount: $order->total,
                         method: $data['payment_method'] ?? 'cash',
-                        notes: 'Pago completo POS'
+                        notes: 'Pago completo POS',
+                        isCheckout: true
                     );
                 }
             }
