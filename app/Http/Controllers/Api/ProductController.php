@@ -30,11 +30,11 @@ class ProductController extends Controller
         // Archive filter: 'true' = only trashed, 'all' = withTrashed, default = active only
         $archived = $request->get('archived', 'false');
         if ($archived === 'true') {
-            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category']);
+            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'engine']);
         } elseif ($archived === 'all') {
-            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category']);
+            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'engine']);
         } else {
-            $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes']);
+            $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
         }
 
         // Filters
@@ -186,6 +186,44 @@ class ProductController extends Controller
         });
 
         return ProductResource::collection($products);
+    }
+
+    /**
+     * Check for potential duplicate products by name or SKU.
+     * R20: Alert user when creating products with similar name/SKU.
+     *
+     * GET /api/v1/products/check-duplicate?name=xxx&sku=yyy
+     */
+    public function checkDuplicate(Request $request): JsonResponse
+    {
+        $name = $request->get('name');
+        $sku = $request->get('sku');
+
+        // Need at least one search param
+        if (empty($name) && empty($sku)) {
+            return response()->json(['data' => []]);
+        }
+
+        $query = Product::query()
+            ->select(['id', 'name', 'sku_base'])
+            ->limit(5);
+
+        if (!empty($name) && !empty($sku)) {
+            // Search by name OR sku
+            $query->where(function ($q) use ($name, $sku) {
+                $q->where('name', 'ilike', '%' . $name . '%')
+                  ->orWhere('sku_base', 'ilike', $sku);
+            });
+        } elseif (!empty($name)) {
+            $query->where('name', 'ilike', '%' . $name . '%');
+        } else {
+            // Only SKU
+            $query->where('sku_base', 'ilike', $sku);
+        }
+
+        $duplicates = $query->get();
+
+        return response()->json(['data' => $duplicates]);
     }
 
     /**

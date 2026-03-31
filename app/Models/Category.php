@@ -20,12 +20,21 @@ class Category extends Model
         'default_attributes',
         'icon',
         'priority',
+        'default_margin_percent',
+        'default_cost',
+        'pricing_formula',
+        'applies_itbm',
+        'itbm_percent',
     ];
 
     protected $casts = [
         'parent_id' => 'integer',
         'priority' => 'integer',
         'default_attributes' => 'array',
+        'default_margin_percent' => 'float',
+        'default_cost' => 'float',
+        'applies_itbm' => 'boolean',
+        'itbm_percent' => 'float',
     ];
 
     /**

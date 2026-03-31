@@ -144,7 +144,8 @@ class InventoryMovementService
 
             $inventory = $query->first();
 
-            if (!$inventory || $inventory->quantity_available < $data['quantity']) {
+            $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
+            if (!$allowNegative && (!$inventory || $inventory->quantity_available < $data['quantity'])) {
                 throw new \Exception('Stock insuficiente en el almacén seleccionado.');
             }
 
@@ -212,7 +213,8 @@ class InventoryMovementService
 
             $inventory = $query->first();
 
-            if (!$inventory || $inventory->quantity_available < $data['quantity']) {
+            $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
+            if (!$allowNegative && (!$inventory || $inventory->quantity_available < $data['quantity'])) {
                 throw new \Exception('Stock insuficiente en el almacén de origen.');
             }
 

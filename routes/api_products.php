@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Route;
 Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix('products')->group(function () {
     // CRUD Principal
     Route::get('/next-sku', [ProductController::class, 'nextSku']);
+    // R20: Check duplicate BEFORE /{product} routes to avoid route model binding conflict
+    Route::get('/check-duplicate', [ProductController::class, 'checkDuplicate']);
     Route::get('/', [ProductController::class, 'index']);
     Route::post('/', [ProductController::class, 'store']);
     Route::get('/{product}', [ProductController::class, 'show']);

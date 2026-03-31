@@ -27,6 +27,11 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
     Route::delete('/{id}', [SalesOrderController::class, 'destroy']);
     Route::patch('/{id}/add-items', [SalesOrderController::class, 'addItemsToExistingOrder']);
 
+    // Warehouse Queue
+    Route::get('/pending-at-warehouse', [SalesOrderController::class, 'pendingAtWarehouse']);
+    Route::post('/{id}/send-to-warehouse', [SalesOrderController::class, 'sendToWarehouse']);
+    Route::post('/{id}/mark-prepared', [SalesOrderController::class, 'markPrepared']);
+
     // Order lifecycle
     Route::post('/{id}/confirm', [SalesOrderController::class, 'confirm']);
     Route::post('/{id}/complete', [SalesOrderController::class, 'complete']);

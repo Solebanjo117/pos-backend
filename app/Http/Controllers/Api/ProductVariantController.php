@@ -148,13 +148,27 @@ class ProductVariantController extends Controller
             \DB::commit();
 
             // Assign variant-level attributes (outside transaction for simplicity)
+            // R27: If no attributes provided, inherit from parent product
             if (!empty($validated['attributes'])) {
                 $this->productService->assignVariantAttributes($variant, $validated['attributes']);
+            } else {
+                // Inherit attributes from parent product if available
+                $parentAttributes = $product->attributes;
+                if ($parentAttributes->isNotEmpty()) {
+                    $attributesData = $parentAttributes->map(function ($attr) {
+                        return [
+                            'name' => $attr->name,
+                            'value' => $attr->value,
+                            'unit' => $attr->unit,
+                        ];
+                    })->toArray();
+                    $this->productService->assignVariantAttributes($variant, $attributesData);
+                }
             }
 
             return response()->json([
                 'message' => 'Variante creada exitosamente',
-                'data' => $variant->load(['brand', 'pricing', 'inventory'])
+                'data' => $variant->load(['brand', 'pricing', 'inventory', 'attributes'])
             ], 201);
 
         } catch (\Exception $e) {

@@ -12,17 +12,20 @@ class PurchaseOrderItem extends Model
 
     protected $fillable = [
         'purchase_order_id',
+        'supplier_id',
         'product_id',
         'variant_id',
         'quantity_ordered',
         'quantity_received',
         'unit_cost',
         'subtotal',
+        'status',
         'notes',
     ];
 
     protected $casts = [
         'purchase_order_id' => 'integer',
+        'supplier_id' => 'integer',
         'product_id' => 'integer',
         'quantity_ordered' => 'integer',
         'quantity_received' => 'integer',
@@ -30,7 +33,7 @@ class PurchaseOrderItem extends Model
         'subtotal' => 'decimal:2',
     ];
 
-    protected $appends = ['pending_quantity', 'is_fully_received'];
+    protected $appends = ['pending_quantity', 'is_fully_received', 'status_label'];
 
     // ==================== RELATIONSHIPS ====================
 
@@ -49,6 +52,14 @@ class PurchaseOrderItem extends Model
         return $this->belongsTo(ProductVariant::class, 'variant_id');
     }
 
+    /**
+     * Get the supplier for this item (for daily global POs).
+     */
+    public function supplier(): BelongsTo
+    {
+        return $this->belongsTo(Supplier::class);
+    }
+
     // ==================== ACCESSORS ====================
 
     public function getPendingQuantityAttribute(): int
@@ -59,6 +70,23 @@ class PurchaseOrderItem extends Model
     public function getIsFullyReceivedAttribute(): bool
     {
         return $this->quantity_received >= $this->quantity_ordered;
+    }
+
+    public function getStatusLabelAttribute(): string
+    {
+        return match($this->status ?? 'pending') {
+            'received' => 'Recibido',
+            'partial'  => 'Parcial',
+            default    => 'Pendiente',
+        };
+    }
+
+    /**
+     * Get the effective supplier: from item if set, otherwise from PO header.
+     */
+    public function getEffectiveSupplierAttribute(): ?Supplier
+    {
+        return $this->supplier ?? $this->purchaseOrder?->supplier;
     }
 
     // ==================== BOOT ====================

@@ -29,6 +29,7 @@ class UpdateProductRequest extends FormRequest
             'upc'            => 'nullable|string|max:255',
             'product_line_id' => 'nullable|exists:product_lines,id',
             'category_id'    => 'nullable|exists:categories,id',
+            'engine_id'      => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
             'name'           => 'sometimes|string|max:255',
             'description'    => 'nullable|string',
             'status'         => 'sometimes|in:active,discontinued,pending',

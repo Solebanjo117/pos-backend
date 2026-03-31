@@ -14,10 +14,15 @@ Route::prefix('purchase-orders')->middleware(['role:admin,manager,buyer', 'wareh
     // Statistics
     Route::get('/statistics', [PurchaseOrderController::class, 'statistics']);
 
+    // Daily PO & Quick Purchase (v2)
+    Route::get('/daily', [PurchaseOrderController::class, 'getDailyPO']);
+    Route::post('/quick-purchase', [PurchaseOrderController::class, 'quickPurchase']);
+    Route::post('/reception-batch', [PurchaseOrderController::class, 'receptionBatch']);
+
     // CRUD
     Route::get('/', [PurchaseOrderController::class, 'index']);
     Route::post('/', [PurchaseOrderController::class, 'store']);
-    Route::post('/quick-receive', [PurchaseOrderController::class, 'quickReceive']);
+    Route::post('/quick-receive', [PurchaseOrderController::class, 'quickReceive']); // Legacy
     Route::get('/{id}', [PurchaseOrderController::class, 'show']);
     Route::put('/{id}', [PurchaseOrderController::class, 'update']);
     Route::delete('/{id}', [PurchaseOrderController::class, 'destroy']);

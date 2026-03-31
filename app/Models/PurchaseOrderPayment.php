@@ -48,11 +48,6 @@ class PurchaseOrderPayment extends Model
 
     public function getMethodLabelAttribute(): string
     {
-        return match ($this->method) {
-            'cash'     => 'Efectivo',
-            'card'     => 'Tarjeta',
-            'transfer' => 'Transferencia',
-            default    => 'Otro',
-        };
+        return PaymentMethod::getNameByCode($this->method);
     }
 }

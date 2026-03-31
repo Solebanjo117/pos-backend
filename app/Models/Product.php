@@ -20,6 +20,7 @@ class Product extends Model
         'pricing_formula',
         'product_line_id',
         'category_id',
+        'engine_id', // R21: motor/engine as reusable entity
         'name',
         'description',
         'image_url',
@@ -30,6 +31,8 @@ class Product extends Model
 
     protected $casts = [
         'product_line_id' => 'integer',
+        'category_id' => 'integer',
+        'engine_id' => 'integer',
         'status' => 'string',
         'batch_tracking' => 'boolean',
         'is_universal' => 'boolean',
@@ -81,6 +84,16 @@ class Product extends Model
     public function category(): BelongsTo
     {
         return $this->belongsTo(Category::class);
+    }
+
+    /**
+     * Get the engine/motor for this product (R21).
+     * This is the product's own engine (e.g., replacement engine part),
+     * separate from vehicle compatibility fitment.
+     */
+    public function engine(): BelongsTo
+    {
+        return $this->belongsTo(VehicleEngine::class, 'engine_id');
     }
 
     /**

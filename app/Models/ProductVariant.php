@@ -96,7 +96,9 @@ class ProductVariant extends Model
      */
     public function getDisplayNameAttribute(): string
     {
-        return "{$this->product->name} - {$this->brand->name}";
+        $productName = $this->product?->name ?? 'Producto';
+        $brandName = $this->brand?->name ?? 'Sin marca';
+        return "{$productName} - {$brandName}";
     }
 
     /**

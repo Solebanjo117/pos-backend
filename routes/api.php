@@ -63,6 +63,8 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     require __DIR__ . '/api_suppliers.php';
     require __DIR__ . '/api_smart_reorder.php';
     require __DIR__ . '/api_accounts_payable.php';
+    require __DIR__ . '/api_supply_list.php';
+
 
     // ---------------------------------------------------------------
     // Reports: manager, admin (cashier/seller restricted in each file)
@@ -83,6 +85,11 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     // Store Settings: admin and managers
     // ---------------------------------------------------------------
     require __DIR__ . '/api_store_settings.php';
+
+    // ---------------------------------------------------------------
+    // Payment Methods: configurable payment methods
+    // ---------------------------------------------------------------
+    require __DIR__ . '/api_payment_methods.php';
 
 
     // ---------------------------------------------------------------

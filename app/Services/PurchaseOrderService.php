@@ -7,6 +7,7 @@ use App\Models\PurchaseOrderItem;
 use App\Models\ProductInventory;
 use App\Models\InventoryMovement;
 use App\Models\ProductBatch;
+use App\Services\PricingFormulaService;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -37,7 +38,14 @@ class PurchaseOrderService
         }
 
         if (!empty($filters['supplier_id'])) {
-            $query->bySupplier($filters['supplier_id']);
+            $supplierId = $filters['supplier_id'];
+            // Search by supplier in header OR in items (for daily global POs)
+            $query->where(function ($q) use ($supplierId) {
+                $q->where('supplier_id', $supplierId)
+                  ->orWhereHas('items', function ($iq) use ($supplierId) {
+                      $iq->where('supplier_id', $supplierId);
+                  });
+            });
         }
 
         if (!empty($filters['date_from']) && !empty($filters['date_to'])) {
@@ -69,6 +77,7 @@ class PurchaseOrderService
             'supplier',
             'warehouse',
             'user:id,name',
+            'items.supplier:id,name', // Item-level supplier for daily POs
             'items.product:id,sku_base,name',
             'items.product.defaultVariant.brand:id,name', // Fallback for products
             'items.variant.brand:id,name', // Primary source
@@ -298,6 +307,42 @@ class PurchaseOrderService
 
                     ProductBatch::create($batchData);
                 }
+
+                // R30 — Update sale price if provided and different (LL-012)
+                $newSalePrice = isset($received['sale_price']) ? (float) $received['sale_price'] : null;
+                if ($newSalePrice !== null && $newSalePrice > 0) {
+                    if ($useVariant && $item->variant) {
+                        $pricing = $item->variant->pricing;
+                        if ($pricing && (float) $pricing->base_price !== $newSalePrice) {
+                            $pricing->update(['base_price' => $newSalePrice]);
+                        }
+                    } elseif ($item->product) {
+                        $pricing = $item->product->pricing;
+                        if ($pricing && (float) $pricing->base_price !== $newSalePrice) {
+                            $pricing->update(['base_price' => $newSalePrice]);
+                        }
+                    }
+                } else {
+                    // R23 — No explicit sale_price: try category pricing formula as fallback
+                    $category = $item->product?->category;
+                    if ($category?->pricing_formula && $item->unit_cost > 0) {
+                        $formulaService = app(PricingFormulaService::class);
+                        $calculated = $formulaService->calculate(
+                            $category->pricing_formula,
+                            (float) $item->unit_cost,
+                            (bool) $category->applies_itbm
+                        );
+                        if ($calculated !== null) {
+                            $pricing = $useVariant
+                                ? $item->variant?->pricing
+                                : $item->product?->pricing;
+                            if ($pricing && (float) $pricing->base_price !== $calculated) {
+                                $pricing->update(['base_price' => $calculated]);
+                            }
+                        }
+                    }
+                }
+
             }
 
             // Update PO status based on reception
@@ -402,6 +447,11 @@ class PurchaseOrderService
                         }
 
                         if ($inventory) {
+                            // R28: Validate stock before reverting purchase receipt
+                            if ($inventory->quantity_available < $item->quantity_received) {
+                                $productName = $item->product->name ?? "ID:{$productId}";
+                                throw new \Exception("No se puede cancelar la OC: stock insuficiente para revertir la recepción de {$productName}. Disponible: {$inventory->quantity_available}, Recibido originalmente: {$item->quantity_received}. Revise el inventario.");
+                            }
                             $inventory->quantity_available -= $item->quantity_received;
                             $inventory->save();
                         }
@@ -448,5 +498,228 @@ class PurchaseOrderService
                                            ->where('status', '!=', 'cancelled')
                                            ->count(),
         ];
+    }
+
+    // ==================== DAILY GLOBAL PO METHODS ====================
+
+    /**
+     * Get or create the daily global purchase order for a warehouse.
+     * Daily POs have no single supplier - each item defines its own supplier.
+     */
+    public function getOrCreateDailyPurchaseOrder(int $warehouseId): PurchaseOrder
+    {
+        $today = now()->toDateString();
+
+        // Look for existing daily PO (no supplier_id, status open or draft)
+        $dailyPO = PurchaseOrder::whereNull('supplier_id')
+            ->where('warehouse_id', $warehouseId)
+            ->whereDate('order_date', $today)
+            ->whereIn('status', ['open', 'draft'])
+            ->first();
+
+        if ($dailyPO) {
+            return $dailyPO;
+        }
+
+        // Create new daily PO
+        return DB::transaction(function () use ($warehouseId, $today) {
+            return PurchaseOrder::create([
+                'supplier_id' => null, // No single supplier - items define their own
+                'warehouse_id' => $warehouseId,
+                'user_id' => Auth::id(),
+                'status' => 'open',
+                'payment_status' => 'paid', // Quick purchases are paid on the spot
+                'order_date' => $today,
+                'expected_date' => $today,
+                'subtotal' => 0,
+                'tax_amount' => 0,
+                'shipping_cost' => 0,
+                'total' => 0,
+                'notes' => 'OC Global del Día - Recepciones rápidas',
+            ]);
+        });
+    }
+
+    /**
+     * Add an item to the daily PO with immediate stock reception.
+     * This is the core method for Quick Purchase from POS.
+     * 
+     * @param array $data [
+     *   'warehouse_id' => int,
+     *   'supplier_id' => int,
+     *   'variant_id' => int (optional),
+     *   'product_id' => int (optional, required if no variant_id),
+     *   'quantity' => int,
+     *   'unit_cost' => float,
+     *   'sale_price' => float (optional),
+     *   'batch_number' => string (optional),
+     *   'expiry_date' => string (optional),
+     * ]
+     */
+    public function addItemToDailyPO(array $data): PurchaseOrderItem
+    {
+        return DB::transaction(function () use ($data) {
+            $warehouseId = $data['warehouse_id'];
+            $supplierId = $data['supplier_id'];
+            $variantId = $data['variant_id'] ?? null;
+            $productId = $data['product_id'] ?? null;
+            $quantity = $data['quantity'];
+            $unitCost = $data['unit_cost'];
+
+            // Get product_id from variant if needed
+            if ($variantId && !$productId) {
+                $variant = \App\Models\ProductVariant::find($variantId);
+                if ($variant) {
+                    $productId = $variant->product_id;
+                }
+            }
+
+            // Get or create today's daily PO
+            $dailyPO = $this->getOrCreateDailyPurchaseOrder($warehouseId);
+
+            // Create the item with supplier and received status
+            $item = $dailyPO->items()->create([
+                'supplier_id' => $supplierId,
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'quantity_ordered' => $quantity,
+                'quantity_received' => $quantity, // Immediately received
+                'unit_cost' => $unitCost,
+                'status' => 'received',
+                'notes' => $data['notes'] ?? null,
+            ]);
+
+            // Create inventory movement (entry)
+            $useVariant = !empty($variantId);
+            $movementData = [
+                'warehouse_id' => $warehouseId,
+                'movement_type' => 'in',
+                'quantity' => $quantity,
+                'reference_type' => 'purchase_order',
+                'reference_id' => $dailyPO->id,
+                'reason' => 'Quick Purchase - Recepción inmediata',
+                'notes' => "Recepción rápida - Item #{$item->id}",
+                'user_id' => Auth::id(),
+            ];
+
+            if ($useVariant) {
+                $movementData['variant_id'] = $variantId;
+                $movementData['product_id'] = $productId;
+            } else {
+                $movementData['product_id'] = $productId;
+            }
+
+            InventoryMovement::create($movementData);
+
+            // Update inventory
+            if ($useVariant) {
+                $inventory = ProductInventory::firstOrCreate(
+                    ['variant_id' => $variantId, 'warehouse_id' => $warehouseId],
+                    ['product_id' => $productId, 'quantity_available' => 0, 'quantity_reserved' => 0, 'reorder_point' => 10, 'reorder_quantity' => 50]
+                );
+            } else {
+                $inventory = ProductInventory::firstOrCreate(
+                    ['product_id' => $productId, 'warehouse_id' => $warehouseId],
+                    ['quantity_available' => 0, 'quantity_reserved' => 0, 'reorder_point' => 10, 'reorder_quantity' => 50]
+                );
+            }
+            $inventory->quantity_available += $quantity;
+            $inventory->save();
+
+            // Handle batch tracking if applicable
+            $product = \App\Models\Product::find($productId);
+            if ($product?->batch_tracking && !empty($data['batch_number'])) {
+                $batchData = [
+                    'product_id' => $productId,
+                    'batch_number' => $data['batch_number'],
+                    'quantity' => $quantity,
+                    'expiry_date' => $data['expiry_date'] ?? null,
+                    'cost' => $unitCost,
+                ];
+                if ($useVariant) {
+                    $batchData['variant_id'] = $variantId;
+                }
+                ProductBatch::create($batchData);
+            }
+
+            // Update sale price if provided
+            if (!empty($data['sale_price'])) {
+                $this->updateItemSalePrice($item, (float) $data['sale_price']);
+            }
+
+            // Recalculate PO totals
+            $dailyPO->calculateTotals();
+
+            return $item->fresh(['product', 'variant', 'supplier']);
+        });
+    }
+
+    /**
+     * Batch add items to daily PO (for POS Reception Mode).
+     * 
+     * @param int $warehouseId
+     * @param array $items Array of item data (same format as addItemToDailyPO)
+     * @return PurchaseOrder The daily PO with all added items
+     */
+    public function batchAddItemsToDailyPO(int $warehouseId, array $items): PurchaseOrder
+    {
+        return DB::transaction(function () use ($warehouseId, $items) {
+            foreach ($items as $itemData) {
+                $itemData['warehouse_id'] = $warehouseId;
+                $this->addItemToDailyPO($itemData);
+            }
+
+            $dailyPO = $this->getOrCreateDailyPurchaseOrder($warehouseId);
+            return $dailyPO->fresh(['items.product', 'items.variant', 'items.supplier']);
+        });
+    }
+
+    /**
+     * Quick Purchase v2: Uses the daily PO system instead of creating individual POs.
+     * Backwards compatible with the original quickReceive signature.
+     */
+    public function quickPurchase(array $data): PurchaseOrder
+    {
+        return DB::transaction(function () use ($data) {
+            $warehouseId = $data['warehouse_id'];
+
+            foreach ($data['items'] as $itemData) {
+                $this->addItemToDailyPO([
+                    'warehouse_id' => $warehouseId,
+                    'supplier_id' => $itemData['supplier_id'] ?? $data['supplier_id'],
+                    'variant_id' => $itemData['variant_id'] ?? null,
+                    'product_id' => $itemData['product_id'] ?? null,
+                    'quantity' => $itemData['quantity_ordered'] ?? $itemData['quantity'],
+                    'unit_cost' => $itemData['unit_cost'],
+                    'sale_price' => $itemData['sale_price'] ?? null,
+                    'batch_number' => $itemData['batch_number'] ?? null,
+                    'expiry_date' => $itemData['expiry_date'] ?? null,
+                    'notes' => $itemData['notes'] ?? 'Quick Purchase desde POS',
+                ]);
+            }
+
+            return $this->getOrCreateDailyPurchaseOrder($warehouseId)
+                ->fresh(['items.product', 'items.variant', 'items.supplier']);
+        });
+    }
+
+    /**
+     * Helper to update sale price for an item's product/variant.
+     */
+    private function updateItemSalePrice(PurchaseOrderItem $item, float $salePrice): void
+    {
+        $useVariant = !empty($item->variant_id);
+        
+        if ($useVariant && $item->variant) {
+            $pricing = $item->variant->pricing;
+            if ($pricing && (float) $pricing->base_price !== $salePrice) {
+                $pricing->update(['base_price' => $salePrice]);
+            }
+        } elseif ($item->product) {
+            $pricing = $item->product->pricing;
+            if ($pricing && (float) $pricing->base_price !== $salePrice) {
+                $pricing->update(['base_price' => $salePrice]);
+            }
+        }
     }
 }

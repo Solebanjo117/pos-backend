@@ -146,20 +146,7 @@
     <table>
         @foreach($order->payments as $payment)
         <tr>
-            <td>
-                @switch($payment->method)
-                    @case('cash') Efectivo @break
-                    @case('card') Tarjeta @break
-                    @case('transfer') Transferencia @break
-                    @case('credit') Crédito @break
-                    @case('store_credit') Saldo a Favor @break
-                    @case('visa') Visa @break
-                    @case('mastercard') Mastercard @break
-                    @case('amex') Amex @break
-                    @case('transferencia') Transferencia @break
-                    @default {{ ucfirst($payment->method) }}
-                @endswitch
-            </td>
+            <td>{{ $payment->formatted_method }}</td>
             <td class="right">${{ number_format($payment->amount, 2) }}</td>
         </tr>
         @endforeach

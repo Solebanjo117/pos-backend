@@ -30,13 +30,14 @@ class DatabaseSeeder extends Seeder
             AttributeDefinitionSeeder::class,
             CategorySeeder::class,
             DefaultSettingsSeeder::class,
+            PaymentMethodSeeder::class,
             DemoDataSeeder::class,
             InventoryMovementSeeder::class,
             ProductInventorySeeder::class,
             ProductSeeder::class,
             UserSeeder::class,
             VehicleSeeder::class,
-            
+
         ]);
         
         $this->command->info('✅ Datos base creados');

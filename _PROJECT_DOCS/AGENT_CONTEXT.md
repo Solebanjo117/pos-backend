@@ -224,6 +224,15 @@ Web route protection: /pos requiere role:admin,manager,cashier; /quotes/* requie
   FASE 7 — Sanctum tokens [requiere F6]
   FASE 8 — QuickBooks/Xero [requiere todo estable]
 
+### Prioridad acordada (Reunión 2)
+1. R22 — Fórmula precio por categoría
+2. R29 — Lista de abastecimiento
+3. R23/R24 — Costo+ITBM y precio venta en OC
+4. R28 — Stock mínimo cero
+5. R34+R31 — Flechitas inputs + botón Guardar POS
+6. R32/R33 — Cola de caja mejoras
+7. B01/B02/B03 — Bugs pequeños
+
 ---
 
 ## Auditoría de requerimientos cliente — 17 de marzo de 2026 (rev.2)
@@ -311,6 +320,40 @@ Web route protection: /pos requiere role:admin,manager,cashier; /quotes/* requie
   R15 | ✅ Implementado | vuedraggable v4.1.0 instalado. ProductTable.vue:92-98 envuelve tabla en <draggable> con handle=".drag-handle". GripVertical icon visible en línea 127 con title="Arrastrar para reordenar". usePOS.ts:374-377 reorderCart() sincroniza nuevo orden.
 
   Archivos: pos-frontend/resources/js/components/POS/ProductTable.vue:92-127, pos-frontend/resources/js/composables/usePOS.ts:374-377
+
+### Requerimientos Reunión 2
+
+| Req | Estado | Descripción |
+|-----|--------|-------------|
+| R20 | ✅ Implementado | Alerta de duplicado al crear producto/vehículo |
+| R21 | ✅ Implementado | Motores como entidad separada reutilizable |
+| R22 | ✅ Implementado | Fórmula de precio predeterminada por categoría |
+| R23 | ✅ Implementado | Costo desglosado: base + ITBM = total en producto y OC |
+| R24 | ✅ Implementado (cubierto por R30) | Precio de venta editable inline desde orden de compra |
+| R25 | ✅ Implementado (ya existía) | Click en producto de OC muestra detalle/atributos |
+| R26 | ✅ Implementado (ya existía) | Búsqueda por código en orden de compra |
+| R27 | ✅ Implementado | Atributos del producto heredados en todas las variantes |
+| R28 | ✅ Implementado | Stock mínimo cero — no permitir negativos |
+| R29 | ✅ Implementado | Lista de abastecimiento previa a OC |
+| R30 | ✅ Implementado | Precio de venta editable inline en OC al recibir |
+| R31 | ✅ Implementado | Eliminar botón "Guardar" del POS |
+| R32 | ✅ Implementado | X para quitar cotización de cola de caja |
+| R33 | ✅ Implementado | Altura fija tarjetas en cola de caja |
+| R34 | ✅ Implementado | Eliminar flechitas de inputs numéricos |
+| R35 | ✅ Implementado | Cola de depósito/bodeguero |
+| R36 | ✅ Implementado | Métodos de pago configurables desde Settings |
+| R37 | ✅ Implementado | Atributos de categoría en columna vertical única, no dos columnas |
+| R38 | ✅ Implementado | Quitar campo SKU variante — todas las variantes usan el código del producto padre |
+| R39 | ✅ Implementado | Selección múltiple de motores en compatibilidad vehicular |
+| R40 | ✅ Implementado | R09 más obvio — botón "Ver detalle" visible en búsqueda POS, no solo clic derecho |
+```
+### Bugs pendientes Reunión 2
+
+| Bug | Estado | Descripción |
+|-----|--------|-------------|
+| B01 | ✅ Resuelto | Enter en atributos de categoría saca del campo |
+| B02 | ✅ Resuelto | Nombre de categoría no se actualiza en panel derecho |
+| B03 | ✅ Resuelto | Submenú de item en carrito sin forma obvia de cerrar |
 
 ---
 
@@ -424,3 +467,30 @@ Web route protection: /pos requiere role:admin,manager,cashier; /quotes/* requie
   - `totalPaid` ahora incluye `creditToCharge`.
   - `paymentsArray` agrega método `credit` cuando `creditToCharge > 0`.
   - `creditToCharge` se resetea al cerrar modal y al cambiar cliente.
+
+---
+
+## Pendientes históricos (pre-reunión 2)
+
+| # | Descripción | Estado |
+|---|-------------|--------|
+| R09 | Botón "Ver detalle" en búsqueda del POS | ❌ pendiente |
+| R10 | Búsqueda directa por motor sin cascada | ❌ pendiente |
+| R11 | Años en dos dígitos en compatibilidad vehicular | ❌ pendiente |
+| — | Fix confirm() balance incorrecto | ✅ resuelto 2026-03-22 |
+| — | Sección crédito dedicada en modal cobro | ✅ resuelto 2026-03-22 |
+| — | Fix addPayment() deuda real en CxC | ❌ pendiente |
+| — | Sección crédito en modal cobro (separada de Visa/MC) | ❌ pendiente |
+
+---
+
+## Mejoras de UX y Carrito POS (Requerimientos Extra 2026-03-30)
+
+| Req     | Descripción | Estado |
+|---------|-------------|--------|
+| **R41**     | Banner estilizado en el Header del POS para *quoteMode* mostrando número de cotización o "NUEVA COTIZACIÓN" | ✅ implementado |
+| **UX-001**  | Interceptor global de navegación (`router.on('before')`) y `beforeunload` para prevenir escape accidental con carrito lleno | ✅ implementado |
+| **R42**     + **BUG-001** | Búsqueda vacía solicita todos los productos; el flujo siempre abre el modal (eliminando redirect ciego a un solo resultado) | ✅ implementado/verificado |
+| **R43**     | Edición de búsqueda dentro del modal (emite `@search-in-modal`) sin cerrar la ventana principal | ✅ implementado |
+| **R44**     | Buscador local y ordenamiento (Nombre, SKU, Cantidad, Precio) dentro del panel del carrito POS | ✅ implementado |
+| **R45**     | Panel Lateral (Sidebar) colapsable con lista de categorías y marcas funcionando como filtro persistente | ✅ implementado |

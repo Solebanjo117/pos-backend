@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 
 class SalesOrder extends Model
@@ -30,6 +31,9 @@ class SalesOrder extends Model
         'notes',
         'internal_notes',
         'audit_logs',
+        'sent_to_warehouse_at',
+        'prepared_by',
+        'prepared_at',
     ];
 
     protected $casts = [
@@ -40,6 +44,8 @@ class SalesOrder extends Model
         'shipping_cost' => 'decimal:2',
         'total' => 'decimal:2',
         'audit_logs' => 'array',
+        'sent_to_warehouse_at' => 'datetime',
+        'prepared_at' => 'datetime',
     ];
 
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'total_returned'];
@@ -54,6 +60,11 @@ class SalesOrder extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function preparedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'prepared_by');
     }
 
     public function posSession(): BelongsTo
@@ -250,7 +261,7 @@ class SalesOrder extends Model
                 'reference_type' => 'sale',
                 'reference_id' => $this->id,
                 'notes' => "Venta - Orden {$this->order_number}",
-                'user_id' => auth()->id(),
+                'user_id' => Auth::id(),
                 'date' => now(),
             ]);
 
@@ -304,7 +315,7 @@ class SalesOrder extends Model
                         'balance_after'    => $customer->current_balance,
                         'description'      => "Cargo por venta {$this->order_number}",
                         'transaction_date' => now(),
-                        'created_by'       => auth()->id(),
+                        'created_by'       => Auth::id(),
                     ]);
                 }
             }
@@ -360,7 +371,7 @@ class SalesOrder extends Model
             'method'     => $method,
             'notes'      => $notes,
             'paid_at'    => $paidAt ?? now(),
-            'created_by' => auth()->id(),
+            'created_by' => Auth::id(),
         ]);
 
         // Recalculate payment_status
@@ -446,7 +457,7 @@ class SalesOrder extends Model
                     'reference_type' => 'sale_cancelled',
                     'reference_id' => $this->id,
                     'notes' => "Cancelación de orden {$this->order_number}",
-                    'user_id' => auth()->id(),
+                    'user_id' => Auth::id(),
                     'date' => now(),
                 ]);
 
@@ -504,7 +515,7 @@ class SalesOrder extends Model
                         'balance_after'    => $customer->current_balance,
                         'description'      => "Reembolso por cancelación de orden {$this->order_number} ({$payment->formatted_method})",
                         'transaction_date' => now(),
-                        'created_by'       => auth()->id(),
+                        'created_by'       => Auth::id(),
                     ]);
                 }
             }
@@ -517,6 +528,29 @@ class SalesOrder extends Model
         $this->save();
 
         return true;
+    }
+
+    /**
+     * Set sent_to_warehouse_at
+     */
+    public function sendToWarehouse(): bool
+    {
+        if ($this->sent_to_warehouse_at !== null) return false;
+        
+        $this->sent_to_warehouse_at = now();
+        return $this->save();
+    }
+
+    /**
+     * Mark order as prepared
+     */
+    public function markAsPrepared(int $userId): bool
+    {
+        if ($this->prepared_at !== null) return false;
+        
+        $this->prepared_by = $userId;
+        $this->prepared_at = now();
+        return $this->save();
     }
 
     /**

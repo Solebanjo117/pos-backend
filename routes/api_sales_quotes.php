@@ -22,6 +22,8 @@ Route::middleware(['web'])->group(function () {
         ->middleware('role:admin,manager,seller');
     Route::post('/sales-quotes/{id}/send-to-cashier',[SalesQuoteController::class, 'sendToCashier'])
         ->middleware('role:admin,manager,seller');
+    Route::delete('/sales-quotes/{id}/cashier-queue', [SalesQuoteController::class, 'removeFromCashierQueue'])
+        ->middleware('role:admin,manager,cashier');
     Route::post('/sales-quotes/{id}/mark-collected', [SalesQuoteController::class, 'markCollected'])
         ->middleware('role:admin,manager,cashier');
     Route::get('/sales-quotes/{id}/ticket',          [SalesQuoteController::class, 'ticket']);

@@ -55,14 +55,16 @@ class VehicleEngineController extends Controller
 
     /**
      * Store a newly created vehicle engine.
+     * R21: Motors are independent entities (model_id is optional)
      */
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'model_id' => 'required|exists:vehicle_models,id',
+            'model_id' => 'nullable|exists:vehicle_models,id',
             'engine_code' => 'required|string|max:50',
             'displacement' => 'nullable|string|max:20',
             'fuel_type' => 'nullable|string|max:50',
+            'aspiration' => 'nullable|string|max:50',
         ]);
 
         $engine = VehicleEngine::create($validated);
@@ -86,16 +88,18 @@ class VehicleEngineController extends Controller
 
     /**
      * Update the specified vehicle engine.
+     * R21: Motors are independent entities (model_id is optional)
      */
     public function update(Request $request, string $id): JsonResponse
     {
         $engine = VehicleEngine::findOrFail($id);
 
         $validated = $request->validate([
-            'model_id' => 'sometimes|required|exists:vehicle_models,id',
+            'model_id' => 'nullable|exists:vehicle_models,id',
             'engine_code' => 'sometimes|required|string|max:50',
             'displacement' => 'nullable|string|max:20',
             'fuel_type' => 'nullable|string|max:50',
+            'aspiration' => 'nullable|string|max:50',
         ]);
 
         $engine->update($validated);

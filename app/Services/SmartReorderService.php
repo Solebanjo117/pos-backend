@@ -16,7 +16,7 @@ class SmartReorderService
     {
         $query = ProductInventory::with([
             'product.productSuppliers' => function ($q) {
-                $q->where('is_preferred', true)->orWhereNotNull('id');
+                $q->orderByDesc('is_preferred');
             },
             'product.productSuppliers.supplier',
             'product.pricing',
@@ -61,7 +61,7 @@ class SmartReorderService
 
             // Get unit cost: prefer supplier cost, fallback to product pricing cost
             $unitCost = $preferredSupplier->supplier_cost 
-                ?? $product->pricing->cost 
+                ?? $product->pricing?->cost 
                 ?? 0;
 
             $groupedBySupplier[$supplierId]['items'][] = [
@@ -120,7 +120,7 @@ class SmartReorderService
 
                 // Recalculate totals
                 $po->load('items');
-                $po->save();
+                $po->calculateTotals();
 
                 $createdOrders[] = $po->load(['supplier', 'warehouse', 'items.product']);
             }
@@ -139,21 +139,29 @@ class SmartReorderService
      */
     public function getLowStockStats(?int $warehouseId = null): array
     {
-        $query = ProductInventory::whereColumn('quantity_available', '<=', 'reorder_point')
+        $query = ProductInventory::with(['product.productSuppliers'])
+            ->whereColumn('quantity_available', '<=', 'reorder_point')
             ->where('quantity_available', '>=', 0);
 
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
         }
 
-        $total = $query->count();
-        $critical = (clone $query)->where('quantity_available', 0)->count();
-        $low = (clone $query)->where('quantity_available', '>', 0)->count();
+        $items = $query->get();
+        $total = $items->count();
+        $critical = $items->where('quantity_available', 0)->count();
+        $low = $items->where('quantity_available', '>', 0)->count();
+        
+        // Count products without suppliers (skipped in smart reorder)
+        $withoutSupplier = $items->filter(function ($item) {
+            return $item->product->productSuppliers->isEmpty();
+        })->count();
 
         return [
             'total_items' => $total,
             'critical_stock' => $critical,
             'low_stock' => $low,
+            'without_supplier' => $withoutSupplier,
         ];
     }
 }

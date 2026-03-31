@@ -6,9 +6,11 @@ use App\Http\Controllers\Controller;
 use App\Models\SalesOrder;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\PaymentMethod;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 class SalesOrderPaymentController extends Controller
 {
@@ -37,9 +39,12 @@ class SalesOrderPaymentController extends Controller
     {
         $order = SalesOrder::with(['payments', 'customer'])->findOrFail($orderId);
 
+        // Get all active payment method codes dynamically
+        $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+        
         $validated = $request->validate([
             'amount' => 'required|numeric|min:0.01',
-            'method' => 'required|in:cash,card,transfer,credit',
+            'method' => ['required', Rule::in($validPaymentMethods)],
             'notes'  => 'nullable|string|max:500',
             'paid_at' => 'nullable|date',
         ]);

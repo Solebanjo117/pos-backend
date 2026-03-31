@@ -4,10 +4,12 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\PosCheckoutRequest;
+use App\Models\PaymentMethod;
 use App\Services\SalesOrderService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use App\Models\ProductVariant;
 use App\Models\Inventory;
 
@@ -76,6 +78,9 @@ class SalesOrderController extends Controller
     public function store(PosCheckoutRequest $request): JsonResponse
     {
         try {
+            // Get all active payment method codes dynamically
+            $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+            
             $validated = $request->validate([
                 'user_id'           => 'nullable|integer|min:1',
                 'customer_id'       => 'nullable|exists:customers,id',
@@ -92,7 +97,7 @@ class SalesOrderController extends Controller
                 'audit_logs'        => 'nullable|array',
                 'payments'          => 'nullable|array',
                 'payments.*.amount' => 'required_with:payments|numeric|min:0.01',
-                'payments.*.method' => 'required_with:payments|in:cash,card,transfer,credit,visa,mastercard,amex,clave,yappy,transferencia,notaCredito,creditoCliente,store_credit',
+                'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
                 'payments.*.notes'  => 'nullable|string',
                 'items'             => 'nullable|array',
                 'items.*.product_id'       => 'required|exists:products,id',
@@ -636,14 +641,17 @@ class SalesOrderController extends Controller
 
                 $finalTotal = $orderTotal + $order->shipping_cost - $order->discount_amount;
                 
+                /** @var \App\Models\User|null $user */
+                $user = auth()->user();
+
                 $logs = $order->audit_logs ?? [];
                 $logs[] = [
                     'action' => 'order_modified',
                     'metadata' => [
                         'items_count' => count($validated['items'] ?? []),
                         'total_diff'  => $finalTotal - $order->total,
-                        'user_id'     => auth()->id(),
-                        'user_name'   => auth()->user() ? auth()->user()->name : 'Sistema'
+                        'user_id'     => $user?->id,
+                        'user_name'   => $user?->name ?? 'Sistema'
                     ],
                     'timestamp' => now()->toISOString()
                 ];
@@ -670,7 +678,7 @@ class SalesOrderController extends Controller
                             'reference_type'   => 'sales_order_modification',
                             'reference_id'     => $order->id,
                             'transaction_date' => now(),
-                            'created_by'       => auth()->id(),
+                            'created_by'       => $user?->id,
                         ]);
                         $customer->current_balance += $diffTotal;
                         $customer->save();
@@ -706,5 +714,52 @@ class SalesOrderController extends Controller
                 'error' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    /**
+     * GET /api/sales-orders/pending-at-warehouse
+     */
+    public function pendingAtWarehouse(Request $request): JsonResponse
+    {
+        $warehouseId = $request->header('X-Warehouse-Id') 
+            ?? $request->user()?->current_warehouse_id;
+
+        $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product'])
+            ->when($warehouseId, fn($q) => $q->whereHas('items', function($iq) use ($warehouseId) {
+                $iq->where('warehouse_id', $warehouseId);
+            }))
+            ->whereNotNull('sent_to_warehouse_at')
+            ->whereNull('prepared_at')
+            ->orderBy('sent_to_warehouse_at', 'asc')
+            ->get();
+
+        return response()->json([
+            'data' => $orders,
+            'count' => $orders->count(),
+        ]);
+    }
+
+    /**
+     * POST /api/sales-orders/{id}/send-to-warehouse
+     */
+    public function sendToWarehouse(int $id): JsonResponse
+    {
+        $order = \App\Models\SalesOrder::findOrFail($id);
+        if (!$order->sendToWarehouse()) {
+            return response()->json(['message' => 'La orden ya está en cola de bodega'], 422);
+        }
+        return response()->json(['message' => 'Enviada a bodega', 'data' => $order->fresh()]);
+    }
+
+    /**
+     * POST /api/sales-orders/{id}/mark-prepared
+     */
+    public function markPrepared(Request $request, int $id): JsonResponse
+    {
+        $order = \App\Models\SalesOrder::findOrFail($id);
+        if (!$order->markAsPrepared($request->user()->id)) {
+            return response()->json(['message' => 'La orden ya fue preparada'], 422);
+        }
+        return response()->json(['message' => 'Marcada como preparada', 'data' => $order->fresh()]);
     }
 }

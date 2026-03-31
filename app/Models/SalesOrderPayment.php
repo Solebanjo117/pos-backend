@@ -34,14 +34,11 @@ class SalesOrderPayment extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    /**
+     * Get formatted method name from PaymentMethod table
+     */
     public function getFormattedMethodAttribute(): string
     {
-        return match($this->method) {
-            'cash'     => 'Efectivo',
-            'card'     => 'Tarjeta',
-            'transfer' => 'Transferencia',
-            'credit'   => 'Crédito',
-            default    => $this->method,
-        };
+        return PaymentMethod::getNameByCode($this->method);
     }
 }

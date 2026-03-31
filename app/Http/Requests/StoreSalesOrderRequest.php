@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Models\PaymentMethod;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreSalesOrderRequest extends FormRequest
 {
@@ -13,6 +15,9 @@ class StoreSalesOrderRequest extends FormRequest
 
     public function rules(): array
     {
+        // Get all active payment method codes dynamically
+        $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+        
         return [
             'user_id'                 => 'nullable|integer|min:1',
             'customer_id'             => 'nullable|exists:customers,id',
@@ -27,7 +32,7 @@ class StoreSalesOrderRequest extends FormRequest
             'audit_logs'              => 'nullable|array',
             'payments'                => 'nullable|array',
             'payments.*.amount'       => 'required_with:payments|numeric|min:0.01',
-            'payments.*.method'       => 'required_with:payments|in:cash,card,transfer,credit,store_credit,visa,mastercard,amex,clave,yappy,transferencia,notaCredito,creditoCliente',
+            'payments.*.method'       => ['required_with:payments', Rule::in($validPaymentMethods)],
             'payments.*.notes'        => 'nullable|string',
             'items'                   => 'nullable|array',
             'items.*.product_id'      => 'required|exists:products,id',

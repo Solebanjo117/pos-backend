@@ -17,6 +17,7 @@ class VehicleEngine extends Model
         'engine_code',
         'displacement',
         'fuel_type',
+        'aspiration',
     ];
 
     protected $casts = [

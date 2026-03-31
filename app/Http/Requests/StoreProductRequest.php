@@ -28,6 +28,7 @@ class StoreProductRequest extends FormRequest
             'description'    => 'nullable|string',
             'product_line_id' => 'nullable|exists:product_lines,id',
             'category_id'    => 'nullable|exists:categories,id',
+            'engine_id'      => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
             'status'         => 'in:active,discontinued,pending',
             'attributes'     => 'nullable|array',
             'attributes.*.name'  => 'required_with:attributes|string|max:100',

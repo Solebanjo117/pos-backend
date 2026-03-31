@@ -24,7 +24,7 @@ class PurchaseOrderController extends Controller
     {
         $filters = $request->only([
             'search', 'status', 'supplier_id',
-            'date_from', 'date_to',
+            'date_from', 'date_to', 'payment_status',
             'sort_by', 'sort_direction', 'per_page',
         ]);
 
@@ -165,6 +165,7 @@ class PurchaseOrderController extends Controller
             'items.*.quantity_received' => 'required|integer|min:1',
             'items.*.batch_number' => 'nullable|string|max:100',
             'items.*.expiry_date' => 'nullable|date',
+            'items.*.sale_price' => 'nullable|numeric|min:0',
         ]);
 
         try {
@@ -204,6 +205,7 @@ class PurchaseOrderController extends Controller
     /**
      * POST /api/v1/purchase-orders/quick-receive
      * Fast-track for POS Backorders: Create, Send, and Receive instantly.
+     * DEPRECATED: Use quickPurchase for daily PO system.
      */
     public function quickReceive(Request $request): JsonResponse
     {
@@ -224,6 +226,111 @@ class PurchaseOrderController extends Controller
                 'message' => 'Backorder (Orden rápida) abastecido exitosamente',
                 'data' => $order,
             ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * POST /api/v1/purchase-orders/quick-purchase
+     * Quick Purchase v2: Adds items to the daily global PO with immediate stock reception.
+     * Each item can have its own supplier.
+     */
+    public function quickPurchase(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'warehouse_id' => 'required|exists:warehouses,id',
+            'supplier_id' => 'nullable|exists:suppliers,id', // Default supplier for all items
+            'items' => 'required|array|min:1',
+            'items.*.supplier_id' => 'required_without:supplier_id|exists:suppliers,id',
+            'items.*.variant_id' => 'nullable|exists:product_variants,id',
+            'items.*.product_id' => 'nullable|exists:products,id',
+            'items.*.quantity_ordered' => 'required|integer|min:1',
+            'items.*.unit_cost' => 'required|numeric|min:0',
+            'items.*.sale_price' => 'nullable|numeric|min:0',
+            'items.*.batch_number' => 'nullable|string|max:100',
+            'items.*.expiry_date' => 'nullable|date',
+            'items.*.notes' => 'nullable|string',
+        ]);
+
+        // Ensure each item has a supplier (from item or default)
+        foreach ($validated['items'] as &$item) {
+            if (empty($item['supplier_id']) && !empty($validated['supplier_id'])) {
+                $item['supplier_id'] = $validated['supplier_id'];
+            }
+        }
+
+        try {
+            $order = $this->purchaseOrderService->quickPurchase($validated);
+
+            return response()->json([
+                'message' => 'Compra rápida procesada - Stock actualizado',
+                'data' => $order,
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * POST /api/v1/purchase-orders/reception-batch
+     * POS Reception Mode: Process a batch of items in reception mode.
+     * All items go to the daily global PO with immediate stock reception.
+     */
+    public function receptionBatch(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'warehouse_id' => 'required|exists:warehouses,id',
+            'items' => 'required|array|min:1',
+            'items.*.supplier_id' => 'required|exists:suppliers,id',
+            'items.*.variant_id' => 'nullable|exists:product_variants,id',
+            'items.*.product_id' => 'nullable|exists:products,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'items.*.unit_cost' => 'required|numeric|min:0',
+            'items.*.sale_price' => 'nullable|numeric|min:0',
+            'items.*.batch_number' => 'nullable|string|max:100',
+            'items.*.expiry_date' => 'nullable|date',
+            'items.*.notes' => 'nullable|string',
+        ]);
+
+        try {
+            $order = $this->purchaseOrderService->batchAddItemsToDailyPO(
+                $validated['warehouse_id'],
+                $validated['items']
+            );
+
+            return response()->json([
+                'message' => 'Recepción procesada - ' . count($validated['items']) . ' item(s) agregados al stock',
+                'data' => $order,
+                'items_added' => count($validated['items']),
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * GET /api/v1/purchase-orders/daily
+     * Get or create today's daily global PO for a warehouse.
+     */
+    public function getDailyPO(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'warehouse_id' => 'required|exists:warehouses,id',
+        ]);
+
+        try {
+            $order = $this->purchaseOrderService->getOrCreateDailyPurchaseOrder($validated['warehouse_id']);
+
+            return response()->json([
+                'data' => $order->load(['items.product', 'items.variant', 'items.supplier']),
+            ]);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => $e->getMessage(),

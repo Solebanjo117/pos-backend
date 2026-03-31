@@ -346,6 +346,39 @@ class SalesQuoteController extends Controller
     }
 
     /**
+     * DELETE /api/v1/sales-quotes/{id}/cashier-queue
+     * Remove quote from cashier queue (does not delete the quote)
+     *
+     * Estados de SalesQuote: draft, sent, sent_to_deposit, sent_to_cashier,
+     * accepted, collected, rejected, expired, converted
+     *
+     * Flujo normal: draft/sent/sent_to_deposit → sendToCashier() → sent_to_cashier
+     * Al remover de cola: sent_to_cashier → sent (estado genérico de "pendiente")
+     */
+    public function removeFromCashierQueue(int $id): JsonResponse
+    {
+        $quote = SalesQuote::findOrFail($id);
+
+        if ($quote->status !== 'sent_to_cashier') {
+            return response()->json([
+                'message' => 'Esta cotización no está en la cola de caja.',
+            ], 422);
+        }
+
+        // Revertir a estado 'sent' (genérico de cotización pendiente)
+        // NO usar 'draft' porque ya fue procesada/enviada
+        $quote->update([
+            'status' => 'sent',
+            'sent_to_cashier_at' => null,
+        ]);
+
+        return response()->json([
+            'message' => "Cotización {$quote->quote_number} removida de la cola de caja",
+            'data' => $quote->fresh(),
+        ]);
+    }
+
+    /**
      * POST /api/sales-quotes/{id}/mark-collected
      */
     public function markCollected(int $id): JsonResponse

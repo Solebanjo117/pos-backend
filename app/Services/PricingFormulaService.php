@@ -92,6 +92,48 @@ class PricingFormulaService
     }
 
     /**
+     * Aplica ITBM sobre el precio si la categoría lo tiene activo.
+     * El ITBM se aplica SOBRE el resultado de la fórmula, no sobre el costo.
+     * 
+     * @param float $price       El precio base
+     * @param bool  $appliesItbm Si true, aplica ITBM
+     * @param float $itbmPercent Porcentaje de ITBM (default 7%)
+     */
+    public function applyItbm(float $price, bool $appliesItbm, float $itbmPercent = 7.0): float
+    {
+        if (! $appliesItbm) {
+            return $price;
+        }
+
+        return round($price * (1 + $itbmPercent / 100), 2);
+    }
+
+    /**
+     * Precio final para una categoría: evalúa fórmula → aplica ITBM si corresponde.
+     * Retorna null si la fórmula es vacía o inválida.
+     *
+     * @param  string $formula      Fórmula de la categoría (ej: "costo * 1.3 + 5")
+     * @param  float  $costo        Costo del producto
+     * @param  bool   $appliesItbm  Si true, aplica ITBM sobre el precio resultante
+     * @param  float  $itbmPercent  Porcentaje de ITBM (default 7%)
+     * @return float|null           Precio calculado o null si la fórmula es inválida
+     */
+    public function calculate(string $formula, float $costo, bool $appliesItbm, float $itbmPercent = 7.0): ?float
+    {
+        if (empty(trim($formula))) {
+            return null;
+        }
+
+        try {
+            $base = $this->evaluate($formula, $costo);
+        } catch (\Throwable $e) {
+            return null; // Fórmula inválida → falla silenciosamente
+        }
+
+        return $this->applyItbm($base, $appliesItbm, $itbmPercent);
+    }
+
+    /**
      * List of built-in preset formulas.
      */
     public static function presets(): array

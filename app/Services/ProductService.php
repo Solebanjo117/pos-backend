@@ -269,7 +269,7 @@ class ProductService
      */
     public function getProductDetail(int $productId, array $includes = [], ?int $warehouseId = null): ?Product
     {
-        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing', 'productLine', 'category', 'media']);
+        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing', 'productLine', 'category', 'engine', 'media']);
         
         // Eager load inventory with optional warehouse filtering
         $query->with([

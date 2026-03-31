@@ -13,6 +13,7 @@ Route::prefix('categories')->group(function () {
     Route::middleware('role:admin,manager,buyer,seller,cashier,assistant')->group(function () {
         Route::get('/', [CategoryController::class, 'index']);
         Route::get('/{category}', [CategoryController::class, 'show']);
+        Route::post('/preview-price', [CategoryController::class, 'previewPrice']);
     });
 
     Route::middleware('role:admin,manager')->group(function () {

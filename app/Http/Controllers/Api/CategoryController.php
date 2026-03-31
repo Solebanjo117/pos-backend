@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Category;
+use App\Services\PricingFormulaService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 
@@ -54,6 +55,11 @@ class CategoryController extends Controller
             'default_attributes.*.required' => 'nullable|boolean',
             'icon' => 'nullable|string|max:50',
             'priority' => 'nullable|integer',
+            'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
+            'default_cost' => 'nullable|numeric|min:0',
+            'pricing_formula' => 'nullable|string|max:500',
+            'applies_itbm' => 'nullable|boolean',
+            'itbm_percent' => 'nullable|numeric|min:0|max:100',
         ]);
 
         $category = Category::create($validated);
@@ -86,11 +92,45 @@ class CategoryController extends Controller
             'default_attributes.*.required' => 'nullable|boolean',
             'icon' => 'nullable|string|max:50',
             'priority' => 'nullable|integer',
+            'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
+            'default_cost' => 'nullable|numeric|min:0',
+            'pricing_formula' => 'nullable|string|max:500',
+            'applies_itbm' => 'nullable|boolean',
+            'itbm_percent' => 'nullable|numeric|min:0|max:100',
         ]);
 
         $category->update($validated);
 
         return response()->json($category);
+    }
+
+    /**
+     * Preview the calculated price for a given formula and cost.
+     * Used by the frontend for real-time formula previews.
+     * POST /api/v1/categories/preview-price
+     * Body: { formula: string, costo: number, applies_itbm: boolean, itbm_percent: number }
+     */
+    public function previewPrice(Request $request, PricingFormulaService $formulaService): JsonResponse
+    {
+        $data = $request->validate([
+            'formula'      => 'required|string|max:500',
+            'costo'        => 'required|numeric|min:0',
+            'applies_itbm' => 'nullable|boolean',
+            'itbm_percent' => 'nullable|numeric|min:0|max:100',
+        ]);
+
+        $price = $formulaService->calculate(
+            $data['formula'],
+            (float) $data['costo'],
+            (bool) ($data['applies_itbm'] ?? false),
+            (float) ($data['itbm_percent'] ?? 7)
+        );
+
+        if ($price === null) {
+            return response()->json(['price' => null, 'error' => 'Fórmula inválida']);
+        }
+
+        return response()->json(['price' => $price, 'error' => null]);
     }
 
     /**

@@ -128,6 +128,26 @@ class SalesOrderService
 
             // ── Reserve stock for draft/pending orders ──
             if (in_array($requestedStatus, ['draft', 'pending'])) {
+                // R28: Validate stock availability before reserving
+                foreach ($order->items as $item) {
+                    $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
+                    if ($item->variant_id) {
+                        $query->where('variant_id', $item->variant_id);
+                    } else {
+                        $query->where('product_id', $item->product_id)->whereNull('variant_id');
+                    }
+                    $inventory = $query->first();
+
+                    // R28: Check stock availability
+                    $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
+                    if (!$allowNegative && (!$inventory || $inventory->quantity_available < $item->quantity)) {
+                        $productName = $item->product->name ?? 'producto';
+                        $available = $inventory ? $inventory->quantity_available : 0;
+                        throw new \Exception("Stock insuficiente para {$productName}. Disponible: {$available}, Solicitado: {$item->quantity}");
+                    }
+                }
+
+                // If validation passed, reserve stock
                 foreach ($order->items as $item) {
                     $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
                     if ($item->variant_id) {

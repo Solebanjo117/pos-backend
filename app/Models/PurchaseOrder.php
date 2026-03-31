@@ -39,7 +39,7 @@ class PurchaseOrder extends Model
         'total' => 'decimal:2',
     ];
 
-    protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'payment_status_label'];
+    protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'payment_status_label', 'display_name'];
 
     // ==================== RELATIONSHIPS ====================
 
@@ -87,7 +87,7 @@ class PurchaseOrder extends Model
 
     public function scopePending($query)
     {
-        return $query->whereIn('status', ['draft', 'sent']);
+        return $query->whereIn('status', ['draft', 'sent', 'open']);
     }
 
     public function scopeActive($query)
@@ -106,6 +106,7 @@ class PurchaseOrder extends Model
     {
         return match($this->status) {
             'draft'    => 'Borrador',
+            'open'     => 'Abierta',
             'sent'     => 'Enviado',
             'partial'  => 'Parcialmente Recibido',
             'received' => 'Recibido',
@@ -185,7 +186,7 @@ class PurchaseOrder extends Model
      */
     public function canReceiveItems(): bool
     {
-        return in_array($this->status, ['sent', 'partial']);
+        return in_array($this->status, ['sent', 'partial', 'open']);
     }
 
     /**
@@ -194,6 +195,40 @@ class PurchaseOrder extends Model
     public function canBeCancelled(): bool
     {
         return !in_array($this->status, ['received', 'cancelled']);
+    }
+
+    /**
+     * Check if this is a daily global PO (no single supplier in header).
+     */
+    public function isDailyGlobalPO(): bool
+    {
+        return $this->supplier_id === null;
+    }
+
+    /**
+     * Get unique suppliers from items (for daily global POs).
+     */
+    public function getItemSuppliersAttribute(): \Illuminate\Support\Collection
+    {
+        return $this->items()
+            ->whereNotNull('supplier_id')
+            ->with('supplier')
+            ->get()
+            ->pluck('supplier')
+            ->unique('id')
+            ->values();
+    }
+
+    /**
+     * Get display name for the PO (supplier name or "OC del [date]" for daily).
+     */
+    public function getDisplayNameAttribute(): string
+    {
+        if ($this->isDailyGlobalPO()) {
+            return 'OC del ' . $this->order_date->format('d M Y');
+        }
+        
+        return $this->supplier?->name ?? $this->po_number;
     }
 
     /**

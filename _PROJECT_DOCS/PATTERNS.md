@@ -1004,4 +1004,446 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 
 ---
 
-**Última actualización:** 2026-03-23
+## 17. Patrón: De hardcodeado a configurable (Métodos de Pago)
+
+### Contexto
+
+Los métodos de pago estaban hardcodeados en múltiples lugares:
+- Validaciones: `'in:cash,card,transfer,credit'`
+- Presentación: `match($method) { 'cash' => 'Efectivo', ... }`
+- Lógica: arrays hardcodeados `['cash', 'card', 'transfer']`
+
+**Problema:** Agregar "Yappy" o "Nequi" requería modificar 20+ archivos.
+
+### Solución: Patrón Configurable
+
+**Backend:**
+
+1. **Modelo con datos de configuración**
+
+```php
+// app/Models/PaymentMethod.php
+class PaymentMethod extends Model
+{
+    protected $fillable = [
+        'name',        // Display: "Efectivo", "Yappy"
+        'code',        // Internal: "cash", "yappy"
+        'is_active',   // Activar/desactivar
+        'is_system',   // Sistema = no archivable
+        'requires_reference',
+        'requires_cash_count',
+        'sort_order',
+    ];
+
+    // Scopes para queries comunes
+    public function scopeActive($query) {
+        return $query->where('is_active', true);
+    }
+
+    public function scopeOrdered($query) {
+        return $query->orderBy('sort_order')->orderBy('name');
+    }
+
+    // Helper estático para formatear pagos históricos
+    public static function getNameByCode(string $code): string
+    {
+        static $cache = [];
+        if (!isset($cache[$code])) {
+            $method = static::where('code', $code)->first();
+            $cache[$code] = $method?->name ?? ucfirst($code);
+        }
+        return $cache[$code];
+    }
+
+    // Generar código desde nombre
+    public static function generateCode(string $name): string
+    {
+        return strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $name));
+    }
+}
+```
+
+2. **Controller CRUD + Reorder**
+
+```php
+// app/Http/Controllers/Api/PaymentMethodController.php
+class PaymentMethodController extends Controller
+{
+    // GET /payment-methods → solo activos (todos los roles)
+    public function index(): JsonResponse
+    {
+        return response()->json(
+            PaymentMethod::active()->ordered()->get()
+        );
+    }
+
+    // GET /payment-methods/all → todos (admin)
+    public function all(): JsonResponse
+    {
+        return response()->json(
+            PaymentMethod::ordered()->get()
+        );
+    }
+
+    // POST /payment-methods → crear (admin)
+    public function store(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:100',
+            'requires_reference' => 'boolean',
+            'requires_cash_count' => 'boolean',
+        ]);
+
+        $code = PaymentMethod::generateCode($validated['name']);
+
+        if (PaymentMethod::where('code', $code)->exists()) {
+            return response()->json([
+                'message' => 'Ya existe un método con ese código.',
+            ], 422);
+        }
+
+        $maxOrder = PaymentMethod::max('sort_order') ?? 0;
+
+        $method = PaymentMethod::create([
+            'name' => $validated['name'],
+            'code' => $code,
+            'is_active' => true,
+            'is_system' => false,
+            'sort_order' => $maxOrder + 1,
+        ]);
+
+        return response()->json($method, 201);
+    }
+
+    // PUT /payment-methods/{id} → actualizar (admin)
+    public function update(Request $request, PaymentMethod $paymentMethod)
+    {
+        // Métodos sistema: solo permitir cambiar sort_order
+        if ($paymentMethod->is_system && $request->has('is_active')) {
+            return response()->json([
+                'message' => 'Métodos de sistema no pueden desactivarse.',
+            ], 403);
+        }
+
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:100',
+            'is_active' => 'sometimes|boolean',
+            'requires_reference' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer|min:0',
+        ]);
+
+        if ($paymentMethod->is_system) {
+            $validated = array_intersect_key($validated, ['sort_order' => true]);
+        }
+
+        $paymentMethod->update($validated);
+        return response()->json($paymentMethod);
+    }
+
+    // DELETE /payment-methods/{id} → archivar (admin)
+    public function destroy(PaymentMethod $paymentMethod)
+    {
+        if ($paymentMethod->is_system) {
+            return response()->json([
+                'message' => 'Métodos de sistema no pueden eliminarse.',
+            ], 403);
+        }
+
+        // Soft delete = toggle is_active
+        $paymentMethod->update(['is_active' => false]);
+        return response()->json(['message' => 'Método archivado.']);
+    }
+
+    // POST /payment-methods/reorder → reordenar (admin)
+    public function reorder(Request $request)
+    {
+        $validated = $request->validate([
+            'order' => 'required|array',
+            'order.*' => 'integer|exists:payment_methods,id',
+        ]);
+
+        foreach ($validated['order'] as $index => $id) {
+            PaymentMethod::where('id', $id)->update(['sort_order' => $index]);
+        }
+
+        return response()->json(['message' => 'Orden actualizado.']);
+    }
+}
+```
+
+3. **Seeder con métodos sistema**
+
+```php
+// database/seeders/PaymentMethodSeeder.php
+class PaymentMethodSeeder extends Seeder
+{
+    public function run(): void
+    {
+        // Métodos sistema (no archivables)
+        $systemMethods = [
+            ['name' => 'Efectivo', 'code' => 'cash', 'requires_cash_count' => true, 'sort_order' => 1],
+            ['name' => 'Tarjeta', 'code' => 'card', 'sort_order' => 2],
+            ['name' => 'Transferencia', 'code' => 'transfer', 'requires_reference' => true, 'sort_order' => 3],
+            ['name' => 'Crédito', 'code' => 'credit', 'sort_order' => 4],
+            ['name' => 'Saldo a Favor', 'code' => 'store_credit', 'sort_order' => 5],
+        ];
+
+        foreach ($systemMethods as $method) {
+            PaymentMethod::updateOrCreate(
+                ['code' => $method['code']],
+                array_merge($method, ['is_active' => true, 'is_system' => true])
+            );
+        }
+    }
+}
+```
+
+**Frontend:**
+
+1. **Service layer**
+
+```ts
+// resources/js/services/paymentMethods.ts
+import apiClient from './api/client'
+import type { PaymentMethod } from '@/types/payment-method'
+
+export const paymentMethodsService = {
+    async getActive(): Promise<PaymentMethod[]> {
+        const { data } = await apiClient.get('/payment-methods')
+        return data
+    },
+
+    async getAll(): Promise<PaymentMethod[]> {
+        const { data } = await apiClient.get('/payment-methods/all')
+        return data
+    },
+
+    async create(methodData: CreatePaymentMethodData): Promise<PaymentMethod> {
+        const { data } = await apiClient.post('/payment-methods', methodData)
+        return data
+    },
+
+    async update(id: number, methodData: UpdatePaymentMethodData): Promise<PaymentMethod> {
+        const { data } = await apiClient.put(`/payment-methods/${id}`, methodData)
+        return data
+    },
+
+    async archive(id: number): Promise<void> {
+        await apiClient.delete(`/payment-methods/${id}`)
+    },
+
+    async reorder(order: number[]): Promise<void> {
+        await apiClient.post('/payment-methods/reorder', { order })
+    },
+}
+```
+
+2. **Composable con helpers semánticos**
+
+```ts
+// resources/js/composables/usePaymentMethods.ts
+import { ref, computed } from 'vue'
+import { paymentMethodsService } from '@/services/paymentMethods'
+import type { PaymentMethod } from '@/types/payment-method'
+
+export function usePaymentMethods() {
+    const methods = ref<PaymentMethod[]>([])
+    const loading = ref(false)
+
+    const fetchMethods = async () => {
+        loading.value = true
+        methods.value = await paymentMethodsService.getActive()
+        loading.value = false
+    }
+
+    // Helpers semánticos (la lógica especial sigue por código)
+    const isCreditMethod = (code: string) => code === 'credit'
+    const isStoreCreditMethod = (code: string) => code === 'store_credit'
+    const isSpecialMethod = (code: string) =>
+        isCreditMethod(code) || isStoreCreditMethod(code)
+
+    // Obtener nombre para mostrar
+    const getMethodName = (code: string): string => {
+        const method = methods.value.find(m => m.code === code)
+        return method?.name ?? code
+    }
+
+    // Métodos estándar vs especiales
+    const standardMethods = computed(() =>
+        methods.value.filter(m => !isSpecialMethod(m.code))
+    )
+
+    const specialMethods = computed(() =>
+        methods.value.filter(m => isSpecialMethod(m.code))
+    )
+
+    return {
+        methods,
+        loading,
+        fetchMethods,
+        isCreditMethod,
+        isStoreCreditMethod,
+        isSpecialMethod,
+        getMethodName,
+        standardMethods,
+        specialMethods,
+    }
+}
+```
+
+3. **Uso en componentes (reemplaza hardcoded)**
+
+**ANTES:**
+```vue
+<script setup>
+const paymentMethods = ['efectivo', 'tarjeta', 'transferencia']
+</script>
+
+<template>
+  <button v-for="method in paymentMethods">{{ method }}</button>
+</template>
+```
+
+**DESPUÉS:**
+```vue
+<script setup>
+import { usePaymentMethods } from '@/composables/usePaymentMethods'
+
+const { methods, fetchMethods } = usePaymentMethods()
+
+onMounted(fetchMethods)
+</script>
+
+<template>
+  <button v-for="method in methods" :key="method.code">
+    {{ method.name }}
+  </button>
+</template>
+```
+
+4. **UI de administración (Settings/Store.vue)**
+
+```vue
+<script setup>
+const {
+    allMethods: paymentMethods,
+    fetchAllMethods,
+    createMethod,
+    updateMethod,
+    archiveMethod,
+    reorderMethods
+} = usePaymentMethods()
+
+onMounted(fetchAllMethods)
+
+const handleAddMethod = async () => {
+    await createMethod({ name: newMethodName.value })
+    await fetchAllMethods()
+}
+
+const handleToggleActive = async (method) => {
+    if (method.is_system) return
+    await updateMethod(method.id, { is_active: !method.is_active })
+}
+
+const moveMethodUp = async (index) => {
+    const order = paymentMethods.value.map(m => m.id)
+    ;[order[index], order[index - 1]] = [order[index - 1], order[index]]
+    await reorderMethods(order)
+    await fetchAllMethods()
+}
+</script>
+
+<template>
+  <section>
+    <h2>Métodos de Pago</h2>
+    <button @click="showAddMethodModal = true">+ Agregar</button>
+
+    <div v-for="(method, index) in paymentMethods" :key="method.id">
+      <!-- Reorder buttons -->
+      <button @click="moveMethodUp(index)">▲</button>
+      <button @click="moveMethodDown(index)">▼</button>
+
+      <!-- Info -->
+      <span>{{ method.name }}</span>
+      <span v-if="method.is_system">Sistema</span>
+
+      <!-- Toggle activo (disabled para sistema) -->
+      <input
+        type="checkbox"
+        :checked="method.is_active"
+        :disabled="method.is_system"
+        @change="handleToggleActive(method)"
+      />
+
+      <!-- Archivar (solo custom) -->
+      <button v-if="!method.is_system" @click="archiveMethod(method.id)">
+        Archivar
+      </button>
+    </div>
+  </section>
+</template>
+```
+
+### Precauciones críticas
+
+1. **Compatibilidad histórica:** Los códigos en `order_payments.method` son datos ya existentes.
+   - El seeder debe usar los códigos exactos de la BD (verificar con `SELECT DISTINCT method`)
+   - NUNCA cambiar códigos de métodos sistema
+
+2. **Lógica especial persiste:** `credit` y `store_credit` tienen lógica en `addPayment()` y `confirm()`
+   - Esa lógica opera por `code`, no por nombre visible
+   - La configurabilidad es solo visual y de disponibilidad
+
+3. **Fetch timing:** En modales de cobro, fetchear al abrir (datos frescos), no al montar el componente
+
+4. **Cierre de caja dinámico:**
+```php
+// ANTES (hardcodeado)
+$summary = ['cash' => $cashTotal, 'card' => $cardTotal];
+
+// DESPUÉS (dinámico)
+$activeMethods = PaymentMethod::active()->pluck('code');
+$summary = OrderPayment::whereBetween('created_at', [$open, $close])
+    ->whereIn('method', $activeMethods)
+    ->groupBy('method')
+    ->selectRaw('method, SUM(amount) as total')
+    ->get()
+    ->keyBy('method');
+
+// Incluir métodos con total $0
+$result = $activeMethods->map(fn($code) => [
+    'code' => $code,
+    'name' => PaymentMethod::where('code', $code)->value('name'),
+    'total' => $summary[$code]->total ?? 0,
+]);
+```
+
+5. **is_system=true:** Efectivo, tarjeta, transferencia, crédito, store_credit
+   - No se pueden archivar
+   - Toggle is_active deshabilitado en UI
+   - Retornar 403 si se intenta modificar/eliminar
+
+### Beneficios del patrón
+
+✅ **DRY:** Un solo lugar para agregar métodos (Settings > Métodos de Pago)
+✅ **No requiere code:** Admin agrega "Yappy", aparece en POS, tickets, cierre
+✅ **Histórico preservado:** Métodos archivados siguen mostrando nombre en órdenes viejas
+✅ **Flexible:** Ordenar, activar/desactivar según necesidad del negocio
+✅ **Type-safe:** Frontend usa tipos TypeScript, backend valida en controller
+
+### Cuándo aplicar este patrón
+
+Aplicar cuando:
+- Listas hardcodeadas aparecen en múltiples archivos
+- El admin debe poder modificar opciones sin desplegar código
+- Necesitas preservar datos históricos con sus etiquetas
+
+NO aplicar cuando:
+- La lista es verdaderamente estática (ej: roles de usuario definidos en lógica)
+- Cambios requieren lógica de código (no solo presentación)
+- Performance crítica (el overhead de DB query importa)
+
+---
+
+**Última actualización:** 2026-03-26
