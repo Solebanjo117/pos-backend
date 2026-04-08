@@ -33,8 +33,6 @@ class EssentialSeeder extends Seeder
             [
                 'description' => 'Marca genérica para productos sin marca específica',
                 'status' => 'active',
-                'created_at' => now(),
-                'updated_at' => now(),
             ]
         );
         $this->command->info('✅ Brand: Genérica');
@@ -48,8 +46,6 @@ class EssentialSeeder extends Seeder
                 'description' => 'Categoría general para productos',
                 'parent_id' => null,
                 'priority' => 0,
-                'created_at' => now(),
-                'updated_at' => now(),
             ]
         );
         $this->command->info('✅ Category: General');
@@ -59,14 +55,8 @@ class EssentialSeeder extends Seeder
         $supplier = Supplier::firstOrCreate(
             ['name' => 'Proveedor General'],
             [
-                'contact_name' => '',
-                'email' => '',
-                'phone' => '',
-                'address' => '',
                 'payment_terms' => 'Net 30',
                 'status' => 'active',
-                'created_at' => now(),
-                'updated_at' => now(),
             ]
         );
         $this->command->info('✅ Supplier: Proveedor General');
@@ -78,11 +68,6 @@ class EssentialSeeder extends Seeder
             [
                 'name' => 'Almacén Principal',
                 'status' => 'active',
-                'location' => null,
-                'capacity' => null,
-                'notes' => null,
-                'created_at' => now(),
-                'updated_at' => now(),
             ]
         );
         $this->command->info('✅ Warehouse: Almacén Principal (WH-MAIN-01)');
@@ -99,13 +84,11 @@ class EssentialSeeder extends Seeder
                 'is_active' => true,
                 'current_warehouse_id' => $warehouse->id,
                 'email_verified_at' => now(),
-                'created_at' => now(),
-                'updated_at' => now(),
             ]
         );
 
-        // If user already existed, ensure warehouse_id is set
-        if (!$admin->wasRecentlyCreated) {
+        // If user already existed but has no warehouse assigned, set it
+        if (!$admin->wasRecentlyCreated && !$admin->current_warehouse_id) {
             $admin->update(['current_warehouse_id' => $warehouse->id]);
         }
 
