@@ -32,7 +32,7 @@ pos-backend/routes/api_store_settings.php → define lectura y actualización de
 pos-backend/routes/api_suppliers.php → define CRUD de proveedores y consulta de órdenes de compra relacionadas.
 pos-backend/routes/api_tickets.php → define ticket, nota y proforma imprimibles para órdenes de venta.
 pos-backend/routes/api_users.php → define listado y CRUD de usuarios solo para admin.
-pos-backend/routes/api_vehicles.php → define recursos de marcas, modelos, motores, VIN y compatibilidad vehicular.
+pos-backend/routes/api_vehicles.php → Gestiona el catálogo vehicular (Marcas VehicleMake, Modelos VehicleModel, Motores VehicleEngine, Chasis VehicleChassis).
 pos-backend/routes/api_warehouses.php → define CRUD de sucursales y consulta de inventario por sucursal.
 pos-backend/routes/api_work_orders.php → define 6 rutas CRUD + transición de estado para work orders (todos los roles autenticados).
 pos-backend/routes/console.php → archivo de rutas de consola de Laravel.
@@ -49,7 +49,7 @@ pos-backend/app/Http/Controllers/Api/ → directorio con 35 controladores API pa
 pos-backend/app/Http/Requests/AssignAttributesRequest.php → valida asignación de atributos por definición y valores numéricos o de texto.
 pos-backend/app/Http/Requests/StoreInboundMovementRequest.php → valida altas de movimiento inbound de inventario.
 pos-backend/app/Http/Requests/StoreOutboundMovementRequest.php → valida altas de movimiento outbound de inventario.
-pos-backend/app/Http/Requests/StoreProductRequest.php → valida creación de producto, pricing, inventario inicial, compatibilidad, VIN y referencias OEM.
+pos-backend/app/Http/Requests/StoreProductRequest.php → valida creación de producto, pricing, inventario, compatibilidad mutua (motores, chasis y banderas universales), VIN y OEM.
 pos-backend/app/Http/Requests/StoreTransferMovementRequest.php → valida transferencias de inventario entre sucursales distintas.
 pos-backend/app/Http/Requests/StoreWarehouseRequest.php → valida creación de sucursales con código único y estado permitido.
 pos-backend/app/Http/Requests/StoreSalesOrderRequest.php → valida creación de sales orders (cliente, pagos, ítems, precios, impuestos y descuentos por línea).
@@ -80,7 +80,7 @@ pos-backend/tests/Feature/P1/InventoryMovementTest.php → prueba P1 de listado 
 pos-backend/tests/Feature/P1/WarehouseIsolationTest.php → prueba P1 de aislamiento de stock por sucursal.
 pos-backend/tests/Feature/P1/PurchaseOrderFlowTest.php → prueba P1 de rechazo de OC con payload vacío.
 pos-backend/tests/Feature/P1/SuppliersTest.php → prueba P1 de validación de proveedor sin nombre.
-pos-backend/database/seeders/DefaultSettingsSeeder.php → define defaults de configuración para store_tax_rate y modules_work_orders_enabled.
+pos-backend/database/seeders/DefaultSettingsSeeder.php → define defaults de configuración para store_tax_rate, modules_work_orders_enabled y price_rounding_increment (1.00).
 pos-backend/database/migrations/2026_03_23_015848_add_store_credit_to_sales_order_payments_method_enum.php → migración que agrega 'store_credit' al enum de métodos de pago en sales_order_payments (compatible con SQLite y MySQL/PostgreSQL).
 pos-backend/database/migrations/2026_03_23_025900_add_store_credit_used_to_customer_transactions_type_enum.php → migración que agrega 'store_credit_used' al enum de tipos de transacción en customer_transactions (compatible con SQLite y MySQL/PostgreSQL).
 pos-backend/tests/Unit/ExampleTest.php → prueba unitaria de ejemplo del backend.
@@ -127,6 +127,7 @@ pos-frontend/resources/js/composables/useTwoFactorAuth.ts → composable para fl
 pos-frontend/resources/js/composables/useUsers.ts → composable que obtiene y maneja usuarios vía apiClient.
 pos-frontend/resources/js/composables/useVehicleContext.ts → composable para contexto vehicular en la UI.
 pos-frontend/resources/js/composables/useVehicleEngines.ts → composable CRUD de motores de vehículo vía apiClient.
+pos-frontend/resources/js/composables/useVehicleChassis.ts → composable CRUD de chasis de vehículo vía apiClient.
 pos-frontend/resources/js/composables/useVehicleMakes.ts → composable CRUD de marcas de vehículo vía apiClient.
 pos-frontend/resources/js/composables/useVehicleModels.ts → composable CRUD de modelos de vehículo vía apiClient.
 pos-frontend/resources/js/composables/useVehicleVins.ts → composable CRUD de VIN por motor vía apiClient.
@@ -494,3 +495,78 @@ Web route protection: /pos requiere role:admin,manager,cashier; /quotes/* requie
 | **R43**     | Edición de búsqueda dentro del modal (emite `@search-in-modal`) sin cerrar la ventana principal | ✅ implementado |
 | **R44**     | Buscador local y ordenamiento (Nombre, SKU, Cantidad, Precio) dentro del panel del carrito POS | ✅ implementado |
 | **R45**     | Panel Lateral (Sidebar) colapsable con lista de categorías y marcas funcionando como filtro persistente | ✅ implementado |
+
+---
+
+## Correcciones de Precios y Redondeo Configurable — 2026-04-06
+
+### Resumen
+Implementación completa de consistencia de precios en la tabla de inventario y sistema de redondeo automático configurable por el administrador.
+
+### Cambios implementados (todos verificados ✅)
+
+**Backend:**
+- `app/Helpers/PriceHelper.php` — [NUEVO] Helper estático `PriceHelper::roundUp(float $price, float $increment)` que usa `ceil()` para redondear hacia arriba al incremento más cercano. Soporta 0.25, 0.50, 1.00, 5.00, 10.00.
+- `app/Http/Controllers/Api/StoreSettingController.php` — Agregado `price_rounding_increment` al array `$allowed` (línea 45), al bloque de grupos (`pricing`, línea 53) y al bloque de tipos (`number`, línea 59).
+- `database/seeders/DefaultSettingsSeeder.php` — Agrega `Setting::set('price_rounding_increment', 1.00, 'number', 'pricing')`. Idempotente por `updateOrCreate`.
+- `app/Http/Controllers/Api/InventoryController.php` — Ya incluía `base_price` y `cost` en el payload del listado desde el principio (líneas 78-79). No requirió cambio.
+
+**Frontend:**
+- `resources/js/composables/useStoreSettings.ts` — Interfaz `StoreSettings` incluye `price_rounding_increment: number` (línea 16) con default `1.00` (línea 34).
+- `resources/js/pages/Settings/Store.vue` — Sección "Precios" (líneas 444-466) con `<select v-model.number="settings.price_rounding_increment">` con opciones 0.25, 0.50, 1.00, 5.00, 10.00 y ejemplos descriptivos.
+- `resources/js/pages/Inventory/Index.vue` — Columna "Precio Venta" (líneas 217-314) ya renderiza `formatCurrency(item.base_price)` con color verde cuando tiene valor o `—` cuando es null.
+- `resources/js/components/Products/VariantManager.vue` — Usa `useStoreSettings` con `fetchSettings()` en `onMounted` (Opción A: fetch directo, sin prop). Función `applyRounding()` (líneas 39-44) lee `storeSettings.value.price_rounding_increment` y aplica `ceil(price / increment) * increment`. Aplicado en `recalculatePriceFromCategory()` y en el watcher de `form.pricing.cost`. **Solo cuando `!priceManuallyEdited`** (respeta LL-013).
+
+### ProductDetailModal.vue — Confirmado existente
+`resources/js/components/Products/ProductDetailModal.vue` (608 líneas) es un modal completo de detalle de producto con:
+- Carrusel de imágenes con upload/delete inline
+- Grid de variantes/marcas con precios: en modo normal muestra `base_price`; en modo cliente (blindMode) muestra `calculated_price * (1 + tax_rate/100)` con toggle de ITBM
+- Helper `getVariantPricing()` que prioriza pricing de variante sobre la del producto (fallback)
+- Especificaciones técnicas por variante (con cache por variante)
+- Tabla de compatibilidad vehicular
+- Referencias OEM y alternativas/referencias cruzadas navegables
+- Integración con POS via `usePOS().addToCart()`
+
+### Archivos clave (mapa actualizado)
+```
+pos-backend/app/Helpers/PriceHelper.php                          → roundUp() estático
+pos-backend/database/seeders/DefaultSettingsSeeder.php           → seed price_rounding_increment=1.00
+pos-frontend/resources/js/pages/Settings/Store.vue               → sección "Precios" con select de redondeo
+pos-frontend/resources/js/pages/Inventory/Index.vue              → columna "Precio Venta" con base_price
+pos-frontend/resources/js/components/Products/VariantManager.vue → applyRounding() + fetchSettings()
+pos-frontend/resources/js/components/Products/ProductDetailModal.vue → modal detalle completo con precios y blindMode
+```
+
+## Generación Automática de SKU Configurable — 2026-04-06
+
+### Resumen
+Implementación de un sistema flexible de generación de SKU basado en un formato definido por el usuario mediante arrastrar y soltar (Drag & Drop).
+
+### Cambios implementados
+- Reemplazo del obsoleto renderizador de SKU en Backend (`fetchSkuPreview`) a favor de un calculador en tiempo real en Frontend usando Vue Reactivity (`generateSkuFromFormat()`).
+- Nueva propiedad `sku_format` (serializado como JSON) en `StoreSettingController.php`, expuesta centralmente vía `StoreSettings.ts`.
+- Nueva UI visual para acomodar dinámicamente componentes constructores del SKU (`category_slug`, `brand`, `year`, campo custom) con previsualizador instantáneo en `Settings/Store.vue`.
+- Incorporación del comportamiento inteligente de "Sobreescritura Manual" en `Create.vue` (`skuBaseManuallyEdited`) que frena cálculos automatizados y habilita el botón "Regenerar" como resguardo.
+
+## Búsqueda Avanzada y Sidebar de Filtros (POS + Catálogo) — 2026-04-07
+
+### Resumen
+Se unificó el sistema de filtros para catálogo y punto de venta implementando un estilo "Amazon-like" con un panel lateral con filtros avanzados: SKU, precios, categorías, marcas, disponibilidad de stock y ordenamiento interactivo.
+
+### Cambios implementados
+- **Backend**: Se extendió `ProductController@index` para soportar `min_price`, `max_price`, `sku` (búsqueda parcial sobre `sku_base`) e `in_stock`. Se refactorizó la lógica de ordenamiento con un alias unificado `sort` y la adición de un `LEFT JOIN` a la tabla `product_pricing` (protegido temporalmente) exclusivo para el ordenamiento por precios.
+- **Componentes Vue unificados**: Se crearon `ProductFilters.vue` (con sections unificadas) y `ProductSort.vue`. Se eliminó el componente local residual `POSFilterSidebar.vue`.
+- **Integración POS**: Actualización de `ProductSearchModal.vue` ampliando el layout flex a `max-w-6xl` incorporando sidebar lateral (`hidden md:block`) con botón toggle para móviles y acoplándolo a un emit extendido de `@search-in-modal`.
+- **Integración Catálogo**: Actualización de `Products/Index.vue` suprimiendo los filtros estáticos horizontales reemplazándolos con el nuevo sidebar de filtros para unificación del diseño de búsqueda.
+- **Tipado TS**: Las nuevas propiedades de búsqueda quedaron registradas estrictamente en la interfaz `ProductFilters` dentro de `product.ts`.
+
+## Sistema de Chasis + Compatibilidad Avanzada — 2026-04-07
+
+### Resumen
+Implementación de chasis como entidad de catálogo independiente (igual que motores), permitiendo asociar productos a motores específicos, chasis específicos (ej. carrocerías de motos o autos), o compatibilidad universal parcial mediante flags.
+
+### Cambios implementados
+- **Backend**: Nueva migración `vehicle_chassis` y `VehicleChassisController` nativo. Modificación de la tabla pivote `product_vehicle_compatibility` para incluir `chassis_id`, `all_engines` y `all_chassis`. Scope de búsqueda mejorado para encontrar chasis.
+- **Corrección en Creación**: Inclusión crítica de las reglas `vehicle_chassis`, `all_engines` y `all_chassis` dentro de `StoreProductRequest` para prevenir la exclusión silenciosa de estos campos durante el `validated()` antes de que `ProductService` genere las relaciones con productos recién modelados.
+- **Componentes Frontend**: Implementación de navegación por pestañas (`Tabs`: Motores / Chasis) y selectores modales instantáneos en los flujos principales de inventario (`Create.vue` y `Edit.vue`). Añadido de checkboxes para "Compatibilidad Universal al Modelo". Inclusión del wrapper estandarizado `useVehicleChassis.ts`.
+- **Limpieza (Tech Debt)**: Componente inutilizado y arcaico `FitmentManager.vue` finalmente borrado del árbol de proyecto.
