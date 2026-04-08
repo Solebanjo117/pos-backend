@@ -12,16 +12,16 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        $this->command->info('🌱 Iniciando seeders del módulo Product Detail...');
-        
-        // Base data
-        User::firstOrCreate(
-            ['email' => 'admin@admin.com'],
-            [
-                'name' => 'Admin User',
-                'password' => bcrypt('password'),
-            ]
-        );
+        // Check if running in essential mode (minimal functionality only)
+        if (env('SEED_MODE') === 'essential' || app()->environment('production')) {
+            $this->command->info('🌱 Iniciando seeder ESENCIAL (mínimo funcional)...');
+            $this->call(EssentialSeeder::class);
+            $this->command->info('🎉 Seeder esencial completado exitosamente!');
+            return;
+        }
+
+        // Full demo seeder (development/testing)
+        $this->command->info('🌱 Iniciando seeders COMPLETOS (con datos de demostración)...');
 
         $this->call([
             BrandSeeder::class,
@@ -37,19 +37,18 @@ class DatabaseSeeder extends Seeder
             ProductSeeder::class,
             UserSeeder::class,
             VehicleSeeder::class,
-
         ]);
-        
+
         $this->command->info('✅ Datos base creados');
         $this->command->info('✅ Vehículos creados');
-        
+
         // Products with all relationships
         $this->call(ProductSeeder::class);
         $this->command->info('✅ Productos con relaciones creados');
-        
+
         // Demo data: sales, purchases, customers, POS sessions
         $this->call(DemoDataSeeder::class);
-        
+
         $this->command->info('🎉 Seeders completados exitosamente!');
     }
 }
