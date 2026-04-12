@@ -16,10 +16,13 @@ use Illuminate\Support\Facades\Route;
 Route::middleware(['web'])->get('/pos/settings', [PosController::class, 'getSettings']);
 
 Route::middleware(['web'])->prefix('sales-orders')->group(function () {
-    // Statistics
+    // Statistics (specific routes BEFORE dynamic {id} routes)
     Route::get('/statistics', [SalesOrderController::class, 'statistics']);
 
-    // CRUD endpoints
+    // Warehouse Queue (specific routes BEFORE dynamic {id} routes)
+    Route::get('/pending-at-warehouse', [SalesOrderController::class, 'pendingAtWarehouse']);
+
+    // CRUD endpoints (dynamic routes go AFTER specific routes)
     Route::get('/', [SalesOrderController::class, 'index']);
     Route::post('/', [SalesOrderController::class, 'store']);
     Route::get('/{id}', [SalesOrderController::class, 'show']);
@@ -27,8 +30,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
     Route::delete('/{id}', [SalesOrderController::class, 'destroy']);
     Route::patch('/{id}/add-items', [SalesOrderController::class, 'addItemsToExistingOrder']);
 
-    // Warehouse Queue
-    Route::get('/pending-at-warehouse', [SalesOrderController::class, 'pendingAtWarehouse']);
+    // Warehouse Queue actions (with {id})
     Route::post('/{id}/send-to-warehouse', [SalesOrderController::class, 'sendToWarehouse']);
     Route::post('/{id}/mark-prepared', [SalesOrderController::class, 'markPrepared']);
 

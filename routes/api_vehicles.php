@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\VehicleMakeController;
 use App\Http\Controllers\Api\VehicleModelController;
 use App\Http\Controllers\Api\VehicleEngineController;
+use App\Http\Controllers\Api\VehicleChassisController;
 use App\Http\Controllers\Api\VehicleVinController;
 use App\Http\Controllers\Api\ProductCompatibilityController;
 
@@ -25,6 +26,11 @@ Route::get('vehicle-makes/{makeId}/models', [VehicleModelController::class, 'byM
 Route::apiResource('vehicle-engines', VehicleEngineController::class)->only(['index', 'show']);
 Route::apiResource('vehicle-engines', VehicleEngineController::class)->only(['store', 'update', 'destroy'])->middleware('role:admin,manager');
 Route::get('vehicle-models/{modelId}/engines', [VehicleEngineController::class, 'byModel']);
+
+// Vehicle Chassis
+Route::apiResource('vehicle-chassis', VehicleChassisController::class)->only(['index', 'show']);
+Route::apiResource('vehicle-chassis', VehicleChassisController::class)->only(['store', 'update', 'destroy'])->middleware('role:admin,manager');
+Route::get('vehicle-models/{modelId}/chassis', [VehicleChassisController::class, 'byModel']);
 
 // Vehicle VINs (nested under engines)
 Route::get('vehicle-engines/{engineId}/vins', [VehicleVinController::class, 'index']);

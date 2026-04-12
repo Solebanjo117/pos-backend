@@ -23,7 +23,7 @@ return new class extends Migration
         DB::table('settings')->insert([
             [
                 'key' => 'allow_negative_inventory',
-                'value' => 'true',
+                'value' => 'false',
                 'type' => 'boolean',
                 'group' => 'inventory',
                 'description' => 'Permitir ventas con stock negativo (Backorders)',

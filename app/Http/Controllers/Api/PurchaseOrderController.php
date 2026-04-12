@@ -59,10 +59,11 @@ class PurchaseOrderController extends Controller
             'shipping_cost' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string',
             'items' => 'required|array|min:1',
-            'items.*.variant_id' => 'required|exists:product_variants,id',
-            'items.*.quantity_ordered' => 'required|integer|min:1',
-            'items.*.unit_cost' => 'required|numeric|min:0',
-            'items.*.notes' => 'nullable|string',
+            'items.*.variant_id'        => 'required|exists:product_variants,id',
+            'items.*.quantity_ordered'   => 'required|integer|min:1',
+            'items.*.units_per_package'  => 'nullable|integer|min:1',
+            'items.*.unit_cost'          => 'required|numeric|min:0',
+            'items.*.notes'              => 'nullable|string',
         ]);
 
         try {
@@ -94,10 +95,11 @@ class PurchaseOrderController extends Controller
             'shipping_cost' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string',
             'items' => 'sometimes|array|min:1',
-            'items.*.product_id' => 'required_with:items|exists:products,id',
-            'items.*.quantity_ordered' => 'required_with:items|integer|min:1',
-            'items.*.unit_cost' => 'required_with:items|numeric|min:0',
-            'items.*.notes' => 'nullable|string',
+            'items.*.product_id'         => 'required_with:items|exists:products,id',
+            'items.*.quantity_ordered'    => 'required_with:items|integer|min:1',
+            'items.*.units_per_package'   => 'nullable|integer|min:1',
+            'items.*.unit_cost'           => 'required_with:items|numeric|min:0',
+            'items.*.notes'               => 'nullable|string',
         ]);
 
         try {

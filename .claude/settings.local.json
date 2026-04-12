@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/JUANANTONIOCASTILLAO/herd/pos-frontend/**)",
+      "Bash(ln -s \"../pos-backend/_PROJECT_DOCS/CLAUDE.md\" \"./CLAUDE.md\")",
+      "Bash(find:*)",
+      "Bash(mkdir -p /c/Users/JUANANTONIOCASTILLAO/.claude/plans)",
+      "Bash(touch /c/Users/JUANANTONIOCASTILLAO/.claude/plans/cheerful-wishing-allen-agent-a362ffc699855fa08.md)",
+      "Bash(php artisan:*)",
+      "Bash(C:\\\\Users\\\\JUANANTONIOCASTILLAO\\\\AppData\\\\Local\\\\Herd\\\\bin\\\\php.exe artisan:*)",
+      "Bash(/c/Users/JUANANTONIOCASTILLAO/AppData/Local/Herd/bin/php.exe artisan:*)",
+      "Bash(cat resources/js/routes/sales-orders/*.ts)",
+      "Bash(grep -E \"\\\\.php$\")"
+    ]
+  }
+}

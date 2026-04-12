@@ -44,6 +44,12 @@ class InventoryMovementResource extends JsonResource
                     'name' => $this->user->name,
                 ] : null;
             }),
+            'supplier' => $this->whenLoaded('supplier', function () {
+                return $this->supplier_id ? [
+                    'id'   => $this->supplier->id,
+                    'name' => $this->supplier->name,
+                ] : null;
+            }),
             'product_batch_id' => $this->product_batch_id,
             'product_batch' => $this->whenLoaded('productBatch', function () {
                 return [

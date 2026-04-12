@@ -34,17 +34,17 @@ class StoreProductRequest extends FormRequest
             'attributes.*.name'  => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
 
-            // Default Variant — SKU and UPC are no longer unique keys
+            // Default Variant (opcional) — SKU and UPC are no longer unique keys
             'sku'      => 'nullable|string|max:50',
             'upc'      => 'nullable|string|max:255',
-            'brand_id' => 'required|exists:brands,id',
-            
-            // Pricing
-            'pricing' => 'required|array',
-            'pricing.base_price' => 'required|numeric|min:0',
+            'brand_id' => 'nullable|exists:brands,id',
+
+            // Pricing (opcional, solo si se crea variante default)
+            'pricing' => 'nullable|array',
+            'pricing.base_price' => 'required_with:pricing|numeric|min:0',
             'pricing.msrp' => 'nullable|numeric|min:0',
             'pricing.cost' => 'nullable|numeric|min:0',
-            'pricing.tax_rate' => 'required|numeric|between:0,15',
+            'pricing.tax_rate' => 'required_with:pricing|numeric|between:0,15',
             'pricing.tax_type' => 'sometimes|in:standard,exempt,custom',
             'pricing.max_discount_percentage' => 'nullable|numeric|between:0,100',
             
@@ -76,12 +76,10 @@ class StoreProductRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'brand_id.required' => 'La marca es obligatoria',
             'brand_id.exists'   => 'La marca seleccionada no existe',
-            'pricing.required'  => 'La información de precios es obligatoria',
-            'pricing.base_price.required' => 'El precio base es obligatorio',
+            'pricing.base_price.required_with' => 'El precio base es obligatorio cuando se define el pricing',
             'pricing.base_price.min'      => 'El precio base debe ser mayor o igual a 0',
-            'pricing.tax_rate.required'   => 'La tasa de impuesto es obligatoria',
+            'pricing.tax_rate.required_with'   => 'La tasa de impuesto es obligatoria cuando se define el pricing',
             'pricing.tax_rate.between'    => 'La tasa de impuesto debe estar entre 0 y 15%',
             'category_id.exists'          => 'La categoría seleccionada no existe',
             'status.in'                   => 'El estado debe ser: activo, discontinuado o pendiente',

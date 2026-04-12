@@ -22,6 +22,7 @@ class InventoryMovement extends Model
         'reference_id',
         'notes',
         'user_id',
+        'supplier_id',
     ];
 
     protected $casts = [
@@ -64,6 +65,14 @@ class InventoryMovement extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * Get the supplier associated with this inbound movement
+     */
+    public function supplier(): BelongsTo
+    {
+        return $this->belongsTo(Supplier::class);
     }
 
     /**

@@ -16,7 +16,7 @@ class BatchInventoryController extends Controller
     public function index(Request $request): JsonResponse
     {
         // Start with ProductBatch and join warehouse_batches to get quantities
-        $query = ProductBatch::with(['product'])
+        $query = ProductBatch::with(['product.pricing'])
             ->select('product_batches.*')
             ->join('warehouse_batches', 'product_batches.id', '=', 'warehouse_batches.product_batch_id')
             ->where('warehouse_batches.quantity', '>', 0)
@@ -70,10 +70,14 @@ class BatchInventoryController extends Controller
                 
                 $warehouseBatches = $warehouseQuery->get();
                 
+                // Get pricing from product's default pricing
+                $pricing = $batch->product->pricing;
+
                 return [
                     'product_id' => $batch->product_id,
                     'product_name' => $batch->product->name,
                     'product_sku' => $batch->product->sku_base,
+                    'base_price' => $pricing ? (float) $pricing->base_price : null,
                     'total_quantity' => $warehouseBatches->sum('quantity'),
                     'warehouses' => $warehouseBatches->map(fn($wb) => [
                         'warehouse_id' => $wb->warehouse_id,

@@ -87,11 +87,11 @@ class InventoryMovementController extends Controller
     public function storeBulkInbound(Request $request): JsonResponse
     {
         $request->validate([
-            'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
-            'items.*.warehouse_id' => 'required|exists:warehouses,id',
-            'items.*.quantity' => 'required|numeric|min:0.01', // Changed to numeric for float quantities
-            // Add other validations as per StoreInboundMovementRequest
+            'items'                   => 'required|array|min:1',
+            'items.*.product_id'      => 'required|exists:products,id',
+            'items.*.warehouse_id'    => 'required|exists:warehouses,id',
+            'items.*.quantity'        => 'required|numeric|min:0.01',
+            'items.*.supplier_id'     => 'nullable|integer|exists:suppliers,id',
         ]);
 
         try {

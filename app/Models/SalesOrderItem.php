@@ -26,6 +26,8 @@ class SalesOrderItem extends Model
         'subtotal',
         'total',
         'notes',
+        'is_custom_line',
+        'custom_description',
     ];
 
     protected $casts = [
@@ -38,6 +40,7 @@ class SalesOrderItem extends Model
         'tax_amount' => 'decimal:2',
         'subtotal' => 'decimal:2',
         'total' => 'decimal:2',
+        'is_custom_line' => 'boolean',
     ];
 
     protected $appends = ['formatted_total', 'product_name', 'product_sku', 'warehouse_name', 'seller_name'];
@@ -78,11 +81,19 @@ class SalesOrderItem extends Model
 
     public function getProductNameAttribute(): ?string
     {
+        if ($this->is_custom_line) {
+            return $this->custom_description ?: 'Articulo miscelaneo';
+        }
+
         return $this->product?->name;
     }
 
     public function getProductSkuAttribute(): ?string
     {
+        if ($this->is_custom_line) {
+            return 'MISC';
+        }
+
         return $this->product?->sku_base;
     }
 

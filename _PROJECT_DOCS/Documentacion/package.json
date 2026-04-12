@@ -1,0 +1,22 @@
+{
+  "name": "hermex-docs",
+  "version": "1.0.0",
+  "description": "Documentación oficial del sistema HermeX POS",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "pdf:generate": "vitepress build docs --pdf",
+    "pdf:manual-usuario": "node scripts/generate-pdf.js manual-usuario",
+    "pdf:manual-tecnico": "node scripts/generate-pdf.js manual-tecnico",
+    "pdf:operaciones": "node scripts/generate-pdf.js operaciones",
+    "pdf:procesos": "node scripts/generate-pdf.js procesos-negocio"
+  },
+  "devDependencies": {
+    "vitepress": "^1.0.0",
+    "vitepress-plugin-mermaid": "^2.0.0",
+    "mermaid": "^10.6.0",
+    "html2pdf.js": "^0.10.1",
+    "puppeteer": "^20.0.0"
+  }
+}

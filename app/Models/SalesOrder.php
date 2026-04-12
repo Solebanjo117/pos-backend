@@ -233,6 +233,10 @@ class SalesOrder extends Model
         // Check stock availability only if negative inventory is not allowed
         if (!$allowNegative) {
             foreach ($this->items as $item) {
+                if ($item->is_custom_line) {
+                    continue;
+                }
+
                 // Use variant_id if available, fall back to product_id
                 $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
                 
@@ -245,13 +249,18 @@ class SalesOrder extends Model
                 $inventory = $query->first();
 
                 if (!$inventory || $inventory->quantity_available < $item->quantity) {
-                    throw new \Exception("Stock insuficiente para {$item->product->name}");
+                    $label = $item->product?->name ?? $item->custom_description ?? 'producto';
+                    throw new \Exception("Stock insuficiente para {$label}");
                 }
             }
         }
 
         // Create inventory movements and deduct stock
         foreach ($this->items as $item) {
+            if ($item->is_custom_line) {
+                continue;
+            }
+
             InventoryMovement::create([
                 'product_id' => $item->product_id,
                 'variant_id' => $item->variant_id,
@@ -448,6 +457,10 @@ class SalesOrder extends Model
         // If order was confirmed, revert inventory (restore to available)
         if ($this->status === 'confirmed' || $this->status === 'processing') {
             foreach ($this->items as $item) {
+                if ($item->is_custom_line) {
+                    continue;
+                }
+
                 InventoryMovement::create([
                     'product_id' => $item->product_id,
                     'variant_id' => $item->variant_id,
@@ -478,6 +491,10 @@ class SalesOrder extends Model
         // If order was draft/pending, release reserved stock back to available
         if (in_array($this->status, ['draft', 'pending'])) {
             foreach ($this->items as $item) {
+                if ($item->is_custom_line) {
+                    continue;
+                }
+
                 $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
                 if ($item->variant_id) {
                     $query->where('variant_id', $item->variant_id);

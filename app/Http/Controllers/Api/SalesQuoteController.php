@@ -7,9 +7,12 @@ use App\Models\SalesQuote;
 use App\Models\SalesQuoteItem;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\ProductInventory;
+use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class SalesQuoteController extends Controller
 {
@@ -79,14 +82,18 @@ class SalesQuoteController extends Controller
             'notes'                    => 'nullable|string',
             'internal_notes'           => 'nullable|string',
             'items'                    => 'required|array|min:1',
-            'items.*.product_id'       => 'required|exists:products,id',
+            'items.*.product_id'       => 'nullable|exists:products,id',
             'items.*.variant_id'       => 'nullable|exists:product_variants,id',
             'items.*.warehouse_id'     => 'required|exists:warehouses,id',
             'items.*.quantity'         => 'required|integer|min:1',
             'items.*.unit_price'       => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+            'items.*.is_custom_line'   => 'nullable|boolean',
+            'items.*.custom_description' => 'nullable|string|max:255',
         ]);
+
+        $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
 
         // ── Enforce price override permission (R05) ──
         $userRole = $request->user()->role ?? '';
@@ -94,6 +101,10 @@ class SalesQuoteController extends Controller
 
         if (!$canOverridePrice && !empty($validated['items'])) {
             foreach ($validated['items'] as &$item) {
+                if (!empty($item['is_custom_line'])) {
+                    continue;
+                }
+
                 $pricingQuery = \App\Models\ProductPricing::query();
                 if (!empty($item['variant_id'])) {
                     $pricingQuery->where('variant_id', $item['variant_id']);
@@ -107,6 +118,8 @@ class SalesQuoteController extends Controller
             }
             unset($item);
         }
+
+        $this->validateStockForQuoteItems($validated['items'], $validated['warehouse_id'] ?? null);
 
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
@@ -123,13 +136,15 @@ class SalesQuoteController extends Controller
 
                 foreach ($validated['items'] as $itemData) {
                     $quote->items()->create([
-                        'product_id'       => $itemData['product_id'],
+                        'product_id'       => $itemData['product_id'] ?? null,
                         'variant_id'       => $itemData['variant_id'] ?? null,
                         'warehouse_id'     => $itemData['warehouse_id'],
                         'quantity'         => $itemData['quantity'],
                         'unit_price'       => $itemData['unit_price'],
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
                         'tax_percent'      => $itemData['tax_percent'] ?? 0,
+                        'is_custom_line'   => (bool) ($itemData['is_custom_line'] ?? false),
+                        'custom_description' => $itemData['custom_description'] ?? null,
                     ]);
                 }
 
@@ -166,14 +181,20 @@ class SalesQuoteController extends Controller
             'internal_notes'           => 'nullable|string',
             'status'                   => 'nullable|in:draft,sent,accepted,rejected',
             'items'                    => 'nullable|array|min:1',
-            'items.*.product_id'       => 'required|exists:products,id',
+            'items.*.product_id'       => 'nullable|exists:products,id',
             'items.*.variant_id'       => 'nullable|exists:product_variants,id',
             'items.*.warehouse_id'     => 'required|exists:warehouses,id',
             'items.*.quantity'         => 'required|integer|min:1',
             'items.*.unit_price'       => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+            'items.*.is_custom_line'   => 'nullable|boolean',
+            'items.*.custom_description' => 'nullable|string|max:255',
         ]);
+
+        if (!empty($validated['items'])) {
+            $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
+        }
 
         // ── Enforce price override permission (R05) ──
         $userRole = $request->user()->role ?? '';
@@ -181,6 +202,10 @@ class SalesQuoteController extends Controller
 
         if (!$canOverridePrice && !empty($validated['items'])) {
             foreach ($validated['items'] as &$item) {
+                if (!empty($item['is_custom_line'])) {
+                    continue;
+                }
+
                 $pricingQuery = \App\Models\ProductPricing::query();
                 if (!empty($item['variant_id'])) {
                     $pricingQuery->where('variant_id', $item['variant_id']);
@@ -204,13 +229,15 @@ class SalesQuoteController extends Controller
 
                     foreach ($validated['items'] as $itemData) {
                         $quote->items()->create([
-                            'product_id'       => $itemData['product_id'],
+                            'product_id'       => $itemData['product_id'] ?? null,
                             'variant_id'       => $itemData['variant_id'] ?? null,
                             'warehouse_id'     => $itemData['warehouse_id'],
                             'quantity'         => $itemData['quantity'],
                             'unit_price'       => $itemData['unit_price'],
                             'discount_percent' => $itemData['discount_percent'] ?? 0,
                             'tax_percent'      => $itemData['tax_percent'] ?? 0,
+                            'is_custom_line'   => (bool) ($itemData['is_custom_line'] ?? false),
+                            'custom_description' => $itemData['custom_description'] ?? null,
                         ]);
                     }
 
@@ -239,14 +266,18 @@ class SalesQuoteController extends Controller
             'notes'                    => 'nullable|string',
             'internal_notes'           => 'nullable|string',
             'items'                    => 'required|array|min:1',
-            'items.*.product_id'       => 'required|exists:products,id',
+            'items.*.product_id'       => 'nullable|exists:products,id',
             'items.*.variant_id'       => 'nullable|exists:product_variants,id',
             'items.*.warehouse_id'     => 'required|exists:warehouses,id',
             'items.*.quantity'         => 'required|integer|min:1',
             'items.*.unit_price'       => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+            'items.*.is_custom_line'   => 'nullable|boolean',
+            'items.*.custom_description' => 'nullable|string|max:255',
         ]);
+
+        $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
 
         // ── Enforce price override permission (R05) ──
         $userRole = $request->user()->role ?? '';
@@ -254,6 +285,10 @@ class SalesQuoteController extends Controller
 
         if (!$canOverridePrice && !empty($validated['items'])) {
             foreach ($validated['items'] as &$item) {
+                if (!empty($item['is_custom_line'])) {
+                    continue;
+                }
+
                 $pricingQuery = \App\Models\ProductPricing::query();
                 if (!empty($item['variant_id'])) {
                     $pricingQuery->where('variant_id', $item['variant_id']);
@@ -267,6 +302,8 @@ class SalesQuoteController extends Controller
             }
             unset($item);
         }
+
+        $this->validateStockForQuoteItems($validated['items'], $validated['warehouse_id'] ?? null);
 
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
@@ -283,13 +320,15 @@ class SalesQuoteController extends Controller
 
                 foreach ($validated['items'] as $itemData) {
                     $quote->items()->create([
-                        'product_id'       => $itemData['product_id'],
+                        'product_id'       => $itemData['product_id'] ?? null,
                         'variant_id'       => $itemData['variant_id'] ?? null,
                         'warehouse_id'     => $itemData['warehouse_id'],
                         'quantity'         => $itemData['quantity'],
                         'unit_price'       => $itemData['unit_price'],
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
                         'tax_percent'      => $itemData['tax_percent'] ?? 0,
+                        'is_custom_line'   => (bool) ($itemData['is_custom_line'] ?? false),
+                        'custom_description' => $itemData['custom_description'] ?? null,
                     ]);
                 }
 
@@ -309,21 +348,80 @@ class SalesQuoteController extends Controller
 
     /**
      * POST /api/sales-quotes/{id}/send-to-deposit
+     * Convert quote to order and send to warehouse queue
      */
-    public function sendToDeposit(int $id): JsonResponse
+    public function sendToDeposit(Request $request, int $id): JsonResponse
     {
-        $quote = SalesQuote::findOrFail($id);
+        $quote = SalesQuote::with('items')->findOrFail($id);
 
-        if (!$quote->sendToDeposit()) {
+        if (!in_array($quote->status, ['draft', 'sent'])) {
             return response()->json([
                 'message' => "No se puede enviar a depósito desde el estado '{$quote->status_label}'.",
             ], 422);
         }
 
-        return response()->json([
-            'message' => "Cotización {$quote->quote_number} enviada a Depósito",
-            'data'    => $quote->fresh(),
-        ]);
+        if (!$quote->canBeConverted()) {
+            return response()->json([
+                'message' => 'Esta cotización no puede ser convertida. Verifica que tenga artículos.',
+            ], 422);
+        }
+
+        try {
+            $order = DB::transaction(function () use ($quote, $request) {
+                // Create the SalesOrder from the quote
+                $order = SalesOrder::create([
+                    'customer_id'     => $quote->customer_id,
+                    'user_id'         => $request->user()->id,
+                    'date'            => now(),
+                    'status'          => 'pending',
+                    'payment_method'  => 'pending',
+                    'payment_status'  => 'pending',
+                    'notes'           => "Convertida de cotización {$quote->quote_number} y enviada a bodega",
+                ]);
+
+                // Copy items
+                foreach ($quote->items as $qi) {
+                    SalesOrderItem::create([
+                        'sales_order_id'   => $order->id,
+                        'product_id'       => $qi->product_id,
+                        'variant_id'       => $qi->is_custom_line ? null : $qi->variant_id,
+                        'warehouse_id'     => $qi->warehouse_id,
+                        'quantity'         => $qi->quantity,
+                        'unit_price'       => $qi->unit_price,
+                        'discount_percent' => $qi->discount_percent,
+                        'discount_amount'  => $qi->discount_amount,
+                        'tax_percent'      => $qi->tax_percent,
+                        'tax_amount'       => $qi->tax_amount,
+                        'subtotal'         => $qi->subtotal,
+                        'total'            => $qi->total,
+                        'is_custom_line'   => (bool) $qi->is_custom_line,
+                        'custom_description' => $qi->custom_description,
+                    ]);
+                }
+
+                $order->calculateTotals();
+
+                // Send to warehouse queue
+                $order->update(['sent_to_warehouse_at' => now()]);
+
+                // Mark quote as converted
+                $quote->update([
+                    'status'             => 'converted',
+                    'converted_order_id' => $order->id,
+                ]);
+
+                return $order->fresh(['customer', 'user', 'items.product']);
+            });
+
+            return response()->json([
+                'message' => "Cotización {$quote->quote_number} convertida a Orden {$order->order_number} y enviada a bodega",
+                'data'    => $order,
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Error al convertir y enviar a bodega: ' . $e->getMessage(),
+            ], 500);
+        }
     }
 
     /**
@@ -471,7 +569,7 @@ class SalesQuoteController extends Controller
                     SalesOrderItem::create([
                         'sales_order_id'   => $order->id,
                         'product_id'       => $qi->product_id,
-                        'variant_id'       => $qi->variant_id,
+                        'variant_id'       => $qi->is_custom_line ? null : $qi->variant_id,
                         'warehouse_id'     => $qi->warehouse_id,
                         'quantity'         => $qi->quantity,
                         'unit_price'       => $qi->unit_price,
@@ -481,6 +579,8 @@ class SalesQuoteController extends Controller
                         'tax_amount'       => $qi->tax_amount,
                         'subtotal'         => $qi->subtotal,
                         'total'            => $qi->total,
+                        'is_custom_line'   => (bool) $qi->is_custom_line,
+                        'custom_description' => $qi->custom_description,
                     ]);
                 }
 
@@ -517,6 +617,101 @@ class SalesQuoteController extends Controller
                 'error'   => $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Validate stock availability for quote items when the setting is enabled.
+     *
+     * @param  array       $items       Quote items with product_id, variant_id, warehouse_id, quantity
+     * @param  int|null    $warehouseId Header-level warehouse (fallback when item has none)
+     * @throws \Exception  When stock is insufficient
+     */
+    private function validateStockForQuoteItems(array $items, ?int $warehouseId): void
+    {
+        if (!Setting::get('require_stock_for_quotes', false)) {
+            return; // Setting disabled — skip check
+        }
+
+        $insufficient = [];
+
+        foreach ($items as $item) {
+            if (!empty($item['is_custom_line'])) {
+                continue;
+            }
+
+            $qty            = (int) ($item['quantity'] ?? 1);
+            $productId      = $item['product_id'];
+            $variantId      = $item['variant_id'] ?? null;
+            $itemWarehouse  = $item['warehouse_id'] ?? $warehouseId;
+
+            if (!$itemWarehouse) {
+                continue; // Can't check without warehouse context
+            }
+
+            $query = ProductInventory::where('product_id', $productId)
+                ->where('warehouse_id', $itemWarehouse);
+
+            if ($variantId) {
+                $query->where('variant_id', $variantId);
+            } else {
+                $query->whereNull('variant_id');
+            }
+
+            $inventory = $query->first();
+            $available = $inventory?->quantity_available ?? 0;
+
+            if ($available < $qty) {
+                $insufficient[] = "Producto #{$productId}" .
+                    ($variantId ? " (variante #{$variantId})" : '') .
+                    ": disponible {$available}, solicitado {$qty}";
+            }
+        }
+
+        if (!empty($insufficient)) {
+            throw new \Exception('Stock insuficiente para la cotización: ' . implode('; ', $insufficient));
+        }
+    }
+
+    /**
+     * Validates and normalizes mixed catalog/custom quote lines.
+     *
+     * @throws ValidationException
+     */
+    private function normalizeCustomLineItems(array $items): array
+    {
+        $errors = [];
+
+        foreach ($items as $index => $item) {
+            $isCustom = (bool) ($item['is_custom_line'] ?? false);
+
+            if ($isCustom) {
+                $description = trim((string) ($item['custom_description'] ?? ''));
+                if ($description === '') {
+                    $errors["items.{$index}.custom_description"] = 'La descripcion es obligatoria para articulos miscelaneos.';
+                    continue;
+                }
+
+                $items[$index]['is_custom_line'] = true;
+                $items[$index]['custom_description'] = $description;
+                $items[$index]['product_id'] = null;
+                $items[$index]['variant_id'] = null;
+                continue;
+            }
+
+            if (empty($item['product_id'])) {
+                $errors["items.{$index}.product_id"] = 'El producto es obligatorio para lineas de catalogo.';
+                continue;
+            }
+
+            $items[$index]['is_custom_line'] = false;
+            $items[$index]['custom_description'] = null;
+        }
+
+        if (!empty($errors)) {
+            throw ValidationException::withMessages($errors);
+        }
+
+        return $items;
     }
 
     /**

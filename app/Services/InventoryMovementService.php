@@ -16,7 +16,7 @@ class InventoryMovementService
      */
     public function getMovements(array $filters = [], int $perPage = 20): LengthAwarePaginator
     {
-        $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch']);
+        $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier']);
 
         // Apply filters
         if (!empty($filters['product_id'])) {
@@ -68,7 +68,7 @@ class InventoryMovementService
      */
     public function getMovementById(int $id): InventoryMovement
     {
-        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch'])
+        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier'])
             ->findOrFail($id);
     }
 
@@ -102,15 +102,16 @@ class InventoryMovementService
             // Create movement record
             $movement = InventoryMovement::create([
                 'movement_type' => 'in',
-                'product_id' => $data['product_id'],
-                'variant_id' => $data['variant_id'] ?? null,
+                'product_id'    => $data['product_id'],
+                'variant_id'    => $data['variant_id'] ?? null,
                 'product_batch_id' => $batchId,
-                'warehouse_id' => $data['warehouse_id'],
-                'quantity' => $data['quantity'],
-                'reference_type' => $data['reference_type'] ?? null,
-                'reference_id' => $data['reference_id'] ?? null,
-                'notes' => $data['notes'] ?? null,
-                'user_id' => $data['user_id'] ?? null,
+                'warehouse_id'  => $data['warehouse_id'],
+                'quantity'      => $data['quantity'],
+                'reference_type'=> $data['reference_type'] ?? null,
+                'reference_id'  => $data['reference_id'] ?? null,
+                'notes'         => $data['notes'] ?? null,
+                'user_id'       => $data['user_id'] ?? null,
+                'supplier_id'   => $data['supplier_id'] ?? null,
             ]);
 
             // Update product inventory (Aggregate)
@@ -122,7 +123,7 @@ class InventoryMovementService
                 $data['variant_id'] ?? null
             );
 
-            return $movement->load(['product', 'variant', 'warehouse', 'productBatch']);
+            return $movement->load(['product', 'variant', 'warehouse', 'productBatch', 'supplier']);
         });
     }
 

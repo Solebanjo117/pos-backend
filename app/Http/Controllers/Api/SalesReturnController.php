@@ -85,6 +85,11 @@ class SalesReturnController extends Controller
                 continue;
             }
 
+            if ($orderItem->is_custom_line) {
+                $errors[] = "La linea '{$orderItem->custom_description}' es miscelanea y no puede devolverse.";
+                continue;
+            }
+
             // Sum previously returned quantities for this order item
             $alreadyReturned = \App\Models\SalesReturnItem::whereHas('salesReturn', function ($q) use ($orderId) {
                 $q->where('sales_order_id', $orderId)->where('status', 'approved');

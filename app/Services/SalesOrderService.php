@@ -130,6 +130,10 @@ class SalesOrderService
             if (in_array($requestedStatus, ['draft', 'pending'])) {
                 // R28: Validate stock availability before reserving
                 foreach ($order->items as $item) {
+                    if ($item->is_custom_line) {
+                        continue;
+                    }
+
                     $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
                     if ($item->variant_id) {
                         $query->where('variant_id', $item->variant_id);
@@ -149,6 +153,10 @@ class SalesOrderService
 
                 // If validation passed, reserve stock
                 foreach ($order->items as $item) {
+                    if ($item->is_custom_line) {
+                        continue;
+                    }
+
                     $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
                     if ($item->variant_id) {
                         $query->where('variant_id', $item->variant_id);
@@ -285,10 +293,17 @@ class SalesOrderService
                 throw new \Exception('No se pueden agregar items a una orden en estado ' . $order->status);
             }
 
-        // Resolve unit cost from preferred supplier
+        $isCustomLine = (bool) ($itemData['is_custom_line'] ?? false);
+        $customDescription = $isCustomLine ? trim((string) ($itemData['custom_description'] ?? '')) : null;
+
+        if ($isCustomLine && $customDescription === '') {
+            throw new \Exception('La descripcion es obligatoria para articulos miscelaneos.');
+        }
+
+        // Resolve unit cost from preferred supplier when this is a catalog line
         $unitCost = 0;
-        $variantId = $itemData['variant_id'] ?? null;
-        if ($variantId) {
+        $variantId = $isCustomLine ? null : ($itemData['variant_id'] ?? null);
+        if (!$isCustomLine && $variantId) {
             $supplierPivot = \Illuminate\Support\Facades\DB::table('product_suppliers')
                 ->where('variant_id', $variantId)
                 ->orderByDesc('is_preferred')
@@ -298,7 +313,7 @@ class SalesOrderService
 
         $item = SalesOrderItem::create([
             'sales_order_id' => $orderId,
-            'product_id' => $itemData['product_id'],
+            'product_id' => $isCustomLine ? null : ($itemData['product_id'] ?? null),
             'variant_id' => $variantId,
             'warehouse_id' => $itemData['warehouse_id'],
             'seller_id' => $itemData['seller_id'] ?? null,
@@ -308,44 +323,46 @@ class SalesOrderService
             'discount_percent' => $itemData['discount_percent'] ?? 0,
             'discount_amount' => $itemData['discount_amount'] ?? 0,
             'tax_percent' => $itemData['tax_percent'] ?? 0,
+            'is_custom_line' => $isCustomLine,
+            'custom_description' => $customDescription,
         ]);
 
         if ($isConfirmed) {
-            $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
-            $query = \App\Models\ProductInventory::where('warehouse_id', $item->warehouse_id);
-            if ($item->variant_id) {
-                $query->where('variant_id', $item->variant_id);
-            } else {
-                $query->where('product_id', $item->product_id);
-            }
-            $inventory = $query->first();
+            if (!$isCustomLine) {
+                $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
+                $query = \App\Models\ProductInventory::where('warehouse_id', $item->warehouse_id);
+                if ($item->variant_id) {
+                    $query->where('variant_id', $item->variant_id);
+                } else {
+                    $query->where('product_id', $item->product_id);
+                }
+                $inventory = $query->first();
 
-            if (!$allowNegative && (!$inventory || $inventory->quantity_available < $item->quantity)) {
-                throw new \Exception("Stock insuficiente para agregar " . ($item->product->name ?? 'producto') . " a esta orden.");
+                if (!$allowNegative && (!$inventory || $inventory->quantity_available < $item->quantity)) {
+                    throw new \Exception("Stock insuficiente para agregar " . ($item->product->name ?? 'producto') . " a esta orden.");
+                }
+
+                // Create inventory movement
+                \App\Models\InventoryMovement::create([
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'warehouse_id' => $item->warehouse_id,
+                    'movement_type' => 'out',
+                    'quantity' => $item->quantity,
+                    'reference_type' => 'sale',
+                    'reference_id' => $order->id,
+                    'notes' => "Agregado post-venta a Orden {$order->order_number}",
+                    'user_id' => \Illuminate\Support\Facades\Auth::id(),
+                    'date' => now(),
+                ]);
+
+                if ($inventory) {
+                    $inventory->quantity_available -= $item->quantity;
+                    $inventory->save();
+                }
             }
 
-            // Create inventory movement
-            \App\Models\InventoryMovement::create([
-                'product_id' => $item->product_id,
-                'variant_id' => $item->variant_id,
-                'warehouse_id' => $item->warehouse_id,
-                'movement_type' => 'out',
-                'quantity' => $item->quantity,
-                'reference_type' => 'sale',
-                'reference_id' => $order->id,
-                'notes' => "Agregado post-venta a Orden {$order->order_number}",
-                'user_id' => \Illuminate\Support\Facades\Auth::id(),
-                'date' => now(),
-            ]);
-
-            if ($inventory) {
-                $inventory->quantity_available -= $item->quantity;
-                $inventory->save();
-            }
-            
             // Re-evaluate payment status immediately
-            // Subtotals are updated via SalesOrderItem's saved event. We need to wait for that or just re-evaluate manually.
-            // When we refresh the order, the total will be updated.
             $order->refresh();
             $paid = $order->amount_paid;
             if ($paid < $order->total && $paid > 0) {
@@ -354,11 +371,9 @@ class SalesOrderService
                 $order->payment_status = 'pending';
             }
             $order->save();
-            
-            // Adjust customer balance if this is a credit-like system where the balance was already locked
-            // Actually, adding items to a confirmed order means the order is worth more, 
-            // so if there's a customer, we should charge them the difference!
-            $diffAmount = $item->total; // total for this item
+
+            // Adding lines to a confirmed order increases customer's debt.
+            $diffAmount = $item->total;
             if ($order->customer_id) {
                 $customer = \App\Models\Customer::find($order->customer_id);
                 if ($customer) {
@@ -472,6 +487,10 @@ class SalesOrderService
         $issues = [];
 
         foreach ($order->items as $item) {
+            if ($item->is_custom_line) {
+                continue;
+            }
+
             $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
 
             // Filter by variant_id if present, otherwise by product_id
@@ -486,7 +505,7 @@ class SalesOrderService
 
             if ($available < $item->quantity) {
                 $issues[] = [
-                    'product' => $item->product->name,
+                    'product' => $item->product->name ?? $item->custom_description,
                     'warehouse' => $item->warehouse->name,
                     'required' => $item->quantity,
                     'available' => $available,

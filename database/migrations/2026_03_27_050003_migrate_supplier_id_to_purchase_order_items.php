@@ -11,16 +11,28 @@ return new class extends Migration
      */
     public function up(): void
     {
-        // Copy supplier_id from purchase_orders to all their items
-        DB::statement("
-            UPDATE purchase_order_items poi
-            SET supplier_id = (
-                SELECT po.supplier_id 
-                FROM purchase_orders po 
-                WHERE po.id = poi.purchase_order_id
-            )
-            WHERE poi.supplier_id IS NULL
-        ");
+        $driver = DB::getDriverName();
+        if ($driver === 'sqlite') {
+            DB::statement('
+                UPDATE purchase_order_items
+                SET supplier_id = (
+                    SELECT supplier_id
+                    FROM purchase_orders
+                    WHERE purchase_orders.id = purchase_order_items.purchase_order_id
+                )
+                WHERE supplier_id IS NULL
+            ');
+        } else {
+            DB::statement('
+                UPDATE purchase_order_items poi
+                SET supplier_id = (
+                    SELECT po.supplier_id
+                    FROM purchase_orders po
+                    WHERE po.id = poi.purchase_order_id
+                )
+                WHERE poi.supplier_id IS NULL
+            ');
+        }
     }
 
     public function down(): void

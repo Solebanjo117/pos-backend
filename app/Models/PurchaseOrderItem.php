@@ -16,6 +16,7 @@ class PurchaseOrderItem extends Model
         'product_id',
         'variant_id',
         'quantity_ordered',
+        'units_per_package',
         'quantity_received',
         'unit_cost',
         'subtotal',
@@ -25,15 +26,16 @@ class PurchaseOrderItem extends Model
 
     protected $casts = [
         'purchase_order_id' => 'integer',
-        'supplier_id' => 'integer',
-        'product_id' => 'integer',
-        'quantity_ordered' => 'integer',
+        'supplier_id'       => 'integer',
+        'product_id'        => 'integer',
+        'quantity_ordered'  => 'integer',
+        'units_per_package' => 'integer',
         'quantity_received' => 'integer',
-        'unit_cost' => 'decimal:2',
-        'subtotal' => 'decimal:2',
+        'unit_cost'         => 'decimal:2',
+        'subtotal'          => 'decimal:2',
     ];
 
-    protected $appends = ['pending_quantity', 'is_fully_received', 'status_label'];
+    protected $appends = ['pending_quantity', 'is_fully_received', 'status_label', 'total_units_ordered', 'total_units_received'];
 
     // ==================== RELATIONSHIPS ====================
 
@@ -79,6 +81,16 @@ class PurchaseOrderItem extends Model
             'partial'  => 'Parcial',
             default    => 'Pendiente',
         };
+    }
+
+    public function getTotalUnitsOrderedAttribute(): int
+    {
+        return $this->quantity_ordered * ($this->units_per_package ?? 1);
+    }
+
+    public function getTotalUnitsReceivedAttribute(): int
+    {
+        return $this->quantity_received * ($this->units_per_package ?? 1);
     }
 
     /**

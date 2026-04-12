@@ -33,11 +33,9 @@ class ProductService
         DB::beginTransaction();
         
         try {
-            // sku_base is now optional — only auto-generate if completely absent
-            $skuBase = array_key_exists('sku_base', $data) ? $data['sku_base'] : null;
-            // If sku_base is explicitly provided (even empty string), respect it
-            // If not provided at all, auto-generate from category
-            if (!array_key_exists('sku_base', $data)) {
+            // sku_base is required — auto-generate if not provided or empty
+            $skuBase = $data['sku_base'] ?? null;
+            if (empty($skuBase)) {
                 $skuBase = $this->autoGenerateSku($data['category_id'] ?? null);
             }
 
@@ -47,9 +45,13 @@ class ProductService
                 $name = $this->autoGenerateName($data['category_id'] ?? null);
             }
 
+            // Generate product system_id before creation
+            $systemId = $this->generateProductSystemId();
+
             // Create the base product (without brand)
             $product = Product::create([
-                'sku_base'       => $skuBase ?: null,
+                'system_id'      => $systemId,
+                'sku_base'       => $skuBase,
                 'alternate_code' => $data['alternate_code'] ?? null,
                 'pricing_formula'=> $data['pricing_formula'] ?? null,
                 'product_line_id' => $data['product_line_id'] ?? null,
@@ -60,32 +62,39 @@ class ProductService
                 'is_universal'   => $data['is_universal'] ?? false,
             ]);
 
-            // Create default variant with brand
-            $variant = $this->createVariant($product, [
-                'brand_id' => $data['brand_id'],
-                'sku' => $data['sku'] ?? $skuBase,
-                'upc' => $data['upc'] ?? null,
-                'status' => $data['status'] ?? 'active',
-                'is_default' => true,
-            ]);
+            // Create default variant with brand (only if brand_id is provided)
+            $variant = null;
+            if (!empty($data['brand_id'])) {
+                $variant = $this->createVariant($product, [
+                    'brand_id' => $data['brand_id'],
+                    'sku' => $data['sku'] ?? $skuBase,
+                    'upc' => $data['upc'] ?? null,
+                    'status' => $data['status'] ?? 'active',
+                    'is_default' => true,
+                ]);
 
-            // Create pricing for product
-            if (isset($data['pricing'])) {
-                $pricing = $product->pricing()->create($data['pricing']);
-                $pricing->calculateMargin();
-                $pricing->save();
-            }
-
-            // Initialize inventory for variant if provided
-            if (isset($data['initial_inventory'])) {
-                foreach ($data['initial_inventory'] as $inventoryData) {
-                    $variant->inventory()->create($inventoryData);
+                // Create pricing for the default variant (not product)
+                if (isset($data['pricing'])) {
+                    $pricingData = $data['pricing'];
+                    $pricingData['variant_id'] = $variant->id;
+                    $pricingData['product_id'] = $product->id;
+                    $pricing = $variant->pricing()->create($pricingData);
+                    $pricing->calculateMargin();
+                    $pricing->save();
                 }
-            }
 
-            // Assign attributes to the default VARIANT (not product)
-            if (isset($data['attributes'])) {
-                $this->assignVariantAttributes($variant, $data['attributes']);
+                // Initialize inventory for variant if provided
+                if (isset($data['initial_inventory'])) {
+                    foreach ($data['initial_inventory'] as $inventoryData) {
+                        $inventoryData['product_id'] = $product->id;
+                        $variant->inventory()->create($inventoryData);
+                    }
+                }
+
+                // Assign attributes to the default VARIANT (not product)
+                if (isset($data['attributes'])) {
+                    $this->assignVariantAttributes($variant, $data['attributes']);
+                }
             }
 
             // Assign vehicle compatibility
@@ -131,12 +140,19 @@ class ProductService
      */
     public function createVariant(Product $product, array $data): ProductVariant
     {
+        // Generate variant system_id if brand_id is present
+        $systemId = null;
+        if (!empty($data['brand_id'])) {
+            $systemId = $this->generateVariantSystemId($data['brand_id']);
+        }
+
         $variant = $product->variants()->create([
             'brand_id' => $data['brand_id'],
             'sku' => $data['sku'],
             'upc' => $data['upc'] ?? null,
             'status' => $data['status'] ?? 'active',
             'is_default' => $data['is_default'] ?? false,
+            'system_id' => $systemId,
         ]);
 
         return $variant;
@@ -253,7 +269,7 @@ class ProductService
     /**
      * Assign attributes to product.
      */
-    private function assignAttributes(Product $product, array $attributes): void
+    public function assignAttributes(Product $product, array $attributes): void
     {
         // Remove existing attributes
         $product->attributes()->delete();
@@ -639,5 +655,94 @@ class ProductService
         }
         
         return $query->paginate($perPage);
+    }
+
+    /**
+     * Assign a supplier to a product.
+     */
+    public function assignSupplier(Product $product, int $supplierId, array $data): void
+    {
+        $product->suppliers()->syncWithoutDetaching([
+            $supplierId => [
+                'supplier_cost' => $data['supplier_cost'] ?? 0,
+                'lead_time_days' => $data['lead_time_days'] ?? null,
+                'minimum_order_quantity' => $data['minimum_order_quantity'] ?? null,
+                'is_preferred' => $data['is_preferred'] ?? false,
+            ]
+        ]);
+    }
+
+    /**
+     * Add vehicle compatibility to a product.
+     */
+    public function addCompatibility(Product $product, int $engineId, ?string $notes = null): void
+    {
+        $product->compatibleEngines()->syncWithoutDetaching([
+            $engineId => ['notes' => $notes]
+        ]);
+    }
+
+    /**
+     * Generate a unique 8-digit product system ID using atomic sequence.
+     */
+    private function generateProductSystemId(): string
+    {
+        $row = DB::table('system_sequences')
+            ->where('key', 'product_system_id')
+            ->lockForUpdate()
+            ->first();
+
+        if (!$row) {
+            // Fallback: create if missing
+            $nextValue = Product::count() + 1;
+            DB::table('system_sequences')->insert([
+                'key' => 'product_system_id',
+                'next_value' => $nextValue + 1,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            return str_pad($nextValue, 8, '0', STR_PAD_LEFT);
+        }
+
+        $nextValue = $row->next_value;
+        DB::table('system_sequences')
+            ->where('key', 'product_system_id')
+            ->update(['next_value' => $nextValue + 1, 'updated_at' => now()]);
+
+        return str_pad($nextValue, 8, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * Generate a unique brand-prefixed variant system ID.
+     * Format: {BRAND_PREFIX}{00000001} e.g. BOX00000001
+     */
+    private function generateVariantSystemId(int $brandId): string
+    {
+        $brand = Brand::find($brandId);
+        $prefix = $brand?->prefix ?? 'UNK';
+
+        $row = DB::table('brand_sequences')
+            ->where('brand_id', $brandId)
+            ->lockForUpdate()
+            ->first();
+
+        if (!$row) {
+            // Fallback: create sequence if missing
+            $nextValue = ProductVariant::where('brand_id', $brandId)->count() + 1;
+            DB::table('brand_sequences')->insert([
+                'brand_id' => $brandId,
+                'next_value' => $nextValue + 1,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            return $prefix . str_pad($nextValue, 8, '0', STR_PAD_LEFT);
+        }
+
+        $nextValue = $row->next_value;
+        DB::table('brand_sequences')
+            ->where('brand_id', $brandId)
+            ->update(['next_value' => $nextValue + 1, 'updated_at' => now()]);
+
+        return $prefix . str_pad($nextValue, 8, '0', STR_PAD_LEFT);
     }
 }

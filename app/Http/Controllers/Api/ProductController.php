@@ -43,13 +43,27 @@ class ProductController extends Controller
         }
 
         if ($request->has('brand_id')) {
-            $query->whereHas('variants', function($q) use ($request) {
-                $q->where('brand_id', $request->get('brand_id'));
-            });
+            $brandIds = $request->get('brand_id');
+            // Support both single value and array
+            if (is_array($brandIds)) {
+                $query->whereHas('variants', function($q) use ($brandIds) {
+                    $q->whereIn('brand_id', $brandIds);
+                });
+            } else {
+                $query->whereHas('variants', function($q) use ($brandIds) {
+                    $q->where('brand_id', $brandIds);
+                });
+            }
         }
 
         if ($request->has('category_id')) {
-            $query->where('category_id', $request->get('category_id'));
+            $categoryIds = $request->get('category_id');
+            // Support both single value and array
+            if (is_array($categoryIds)) {
+                $query->whereIn('category_id', $categoryIds);
+            } else {
+                $query->where('category_id', $categoryIds);
+            }
         }
 
         // Eager load ALL variant relationships together to avoid overwriting

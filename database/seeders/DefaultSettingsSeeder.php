@@ -11,7 +11,7 @@ class DefaultSettingsSeeder extends Seeder
     {
         $defaults = [
             // Inventory
-            ['allow_negative_inventory', true, 'boolean', 'inventory'],
+            ['allow_negative_inventory', false, 'boolean', 'inventory'],
             ['negative_inventory_warning', true, 'boolean', 'inventory'],
 
             // Store identity (used in PDF/tickets)
@@ -33,6 +33,7 @@ class DefaultSettingsSeeder extends Seeder
 
             // Quotes
             ['quote_expiration_days', 30, 'number', 'quotes'],
+            ['require_stock_for_quotes', false, 'boolean', 'quotes'],
 
             // Modules
             ['modules_work_orders_enabled', false, 'boolean', 'modules'],

@@ -24,7 +24,7 @@ class InventoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Inventory::with(['product.defaultVariant.brand', 'warehouse'])
+        $query = Inventory::with(['product.defaultVariant.brand', 'product.defaultVariant.pricing', 'warehouse'])
             ->select('inventory.*');
 
         // Filter by warehouse
@@ -59,6 +59,7 @@ class InventoryController extends Controller
 
         return response()->json([
             'data' => $inventory->map(function ($item) {
+                $pricing = $item->product->defaultVariant?->pricing;
                 return [
                     'id' => $item->id,
                     'product_id' => $item->product_id,
@@ -74,6 +75,8 @@ class InventoryController extends Controller
                     'target_level' => $item->target_level,
                     'needs_reorder' => $item->needsReorder(),
                     'status' => $this->getStockStatus($item),
+                    'base_price' => $pricing ? (float) $pricing->base_price : null,
+                    'cost' => $pricing ? (float) $pricing->cost : null,
                 ];
             }),
             'meta' => [

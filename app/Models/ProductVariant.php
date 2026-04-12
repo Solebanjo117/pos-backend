@@ -21,6 +21,7 @@ class ProductVariant extends Model
         'upc',
         'status',
         'is_default',
+        'system_id',
     ];
 
     protected $casts = [

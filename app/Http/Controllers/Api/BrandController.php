@@ -69,6 +69,7 @@ class BrandController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255|unique:brands,name',
+            'prefix' => 'nullable|string|max:5|unique:brands,prefix',
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
@@ -92,6 +93,7 @@ class BrandController extends Controller
 
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255|unique:brands,name,' . $id,
+            'prefix' => 'nullable|string|max:5|unique:brands,prefix,' . $id,
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',

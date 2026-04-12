@@ -15,12 +15,18 @@ class ProductVehicleCompatibility extends Model
     protected $fillable = [
         'product_id',
         'engine_id',
+        'chassis_id',
         'notes',
+        'all_engines',
+        'all_chassis',
     ];
 
     protected $casts = [
         'product_id' => 'integer',
-        'engine_id' => 'integer',
+        'engine_id'  => 'integer',
+        'chassis_id' => 'integer',
+        'all_engines' => 'boolean',
+        'all_chassis' => 'boolean',
     ];
 
     /**
@@ -32,10 +38,18 @@ class ProductVehicleCompatibility extends Model
     }
 
     /**
-     * Get the vehicle engine.
+     * Get the vehicle engine (nullable — record may be chassis-only).
      */
     public function engine(): BelongsTo
     {
         return $this->belongsTo(VehicleEngine::class, 'engine_id');
+    }
+
+    /**
+     * Get the vehicle chassis (nullable — record may be engine-only).
+     */
+    public function chassis(): BelongsTo
+    {
+        return $this->belongsTo(VehicleChassis::class, 'chassis_id');
     }
 }

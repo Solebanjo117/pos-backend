@@ -23,6 +23,9 @@ class SalesQuoteItem extends Model
         'tax_amount',
         'subtotal',
         'total',
+        'notes',
+        'is_custom_line',
+        'custom_description',
     ];
 
     protected $casts = [
@@ -34,6 +37,7 @@ class SalesQuoteItem extends Model
         'tax_amount'       => 'decimal:2',
         'subtotal'         => 'decimal:2',
         'total'            => 'decimal:2',
+        'is_custom_line'   => 'boolean',
     ];
 
     protected $appends = ['product_name', 'product_sku'];
@@ -64,11 +68,19 @@ class SalesQuoteItem extends Model
 
     public function getProductNameAttribute(): ?string
     {
+        if ($this->is_custom_line) {
+            return $this->custom_description ?: 'Articulo miscelaneo';
+        }
+
         return $this->product?->name;
     }
 
     public function getProductSkuAttribute(): ?string
     {
+        if ($this->is_custom_line) {
+            return 'MISC';
+        }
+
         return $this->product?->sku_base;
     }
 

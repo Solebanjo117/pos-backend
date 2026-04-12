@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use App\Models\ProductVariant;
 use App\Models\Inventory;
 
@@ -57,11 +58,21 @@ class SalesOrderController extends Controller
      * GET /api/sales-orders/{id}
      * Get single sales order
      */
-    public function show(int $id): JsonResponse
+    public function show(string $id): JsonResponse
     {
         try {
-            $order = $this->salesOrderService->getById($id);
-            
+            $orderId = (int) $id;
+
+            // Validate ID is positive integer
+            if ($orderId <= 0) {
+                return response()->json([
+                    'message' => 'ID de orden inválido',
+                    'error' => 'El ID debe ser un número positivo',
+                ], 400);
+            }
+
+            $order = $this->salesOrderService->getById($orderId);
+
             return response()->json($order);
         } catch (\Exception $e) {
             return response()->json([
@@ -100,7 +111,7 @@ class SalesOrderController extends Controller
                 'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
                 'payments.*.notes'  => 'nullable|string',
                 'items'             => 'nullable|array',
-                'items.*.product_id'       => 'required|exists:products,id',
+                'items.*.product_id'       => 'nullable|exists:products,id',
                 'items.*.variant_id'       => 'nullable|exists:product_variants,id',
                 'items.*.warehouse_id'     => 'required|exists:warehouses,id',
                 'items.*.quantity'         => 'required|integer|min:1',
@@ -109,7 +120,13 @@ class SalesOrderController extends Controller
                 'items.*.discount_amount'  => 'nullable|numeric|min:0',
                 'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
                 'items.*.seller_id'        => 'nullable|exists:users,id',
+                'items.*.is_custom_line'   => 'nullable|boolean',
+                'items.*.custom_description' => 'nullable|string|max:255',
             ]);
+
+            if (!empty($validated['items'])) {
+                $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
+            }
 
             // Map specific payment types to generic database types
             $paymentTypeMap = [
@@ -142,6 +159,10 @@ class SalesOrderController extends Controller
                 if (! $allowNegative) {
                     $stockErrors = [];
                     foreach ($validated['items'] as $item) {
+                        if (!empty($item['is_custom_line'])) {
+                            continue;
+                        }
+
                         // Look up stock in product_inventory using the correct columns
                         $query = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id']);
 
@@ -182,6 +203,10 @@ class SalesOrderController extends Controller
 
             if (!$canOverridePrice && !empty($validated['items'])) {
                 foreach ($validated['items'] as &$item) {
+                    if (!empty($item['is_custom_line'])) {
+                        continue;
+                    }
+
                     // Get system price for this product/variant
                     $pricingQuery = \App\Models\ProductPricing::query();
                     if (!empty($item['variant_id'])) {
@@ -287,7 +312,7 @@ class SalesOrderController extends Controller
                 'notes' => 'nullable|string',
                 'internal_notes' => 'nullable|string',
                 'items' => 'nullable|array',
-                'items.*.product_id' => 'required|exists:products,id',
+                'items.*.product_id' => 'nullable|exists:products,id',
                 'items.*.variant_id' => 'nullable|exists:product_variants,id',
                 'items.*.warehouse_id' => 'required|exists:warehouses,id',
                 'items.*.quantity' => 'required|integer|min:1',
@@ -296,7 +321,13 @@ class SalesOrderController extends Controller
                 'items.*.discount_amount' => 'nullable|numeric|min:0',
                 'items.*.tax_percent' => 'nullable|numeric|min:0|max:100',
                 'items.*.seller_id'  => 'nullable|exists:users,id',
+                'items.*.is_custom_line' => 'nullable|boolean',
+                'items.*.custom_description' => 'nullable|string|max:255',
             ]);
+
+            if (!empty($validated['items'])) {
+                $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
+            }
 
             // ── Enforce price override permission (R05) ──
             $userRole = $request->user()->role ?? '';
@@ -304,6 +335,10 @@ class SalesOrderController extends Controller
 
             if (!$canOverridePrice && !empty($validated['items'])) {
                 foreach ($validated['items'] as &$item) {
+                    if (!empty($item['is_custom_line'])) {
+                        continue;
+                    }
+
                     $pricingQuery = \App\Models\ProductPricing::query();
                     if (!empty($item['variant_id'])) {
                         $pricingQuery->where('variant_id', $item['variant_id']);
@@ -423,7 +458,7 @@ class SalesOrderController extends Controller
     {
         try {
             $validated = $request->validate([
-                'product_id' => 'required|exists:products,id',
+                'product_id' => 'nullable|exists:products,id',
                 'variant_id' => 'nullable|exists:product_variants,id',
                 'warehouse_id' => 'required|exists:warehouses,id',
                 'quantity' => 'required|integer|min:1',
@@ -432,7 +467,11 @@ class SalesOrderController extends Controller
                 'discount_amount' => 'nullable|numeric|min:0',
                 'tax_percent' => 'nullable|numeric|min:0|max:100',
                 'seller_id' => 'nullable|exists:users,id',
+                'is_custom_line' => 'nullable|boolean',
+                'custom_description' => 'nullable|string|max:255',
             ]);
+
+            $validated = $this->normalizeCustomLineItems([$validated])[0];
 
             $item = $this->salesOrderService->addItem($id, $validated);
 
@@ -525,7 +564,7 @@ class SalesOrderController extends Controller
         try {
             $validated = $request->validate([
                 'items' => 'required|array',
-                'items.*.product_id' => 'required|exists:products,id',
+                'items.*.product_id' => 'nullable|exists:products,id',
                 'items.*.variant_id' => 'nullable|exists:product_variants,id',
                 'items.*.warehouse_id' => 'required|exists:warehouses,id',
                 'items.*.qty' => 'required|integer|min:1',
@@ -533,16 +572,46 @@ class SalesOrderController extends Controller
                 'items.*.seller_id' => 'nullable|exists:users,id',
                 'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
                 'items.*.tax_percent' => 'nullable|numeric|min:0|max:100',
+                'items.*.is_custom_line' => 'nullable|boolean',
+                'items.*.custom_description' => 'nullable|string|max:255',
                 'payment' => 'nullable|array',
                 'payment.*.method' => 'required|string',
                 'payment.*.amount' => 'required|numeric|min:0',
                 'payment.*.notes' => 'nullable|string',
             ]);
 
+            $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
+
             $order = \App\Models\SalesOrder::findOrFail($id);
 
             DB::transaction(function() use ($validated, $order) {
                 foreach ($validated['items'] as $item) {
+                    if (!empty($item['is_custom_line'])) {
+                        $subtotal = $item['qty'] * $item['price'];
+                        $discount = $subtotal * (($item['discount_percent'] ?? 0) / 100);
+                        $tax = ($subtotal - $discount) * (($item['tax_percent'] ?? 0) / 100);
+
+                        $order->items()->create([
+                            'product_id' => null,
+                            'variant_id' => null,
+                            'warehouse_id' => $item['warehouse_id'],
+                            'quantity' => $item['qty'],
+                            'unit_price' => $item['price'],
+                            'unit_cost' => 0,
+                            'discount_percent' => $item['discount_percent'] ?? 0,
+                            'tax_percent' => $item['tax_percent'] ?? 0,
+                            'seller_id' => $item['seller_id'] ?? null,
+                            'subtotal' => $subtotal,
+                            'discount_amount' => $discount,
+                            'tax_amount' => $tax,
+                            'total' => $subtotal - $discount + $tax,
+                            'is_custom_line' => true,
+                            'custom_description' => $item['custom_description'],
+                        ]);
+
+                        continue;
+                    }
+
                     $query = $order->items()->where('product_id', $item['product_id']);
                     if (!empty($item['variant_id'])) {
                         $query->where('variant_id', $item['variant_id']);
@@ -714,6 +783,48 @@ class SalesOrderController extends Controller
                 'error' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    /**
+     * Validates and normalizes mixed catalog/custom lines.
+     *
+     * @throws ValidationException
+     */
+    private function normalizeCustomLineItems(array $items): array
+    {
+        $errors = [];
+
+        foreach ($items as $index => $item) {
+            $isCustom = (bool) ($item['is_custom_line'] ?? false);
+
+            if ($isCustom) {
+                $description = trim((string) ($item['custom_description'] ?? ''));
+                if ($description === '') {
+                    $errors["items.{$index}.custom_description"] = 'La descripcion es obligatoria para articulos miscelaneos.';
+                    continue;
+                }
+
+                $items[$index]['is_custom_line'] = true;
+                $items[$index]['custom_description'] = $description;
+                $items[$index]['product_id'] = null;
+                $items[$index]['variant_id'] = null;
+                continue;
+            }
+
+            if (empty($item['product_id'])) {
+                $errors["items.{$index}.product_id"] = 'El producto es obligatorio para lineas de catalogo.';
+                continue;
+            }
+
+            $items[$index]['is_custom_line'] = false;
+            $items[$index]['custom_description'] = null;
+        }
+
+        if (!empty($errors)) {
+            throw ValidationException::withMessages($errors);
+        }
+
+        return $items;
     }
 
     /**

@@ -240,11 +240,14 @@ class PurchaseOrderService
                 $productId = $item->product_id;
                 $variantId = $item->variant_id;
 
+                // Calculate actual units received (packages × units per package)
+                $actualUnits = $qtyToReceive * ($item->units_per_package ?? 1);
+
                 // Create inventory movement (entry)
                 $movementData = [
                     'warehouse_id' => $po->warehouse_id,
                     'movement_type' => 'in',
-                    'quantity' => $qtyToReceive,
+                    'quantity' => $actualUnits,
                     'reference_type' => 'purchase_order',
                     'reference_id' => $po->id,
                     'notes' => "Recepción PO {$po->po_number}",
@@ -288,7 +291,7 @@ class PurchaseOrderService
                     );
                 }
 
-                $inventory->quantity_available += $qtyToReceive;
+                $inventory->quantity_available += $actualUnits;
                 $inventory->save();
 
                 // Handle batch tracking if enabled
@@ -296,7 +299,7 @@ class PurchaseOrderService
                     $batchData = [
                         'product_id' => $productId,
                         'batch_number' => $received['batch_number'],
-                        'quantity' => $qtyToReceive,
+                        'quantity' => $actualUnits,
                         'expiry_date' => $received['expiry_date'] ?? null,
                         'cost' => $item->unit_cost,
                     ];

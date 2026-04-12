@@ -27,6 +27,7 @@ class Product extends Model
         'status',
         'batch_tracking',
         'is_universal',
+        'system_id',
     ];
 
     protected $casts = [

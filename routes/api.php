@@ -16,6 +16,7 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     require __DIR__ . '/api_dashboard.php';
     require __DIR__ . '/api_inventory.php';
     require __DIR__ . '/api_products.php';
+    require __DIR__ . '/api_product_import.php';
     require __DIR__ . '/api_warehouses.php';
     require __DIR__ . '/api_inventory_movements.php';
     require __DIR__ . '/api_inventory_transfers.php';
@@ -80,11 +81,13 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     // Backups: admin only
     // ---------------------------------------------------------------
     require __DIR__ . '/api_backup.php';
+    require __DIR__ . '/api_data_reset.php';
 
     // ---------------------------------------------------------------
     // Store Settings: admin and managers
     // ---------------------------------------------------------------
     require __DIR__ . '/api_store_settings.php';
+    require __DIR__ . '/api_pricing_formulas.php';
 
     // ---------------------------------------------------------------
     // Payment Methods: configurable payment methods

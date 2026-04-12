@@ -23,6 +23,7 @@ class StoreSettingController extends Controller
             ->orWhere('group', 'pricing')
             ->orWhere('group', 'quotes')
             ->orWhere('group', 'modules')
+            ->orWhere('group', 'sku')
             ->get(['*']);
 
         $map = $settings->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]);
@@ -42,30 +43,39 @@ class StoreSettingController extends Controller
             'store_tax_id', 'store_currency', 'store_ticket_footer',
             'store_tax_rate',
             'pricing_formula',
+            'price_rounding_increment',
             'quote_expiration_days',
+            'require_stock_for_quotes',
             'modules_work_orders_enabled',
+            'sku_format',
         ];
 
         foreach ($allowed as $key) {
             if ($request->has($key)) {
                 $group = match(true) {
-                    $key === 'pricing_formula' => 'pricing',
+                    in_array($key, ['pricing_formula', 'price_rounding_increment']) => 'pricing',
                     str_starts_with($key, 'modules_') => 'modules',
-                    str_starts_with($key, 'quote_') => 'quotes',
+                    str_starts_with($key, 'quote_') || $key === 'require_stock_for_quotes' => 'quotes',
+                    $key === 'sku_format' => 'sku',
                     default => 'store',
                 };
                 $type = match(true) {
-                    in_array($key, ['quote_expiration_days', 'store_tax_rate']) => 'number',
-                    in_array($key, ['modules_work_orders_enabled']) => 'boolean',
+                    in_array($key, ['quote_expiration_days', 'store_tax_rate', 'price_rounding_increment']) => 'number',
+                    in_array($key, ['modules_work_orders_enabled', 'require_stock_for_quotes']) => 'boolean',
+                    $key === 'sku_format' => 'json',
                     default => 'string',
                 };
-                Setting::set($key, $request->input($key), $type, $group);
+                // For JSON settings, serialize arrays before storing
+                $valueToStore = ($type === 'json' && is_array($request->input($key)))
+                    ? json_encode($request->input($key))
+                    : $request->input($key);
+                Setting::set($key, $valueToStore, $type, $group);
             }
         }
 
         return response()->json([
             'message' => 'Configuración guardada correctamente',
-            'data'    => Setting::whereIn('group', ['store', 'pricing', 'quotes', 'modules'])->get(['*'])->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]),
+            'data'    => Setting::whereIn('group', ['store', 'pricing', 'quotes', 'modules', 'sku'])->get(['*'])->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]),
         ]);
     }
 

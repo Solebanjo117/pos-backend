@@ -38,13 +38,13 @@ class ProductVariantController extends Controller
         $validated = $request->validate([
             'brand_id' => 'required|exists:brands,id',
             'sku' => [
-                'required', 
-                'string', 
+                'nullable',
+                'string',
                 'max:255'
             ],
             'upc' => [
-                'nullable', 
-                'string', 
+                'nullable',
+                'string',
                 'max:50'
             ],
             'status' => 'nullable|in:active,discontinued,pending',
@@ -60,8 +60,8 @@ class ProductVariantController extends Controller
 
             // Initial Inventory (optional)
             'initial_inventory' => 'nullable|array',
-            'initial_inventory.*.warehouse_id' => 'required|exists:warehouses,id',
-            'initial_inventory.*.stock_available' => 'required|integer|min:0',
+            'initial_inventory.*.warehouse_id' => 'required_with:initial_inventory|exists:warehouses,id',
+            'initial_inventory.*.stock_available' => 'nullable|integer|min:0',
             'initial_inventory.*.reorder_point' => 'nullable|integer|min:0',
             'initial_inventory.*.reorder_quantity' => 'nullable|integer|min:0',
 
@@ -87,9 +87,19 @@ class ProductVariantController extends Controller
             
             \DB::beginTransaction();
 
+            // Auto-generate SKU if not provided
+            $sku = $validated['sku'];
+            if (empty($sku)) {
+                // Use product sku_base or name as base, append brand short name or ID
+                $base = $product->sku_base ?: ($product->name ? substr($product->name, 0, 10) : 'PROD');
+                $brand = \App\Models\Brand::find($validated['brand_id']);
+                $brandCode = $brand ? substr($brand->name, 0, 3) : 'XXX';
+                $sku = strtoupper($base . '-' . $brandCode . '-' . substr(uniqid(), -6));
+            }
+
             $variant = $this->productService->createVariant($product, [
                 'brand_id' => $validated['brand_id'],
-                'sku' => $validated['sku'],
+                'sku' => $sku,
                 'upc' => $validated['upc'] ?? null,
                 'pricing' => $validated['pricing'] ?? null,
                 'status' => $validated['status'] ?? 'active',
@@ -100,24 +110,31 @@ class ProductVariantController extends Controller
             // Add Initial Inventory
             if (!empty($validated['initial_inventory'])) {
                 foreach ($validated['initial_inventory'] as $invData) {
+                    // Skip if warehouse_id is not valid
+                    if (empty($invData['warehouse_id'])) {
+                        continue;
+                    }
+
                     $variant->inventory()->create([
                         'warehouse_id' => $invData['warehouse_id'],
                         'quantity_available' => $invData['stock_available'] ?? 0,
                         'reorder_point' => $invData['reorder_point'] ?? 0,
                         'reorder_quantity' => $invData['reorder_quantity'] ?? 0,
-                        'product_id' => $product->id, // Fill product_id as well
+                        'product_id' => $product->id,
                     ]);
                 }
             } else {
-                // Create empty inventory record for default warehouse (usually ID 1) if none provided
-                // This ensures it shows up in stock lists
-                $variant->inventory()->create([
-                    'warehouse_id' => 1,
-                    'quantity_available' => 0,
-                    'reorder_point' => 5,
-                    'reorder_quantity' => 10,
-                    'product_id' => $product->id,
-                ]);
+                // Try to create inventory for default warehouse if it exists
+                $defaultWarehouse = \DB::table('warehouses')->first();
+                if ($defaultWarehouse) {
+                    $variant->inventory()->create([
+                        'warehouse_id' => $defaultWarehouse->id,
+                        'quantity_available' => 0,
+                        'reorder_point' => 5,
+                        'reorder_quantity' => 10,
+                        'product_id' => $product->id,
+                    ]);
+                }
             }
 
             // Create variant-level pricing (always — either from request or copied from product)

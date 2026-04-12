@@ -124,10 +124,19 @@ class PricingFormulaService
             return null;
         }
 
+        // Check if formula already handles ITBM to prevent double application
+        $formulaUsesItbm = (bool) preg_match('/\bITBM\b/i', $formula);
+
         try {
-            $base = $this->evaluate($formula, $costo);
+            // Pass itbmPercent so evaluate() uses the correct value
+            $base = $this->evaluate($formula, $costo, $itbmPercent);
         } catch (\Throwable $e) {
             return null; // Fórmula inválida → falla silenciosamente
+        }
+
+        // If formula already handles ITBM, don't apply it again
+        if ($formulaUsesItbm) {
+            return round($base, 2);
         }
 
         return $this->applyItbm($base, $appliesItbm, $itbmPercent);
@@ -153,34 +162,73 @@ class PricingFormulaService
 
     /**
      * Recursively resolve function calls (ROUND, ROUNDUP, ROUNDDOWN, CEIL, FLOOR).
-     * Handles nested expressions: ROUND(costo * 1.5) → numeric value.
+     * Uses stack-based matching to handle deeply nested parentheses.
+     * Example: ROUND((costo + 5) * (2 + 0.5)) → numeric value.
      */
     private function resolveFunctions(string $expr): string
     {
         $functions = ['ROUNDUP', 'ROUNDDOWN', 'ROUND', 'CEIL', 'FLOOR'];
-
-        // Keep resolving until no more function calls remain
         $maxIterations = 10;
         $iteration = 0;
 
         while ($iteration++ < $maxIterations) {
             $found = false;
-
             foreach ($functions as $fn) {
-                // Match function call with balanced parentheses
-                $pattern = '/\b' . $fn . '\s*\(([^()]*)\)/i';
-                if (preg_match($pattern, $expr)) {
-                    $expr = preg_replace_callback($pattern, function ($matches) use ($fn) {
-                        $inner = floatval($this->evaluateArithmetic($matches[1]));
-                        return (string) $this->applyFunction($fn, $inner);
-                    }, $expr);
+                $fnLower = strtolower($fn);
+                $exprLower = strtolower($expr);
+                $pos = 0;
+
+                while (($pos = strpos($exprLower, $fnLower, $pos)) !== false) {
+                    // Skip if function name is part of another word
+                    if ($pos > 0 && ctype_alpha($expr[$pos - 1])) {
+                        $pos++;
+                        continue;
+                    }
+
+                    $afterFn = $pos + strlen($fn);
+
+                    // Skip whitespace after function name
+                    while ($afterFn < strlen($expr) && $expr[$afterFn] === ' ') {
+                        $afterFn++;
+                    }
+
+                    // Must be followed by opening parenthesis
+                    if ($afterFn >= strlen($expr) || $expr[$afterFn] !== '(') {
+                        $pos++;
+                        continue;
+                    }
+
+                    // Stack-based balanced parentheses matching
+                    $depth = 0;
+                    $end = $afterFn;
+                    for ($i = $afterFn; $i < strlen($expr); $i++) {
+                        if ($expr[$i] === '(') $depth++;
+                        if ($expr[$i] === ')') $depth--;
+                        if ($depth === 0) {
+                            $end = $i;
+                            break;
+                        }
+                    }
+
+                    if ($depth !== 0) {
+                        throw new \InvalidArgumentException("Paréntesis sin cerrar en función {$fn}");
+                    }
+
+                    // Extract and evaluate inner expression
+                    $innerExpr = substr($expr, $afterFn + 1, $end - $afterFn - 1);
+                    // Resolve nested functions inside the argument before arithmetic evaluation.
+                    $resolvedInnerExpr = $this->resolveFunctions($innerExpr);
+                    $innerValue = $this->evaluateArithmetic($resolvedInnerExpr);
+                    $result = $this->applyFunction($fn, (float) $innerValue);
+
+                    // Replace function call with result
+                    $expr = substr($expr, 0, $pos) . (string) $result . substr($expr, $end + 1);
+
                     $found = true;
+                    break 2; // Break both foreach and while
                 }
             }
-
-            if (!$found) {
-                break;
-            }
+            if (!$found) break;
         }
 
         return $expr;
@@ -285,7 +333,7 @@ class PricingFormulaService
         while ($pos < count($tokens) && in_array($tokens[$pos], ['*', '/'])) {
             $op = $tokens[$pos++];
             $right = $this->parseFactor($tokens, $pos);
-            if ($op === '/' && $right == 0) {
+            if ($op === '/' && abs($right) <= 1e-10) {
                 throw new \InvalidArgumentException('División por cero en la fórmula');
             }
             $result = $op === '*' ? $result * $right : $result / $right;
