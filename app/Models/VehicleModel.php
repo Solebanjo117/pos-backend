@@ -42,6 +42,14 @@ class VehicleModel extends Model
     }
 
     /**
+     * Get VINs registered for this model.
+     */
+    public function vins(): HasMany
+    {
+        return $this->hasMany(VehicleVin::class, 'model_id');
+    }
+
+    /**
      * Get the year range as a formatted string.
      */
     public function getYearRangeAttribute(): string

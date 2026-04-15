@@ -32,7 +32,12 @@ Route::apiResource('vehicle-chassis', VehicleChassisController::class)->only(['i
 Route::apiResource('vehicle-chassis', VehicleChassisController::class)->only(['store', 'update', 'destroy'])->middleware('role:admin,manager');
 Route::get('vehicle-models/{modelId}/chassis', [VehicleChassisController::class, 'byModel']);
 
-// Vehicle VINs (nested under engines)
+// Vehicle VINs (new contract: nested under models)
+Route::get('vehicle-models/{modelId}/vins', [VehicleVinController::class, 'indexByModel']);
+Route::post('vehicle-models/{modelId}/vins', [VehicleVinController::class, 'storeByModel'])->middleware('role:admin,manager');
+Route::delete('vehicle-models/{modelId}/vins/{vinId}', [VehicleVinController::class, 'destroyByModel'])->middleware('role:admin,manager');
+
+// Vehicle VINs legacy contract (nested under engines) - temporary compatibility
 Route::get('vehicle-engines/{engineId}/vins', [VehicleVinController::class, 'index']);
 Route::post('vehicle-engines/{engineId}/vins', [VehicleVinController::class, 'store'])->middleware('role:admin,manager');
 Route::delete('vehicle-engines/{engineId}/vins/{vinId}', [VehicleVinController::class, 'destroy'])->middleware('role:admin,manager');

@@ -12,6 +12,39 @@ use Illuminate\Support\Facades\DB;
 class SalesReturnController extends Controller
 {
     /**
+     * GET /api/sales-returns
+     * List all returns with optional status filter.
+     */
+    public function listAll(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => 'nullable|in:pending,approved,rejected',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 15);
+
+        $returns = SalesReturn::with([
+            'salesOrder:id,order_number,customer_id,status,total,created_at',
+            'customer:id,name,code',
+            'user:id,name',
+            'items.product',
+        ])
+            ->when(!empty($validated['status']), fn($q) => $q->where('status', $validated['status']))
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage);
+
+        $returns->getCollection()->transform(function ($return) {
+            $mapped = $return->toArray();
+            $mapped['processed_by_name'] = $return->user ? $return->user->name : 'Sistema';
+            $mapped['processed_at'] = $return->created_at?->toISOString();
+            return $mapped;
+        });
+
+        return response()->json($returns);
+    }
+
+    /**
      * GET /api/sales-orders/{orderId}/returns
      * List all returns for a specific sales order.
      */
@@ -129,23 +162,51 @@ class SalesReturnController extends Controller
                 foreach ($validated['items'] as $returnItem) {
                     $orderItem = $order->items->firstWhere('id', $returnItem['sales_order_item_id']);
 
-                    // Calculate unit price after discount
-                    $discountPercent = (float) ($orderItem->discount_percent ?? 0);
-                    $unitAfterDiscount = round((float) $orderItem->unit_price * (1 - ($discountPercent / 100)), 2);
-                    $subtotal = round($unitAfterDiscount * (int) $returnItem['quantity'], 2);
+                    $orderedQty = max((int) $orderItem->quantity, 1);
+                    $returnQty = (int) $returnItem['quantity'];
+
+                    // Reuse stored line amounts from the original sale so refunds respect
+                    // category ITBM applicability and any tax override at sale time.
+                    $lineSubtotal = (float) ($orderItem->subtotal ?? 0);
+                    $lineTax = (float) ($orderItem->tax_amount ?? 0);
+                    $lineTotal = (float) ($orderItem->total ?? 0);
+
+                    if ($lineTotal <= 0) {
+                        $lineTotal = $lineSubtotal + $lineTax;
+                    }
+
+                    $unitAfterDiscount = $lineSubtotal > 0 ? ($lineSubtotal / $orderedQty) : 0.0;
+                    $unitTax = $lineTax > 0 ? ($lineTax / $orderedQty) : 0.0;
+                    $unitTotal = $lineTotal > 0 ? ($lineTotal / $orderedQty) : 0.0;
+
+                    // Fallback for legacy rows where line totals were not persisted consistently.
+                    if ($unitAfterDiscount <= 0 && $unitTotal <= 0) {
+                        $discountPercent = (float) ($orderItem->discount_percent ?? 0);
+                        $unitAfterDiscount = (float) $orderItem->unit_price * (1 - ($discountPercent / 100));
+                        $unitTax = $unitAfterDiscount * ((float) ($orderItem->tax_percent ?? 0) / 100);
+                        $unitTotal = $unitAfterDiscount + $unitTax;
+                    }
+
+                    $unitAfterDiscount = round($unitAfterDiscount, 2);
+                    $subtotal = round($unitAfterDiscount * $returnQty, 2);
+                    $lineTotalAmount = round($unitTotal * $returnQty, 2);
+
+                    if ($lineTotalAmount <= 0) {
+                        $lineTotalAmount = $subtotal;
+                    }
 
                     $salesReturn->items()->create([
                         'sales_order_item_id' => $orderItem->id,
                         'product_id'          => $orderItem->product_id,
                         'variant_id'          => $orderItem->variant_id,
-                        'quantity'            => $returnItem['quantity'],
+                        'quantity'            => $returnQty,
                         'unit_price'          => $unitAfterDiscount,
                         'subtotal'            => $subtotal,
                         'user_id'             => $returnItem['user_id'] ?? auth()->id(),
                         'seller_id'           => $returnItem['seller_id'] ?? $orderItem->seller_id,
                     ]);
 
-                    $totalAmount += $subtotal;
+                    $totalAmount += $lineTotalAmount;
                 }
 
                 $salesReturn->update(['total_amount' => round($totalAmount, 2)]);

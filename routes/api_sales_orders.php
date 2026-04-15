@@ -21,6 +21,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
 
     // Warehouse Queue (specific routes BEFORE dynamic {id} routes)
     Route::get('/pending-at-warehouse', [SalesOrderController::class, 'pendingAtWarehouse']);
+    Route::get('/pending-delivery', [SalesOrderController::class, 'pendingDelivery']);
 
     // CRUD endpoints (dynamic routes go AFTER specific routes)
     Route::get('/', [SalesOrderController::class, 'index']);
@@ -55,6 +56,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
 
 // Standalone return actions
 Route::middleware(['web'])->prefix('sales-returns')->group(function () {
+    Route::get('/', [SalesReturnController::class, 'listAll']);
     Route::post('/{id}/approve', [SalesReturnController::class, 'approve']);
     Route::post('/{id}/reject', [SalesReturnController::class, 'reject']);
 });

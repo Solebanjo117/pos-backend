@@ -22,6 +22,7 @@ class Category extends Model
         'priority',
         'default_margin_percent',
         'pricing_formula',
+        'min_suggested_price',
         'applies_itbm',
         'itbm_percent',
     ];
@@ -31,6 +32,7 @@ class Category extends Model
         'priority' => 'integer',
         'default_attributes' => 'array',
         'default_margin_percent' => 'float',
+        'min_suggested_price' => 'float',
         'applies_itbm' => 'boolean',
         'itbm_percent' => 'float',
     ];

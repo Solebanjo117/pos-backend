@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\PurchaseOrder;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -338,6 +339,28 @@ class PurchaseOrderController extends Controller
                 'message' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    /**
+     * GET /api/v1/purchase-orders/pending-receipt
+     * Queue of purchase orders pending reception.
+     */
+    public function pendingReceipt(Request $request): JsonResponse
+    {
+        $warehouseId = $request->header('X-Warehouse-Id')
+            ?? $request->user()?->current_warehouse_id;
+
+        $orders = PurchaseOrder::with(['supplier', 'items.product'])
+            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
+            ->whereIn('status', ['sent', 'partial'])
+            ->orderByRaw('expected_date is null, expected_date asc')
+            ->orderBy('created_at', 'asc')
+            ->get();
+
+        return response()->json([
+            'data' => $orders,
+            'count' => $orders->count(),
+        ]);
     }
 
     /**

@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\DB;
 
 class Product extends Model
 {
@@ -38,6 +39,59 @@ class Product extends Model
         'batch_tracking' => 'boolean',
         'is_universal' => 'boolean',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(function (Product $product) {
+            if (!empty($product->system_id)) {
+                return;
+            }
+
+            $product->system_id = static::generateSystemId();
+        });
+    }
+
+    /**
+     * Generate a unique 8-digit product system ID when one is not provided.
+     */
+    private static function generateSystemId(): string
+    {
+        $row = DB::table('system_sequences')
+            ->where('key', 'product_system_id')
+            ->lockForUpdate()
+            ->first();
+
+        if (!$row) {
+            $maxNumericId = DB::table('products')
+                ->whereNotNull('system_id')
+                ->pluck('system_id')
+                ->filter(fn($id) => preg_match('/^\d+$/', (string) $id))
+                ->map(fn($id) => (int) $id)
+                ->max() ?? 0;
+
+            $nextValue = $maxNumericId + 1;
+
+            DB::table('system_sequences')->insert([
+                'key' => 'product_system_id',
+                'next_value' => $nextValue + 1,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            return str_pad($nextValue, 8, '0', STR_PAD_LEFT);
+        }
+
+        $nextValue = (int) $row->next_value;
+
+        DB::table('system_sequences')
+            ->where('key', 'product_system_id')
+            ->update([
+                'next_value' => $nextValue + 1,
+                'updated_at' => now(),
+            ]);
+
+        return str_pad($nextValue, 8, '0', STR_PAD_LEFT);
+    }
 
     /**
      * Get the variants for this product.

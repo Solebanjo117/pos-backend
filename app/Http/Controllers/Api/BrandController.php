@@ -28,7 +28,8 @@ class BrandController extends Controller
         $query->orderBy($sortBy, $sortDirection);
 
         // Include product count
-        $query->withCount('productVariants');
+        $query->with('suppliers:id,name');
+        $query->withCount(['productVariants', 'suppliers']);
 
         // Paginate
         $perPage = $request->get('per_page', 15);
@@ -55,7 +56,8 @@ class BrandController extends Controller
      */
     public function show(int $id): JsonResponse
     {
-        $brand = Brand::withCount('productVariants')
+        $brand = Brand::with('suppliers:id,name')
+            ->withCount(['productVariants', 'suppliers'])
             ->findOrFail($id);
 
         return response()->json(['data' => $brand]);
@@ -73,9 +75,21 @@ class BrandController extends Controller
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
+            'supplier_ids' => 'nullable|array',
+            'supplier_ids.*' => 'integer|exists:suppliers,id',
         ]);
 
+        $hasSupplierIds = array_key_exists('supplier_ids', $validated);
+        $supplierIds = $validated['supplier_ids'] ?? [];
+        unset($validated['supplier_ids']);
+
         $brand = Brand::create($validated);
+
+        if ($hasSupplierIds) {
+            $brand->suppliers()->sync($supplierIds);
+        }
+
+        $brand->load('suppliers:id,name');
 
         return response()->json([
             'message' => 'Marca creada exitosamente',
@@ -97,13 +111,23 @@ class BrandController extends Controller
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
+            'supplier_ids' => 'nullable|array',
+            'supplier_ids.*' => 'integer|exists:suppliers,id',
         ]);
+
+        $hasSupplierIds = array_key_exists('supplier_ids', $validated);
+        $supplierIds = $validated['supplier_ids'] ?? [];
+        unset($validated['supplier_ids']);
 
         $brand->update($validated);
 
+        if ($hasSupplierIds) {
+            $brand->suppliers()->sync($supplierIds);
+        }
+
         return response()->json([
             'message' => 'Marca actualizada exitosamente',
-            'data' => $brand->fresh(),
+            'data' => $brand->fresh()->load('suppliers:id,name'),
         ]);
     }
 

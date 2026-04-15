@@ -13,6 +13,7 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     Route::get('/check-duplicate', [ProductController::class, 'checkDuplicate']);
     Route::get('/', [ProductController::class, 'index']);
     Route::post('/', [ProductController::class, 'store']);
+    Route::post('/{product}/duplicate', [ProductController::class, 'duplicate']);
     Route::get('/{product}', [ProductController::class, 'show']);
     Route::put('/{product}', [ProductController::class, 'update']);
     Route::delete('/{product}', [ProductController::class, 'destroy']);

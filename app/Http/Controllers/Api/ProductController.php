@@ -254,6 +254,19 @@ class ProductController extends Controller
     }
 
     /**
+     * Duplicate an existing product with its core relationships.
+     */
+    public function duplicate(Product $product): JsonResponse
+    {
+        $duplicatedProduct = $this->productService->duplicateProduct($product);
+
+        return response()->json([
+            'data' => new ProductResource($duplicatedProduct),
+            'message' => 'Producto duplicado. Ajusta los campos necesarios.',
+        ], 201);
+    }
+
+    /**
      * GET /api/v1/products/next-sku?category_id=X
      * Returns the next auto-generated SKU for a category.
      */

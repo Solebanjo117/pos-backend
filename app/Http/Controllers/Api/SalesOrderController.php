@@ -851,6 +851,29 @@ class SalesOrderController extends Controller
     }
 
     /**
+     * GET /api/sales-orders/pending-delivery
+     */
+    public function pendingDelivery(Request $request): JsonResponse
+    {
+        $warehouseId = $request->header('X-Warehouse-Id')
+            ?? $request->user()?->current_warehouse_id;
+
+        $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product'])
+            ->when($warehouseId, fn($q) => $q->whereHas('items', function ($iq) use ($warehouseId) {
+                $iq->where('warehouse_id', $warehouseId);
+            }))
+            ->whereNotNull('prepared_at')
+            ->where('status', 'confirmed')
+            ->orderBy('prepared_at', 'asc')
+            ->get();
+
+        return response()->json([
+            'data' => $orders,
+            'count' => $orders->count(),
+        ]);
+    }
+
+    /**
      * POST /api/sales-orders/{id}/send-to-warehouse
      */
     public function sendToWarehouse(int $id): JsonResponse

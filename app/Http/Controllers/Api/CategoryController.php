@@ -57,6 +57,7 @@ class CategoryController extends Controller
             'priority' => 'nullable|integer',
             'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
             'pricing_formula' => 'nullable|string|max:500',
+            'min_suggested_price' => 'nullable|numeric|min:0',
             'applies_itbm' => 'nullable|boolean',
             'itbm_percent' => 'nullable|numeric|min:0|max:100',
         ]);
@@ -93,6 +94,7 @@ class CategoryController extends Controller
             'priority' => 'nullable|integer',
             'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
             'pricing_formula' => 'nullable|string|max:500',
+            'min_suggested_price' => 'nullable|numeric|min:0',
             'applies_itbm' => 'nullable|boolean',
             'itbm_percent' => 'nullable|numeric|min:0|max:100',
         ]);
