@@ -37,6 +37,7 @@ class UpdateProductRequest extends FormRequest
             'attributes'     => 'sometimes|array',
             'attributes.*.name'  => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
+            'attributes.*.unit'  => 'nullable|string|max:50',
             
             // Pricing (all optional for update)
             'pricing'                           => 'sometimes|array',

@@ -14,6 +14,32 @@ use Illuminate\Database\Eloquent\Collection;
 class ProductService
 {
     /**
+     * Normalize incoming attribute payload into name/value/unit triplets.
+     */
+    private function normalizeAttributes(array $attributes): array
+    {
+        return collect($attributes)
+            ->map(function ($attribute) {
+                $name = trim((string) ($attribute['name'] ?? ''));
+                $value = trim((string) ($attribute['value'] ?? ''));
+                $unitRaw = isset($attribute['unit']) ? trim((string) $attribute['unit']) : null;
+
+                if ($name === '' || $value === '') {
+                    return null;
+                }
+
+                return [
+                    'name' => $name,
+                    'value' => $value,
+                    'unit' => $unitRaw !== '' ? $unitRaw : null,
+                ];
+            })
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    /**
      * Create a new product with default variant, pricing and optional inventory.
      * 
      * @param array $data Expected structure:
@@ -94,10 +120,18 @@ class ProductService
                         $variant->inventory()->create($inventoryData);
                     }
                 }
+            }
 
-                // Assign attributes to the default VARIANT (not product)
-                if (isset($data['attributes'])) {
-                    $this->assignVariantAttributes($variant, $data['attributes']);
+            // Assign attributes at product level, regardless of default variant presence.
+            if (isset($data['attributes']) && is_array($data['attributes'])) {
+                $normalizedAttributes = $this->normalizeAttributes($data['attributes']);
+                if (!empty($normalizedAttributes)) {
+                    $this->assignAttributes($product, $normalizedAttributes);
+
+                    // Keep default variant in sync for compatibility with legacy variant-level displays.
+                    if ($variant) {
+                        $this->assignVariantAttributes($variant, $normalizedAttributes);
+                    }
                 }
             }
 
@@ -210,7 +244,7 @@ class ProductService
 
             // Update attributes if provided
             if (isset($data['attributes'])) {
-                $this->assignAttributes($product, $data['attributes']);
+                $this->assignAttributes($product, $this->normalizeAttributes($data['attributes']));
             }
 
             DB::commit();
@@ -275,12 +309,17 @@ class ProductService
      */
     public function assignAttributes(Product $product, array $attributes): void
     {
-        // Remove existing attributes
-        $product->attributes()->delete();
+        // Remove only product-level attributes; keep variant-level overrides intact.
+        $product->attributes()->whereNull('variant_id')->delete();
         
-        // Create new attributes
+        // Create new product-level attributes.
         foreach ($attributes as $attribute) {
-            $product->attributes()->create($attribute);
+            $product->attributes()->create([
+                'name' => $attribute['name'],
+                'value' => $attribute['value'],
+                'unit' => $attribute['unit'] ?? null,
+                'variant_id' => null,
+            ]);
         }
     }
 

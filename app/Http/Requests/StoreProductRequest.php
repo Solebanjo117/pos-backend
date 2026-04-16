@@ -33,6 +33,7 @@ class StoreProductRequest extends FormRequest
             'attributes'     => 'nullable|array',
             'attributes.*.name'  => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
+            'attributes.*.unit' => 'nullable|string|max:50',
 
             // Default Variant (opcional) — SKU and UPC are no longer unique keys
             'sku'      => 'nullable|string|max:50',

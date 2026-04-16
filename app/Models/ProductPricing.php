@@ -41,9 +41,12 @@ class ProductPricing extends Model
 
         try {
             $service = app(\App\Services\PricingFormulaService::class);
+            // Evaluate formulas against cost (`costo`), not persisted base_price.
+            // base_price may already be the computed output, and reusing it here doubles the formula.
+            $formulaCost = $this->cost !== null ? (float) $this->cost : (float) $this->base_price;
             $result = $service->preview(
                 $this->pricing_formula, 
-                (float) $this->base_price, 
+                $formulaCost,
                 (float) $this->tax_rate
             );
             return $result['success'] ? (float) $result['result'] : (float) $this->base_price;

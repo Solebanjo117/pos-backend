@@ -30,9 +30,9 @@ class ProductController extends Controller
         // Archive filter: 'true' = only trashed, 'all' = withTrashed, default = active only
         $archived = $request->get('archived', 'false');
         if ($archived === 'true') {
-            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'engine']);
+            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
         } elseif ($archived === 'all') {
-            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'engine']);
+            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
         } else {
             $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
         }
