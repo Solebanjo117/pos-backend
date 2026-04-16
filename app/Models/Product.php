@@ -239,6 +239,17 @@ class Product extends Model
     }
 
     /**
+     * Get the compatible vehicle chassis.
+     */
+    public function compatibleChassis(): BelongsToMany
+    {
+        return $this->belongsToMany(VehicleChassis::class, 'product_vehicle_compatibility', 'product_id', 'chassis_id')
+            ->with('model.make')
+            ->withPivot('notes')
+            ->withTimestamps();
+    }
+
+    /**
      * Get products where this is listed as an alternative.
      */
     public function primaryProducts(): BelongsToMany
@@ -303,6 +314,8 @@ class Product extends Model
                                       ->orWhere('name', 'ilike', $wordBoundary)
                                       ->orWhere('sku_base', 'ilike', $prefix)
                                       ->orWhere('sku_base', 'ilike', $wordBoundary)
+                                       ->orWhere('system_id', 'ilike', $prefix)
+                                       ->orWhere('system_id', 'ilike', $wordBoundary)
                                       ->orWhere('alternate_code', 'ilike', $prefix)
                                       ->orWhere('alternate_code', 'ilike', $wordBoundary)
                                       ->orWhereHas('variants', function ($vq) use ($word, $prefix, $wordBoundary) {
@@ -310,8 +323,11 @@ class Product extends Model
                                              ->orWhere('sku', 'ilike', $wordBoundary)
                                              ->orWhere('upc', 'ilike', $prefix)
                                              ->orWhere('upc', 'ilike', $wordBoundary)
+                                           ->orWhere('system_id', 'ilike', $prefix)
+                                           ->orWhere('system_id', 'ilike', $wordBoundary)
                                              ->orWhere('sku', $word)
-                                             ->orWhere('upc', $word);
+                                           ->orWhere('upc', $word)
+                                           ->orWhere('system_id', $word);
                                       })
                                       ->orWhereHas('oemReferences', function ($oq) use ($word, $prefix, $wordBoundary) {
                                           $oq->where('oem_code', $word)
@@ -319,13 +335,16 @@ class Product extends Model
                                              ->orWhere('oem_code', 'ilike', $wordBoundary);
                                       })
                                       ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary) {
-                                          $aq->where('value', $word)
-                                             ->orWhere('value', 'ilike', $prefix)
-                                             ->orWhere('value', 'ilike', $wordBoundary)
-                                             ->orWhere('name', 'ilike', $prefix)
-                                             ->orWhere('name', 'ilike', $wordBoundary)
-                                             ->orWhere('unit', 'ilike', $prefix)
-                                             ->orWhere('unit', 'ilike', $wordBoundary);
+                                          $aq->whereNull('variant_id')
+                                             ->where(function ($aqq) use ($word, $prefix, $wordBoundary) {
+                                                 $aqq->where('value', $word)
+                                                     ->orWhere('value', 'ilike', $prefix)
+                                                     ->orWhere('value', 'ilike', $wordBoundary)
+                                                     ->orWhere('name', 'ilike', $prefix)
+                                                     ->orWhere('name', 'ilike', $wordBoundary)
+                                                     ->orWhere('unit', 'ilike', $prefix)
+                                                     ->orWhere('unit', 'ilike', $wordBoundary);
+                                             });
                                       })
                                       ->orWhereHas('category', function ($cq) use ($prefix, $wordBoundary) {
                                           $cq->where('name', 'ilike', $prefix)
@@ -348,18 +367,23 @@ class Product extends Model
                                 $w = '%' . $word . '%';
                                 $productInfo->where('name', 'ilike', $w)
                                       ->orWhere('sku_base', 'ilike', $w)
+                                       ->orWhere('system_id', 'ilike', $w)
                                       ->orWhere('alternate_code', 'ilike', $w)
                                       ->orWhereHas('variants', function ($vq) use ($w) {
                                           $vq->where('sku', 'ilike', $w)
-                                             ->orWhere('upc', 'ilike', $w);
+                                           ->orWhere('upc', 'ilike', $w)
+                                           ->orWhere('system_id', 'ilike', $w);
                                       })
                                       ->orWhereHas('oemReferences', function ($oq) use ($w) {
                                           $oq->where('oem_code', 'ilike', $w);
                                       })
                                       ->orWhereHas('attributes', function ($aq) use ($w) {
-                                          $aq->where('value', 'ilike', $w)
-                                             ->orWhere('name', 'ilike', $w)
-                                             ->orWhere('unit', 'ilike', $w);
+                                          $aq->whereNull('variant_id')
+                                             ->where(function ($aqq) use ($w) {
+                                                 $aqq->where('value', 'ilike', $w)
+                                                     ->orWhere('name', 'ilike', $w)
+                                                     ->orWhere('unit', 'ilike', $w);
+                                             });
                                       })
                                       ->orWhereHas('category', function ($cq) use ($w) {
                                           $cq->where('name', 'ilike', $w);
@@ -379,7 +403,8 @@ class Product extends Model
                                 $nameLike = '%' . $attrName . '%';
                                 $valueLike = '%' . $attrValue . '%';
                                 $productInfo->orWhereHas('attributes', function ($aq) use ($nameLike, $valueLike, $attrNumeric, $attrUnit) {
-                                    $aq->where('name', 'ilike', $nameLike)
+                                    $aq->whereNull('variant_id')
+                                       ->where('name', 'ilike', $nameLike)
                                        ->where(function ($v) use ($valueLike, $attrNumeric, $attrUnit) {
                                            $v->where('value', 'ilike', $valueLike);
                                            if ($attrNumeric && $attrUnit) {
@@ -409,14 +434,15 @@ class Product extends Model
                                 $unitLike = '%' . $attrUnit . '%';
 
                                 $productInfo->orWhereHas('attributes', function ($aq) use ($numLike, $numUnitLike, $numSpaceUnitLike, $unitLike) {
-                                    $aq->where(function ($v) use ($numLike, $numUnitLike, $numSpaceUnitLike) {
-                                        $v->where('value', 'ilike', $numUnitLike)
-                                          ->orWhere('value', 'ilike', $numSpaceUnitLike)
-                                          ->orWhere('value', 'ilike', $numLike);
-                                    })->where(function ($u) use ($unitLike) {
-                                        $u->where('unit', 'ilike', $unitLike)
-                                          ->orWhere('value', 'ilike', $unitLike);
-                                    });
+                                    $aq->whereNull('variant_id')
+                                       ->where(function ($v) use ($numLike, $numUnitLike, $numSpaceUnitLike) {
+                                           $v->where('value', 'ilike', $numUnitLike)
+                                             ->orWhere('value', 'ilike', $numSpaceUnitLike)
+                                             ->orWhere('value', 'ilike', $numLike);
+                                       })->where(function ($u) use ($unitLike) {
+                                           $u->where('unit', 'ilike', $unitLike)
+                                             ->orWhere('value', 'ilike', $unitLike);
+                                       });
                                 });
                             }
                         });
@@ -425,6 +451,18 @@ class Product extends Model
                         $w = '%' . $word . '%';
                         $wordMatchQuery->orWhereHas('compatibleEngines', function ($eq) use ($w) {
                             $eq->where('engine_code', 'ilike', $w)
+                               ->orWhereHas('model', function ($mq) use ($w) {
+                                   $mq->where('name', 'ilike', $w)
+                                      ->orWhereHas('make', function ($mkq) use ($w) {
+                                          $mkq->where('name', 'ilike', $w);
+                                      });
+                               });
+                        });
+
+                        // 2b. OR Matches Chassis Info
+                        $wordMatchQuery->orWhereHas('compatibleChassis', function ($cq) use ($w) {
+                            $cq->where('code', 'ilike', $w)
+                               ->orWhere('name', 'ilike', $w)
                                ->orWhereHas('model', function ($mq) use ($w) {
                                    $mq->where('name', 'ilike', $w)
                                       ->orWhereHas('make', function ($mkq) use ($w) {

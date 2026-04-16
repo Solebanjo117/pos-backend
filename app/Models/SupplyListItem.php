@@ -13,6 +13,7 @@ class SupplyListItem extends Model
         'supplier_id',
         'added_by',
         'quantity_needed',
+        'stock_added_qty',
         'unit_cost',
         'tax_rate',
         'sale_price',
@@ -21,6 +22,7 @@ class SupplyListItem extends Model
 
     protected $casts = [
         'quantity_needed' => 'decimal:2',
+        'stock_added_qty' => 'integer',
         'unit_cost'       => 'decimal:2',
         'tax_rate'        => 'decimal:2',
         'sale_price'      => 'decimal:2',

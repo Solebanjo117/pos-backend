@@ -108,6 +108,12 @@ class ProductController extends Controller
             ? $request->get('search')
             : ($request->filled('sku') ? $request->get('sku') : null);
 
+        $normalizedSearchTokens = collect();
+        if (!empty($searchTerm)) {
+            $normalizedSearchTokens = collect(preg_split('/\s+/', mb_strtolower(trim((string) $searchTerm))))
+                ->filter(fn($token) => $token !== '');
+        }
+
         if (!empty($searchTerm)) {
             $query->search($searchTerm);
         }
@@ -126,40 +132,63 @@ class ProductController extends Controller
             if (str_contains($attrValue, ':')) {
                 [$name, $value] = explode(':', $attrValue, 2);
                 $query->whereHas('attributes', function ($q) use ($name, $value) {
-                    $q->where('name', $name)->where('value', $value);
+                    $q->whereNull('variant_id')
+                      ->where('name', $name)
+                      ->where('value', $value);
                 });
             } else {
                 $query->whereHas('attributes', function ($q) use ($attrValue) {
-                    $q->where('value', $attrValue);
+                    $q->whereNull('variant_id')
+                      ->where('value', $attrValue);
                 });
             }
         }
 
         // Vehicle Context Filter
-        if ($request->has('vehicle_engine_id')) {
-            $engineId = $request->get('vehicle_engine_id');
+        $engineId = $request->has('vehicle_engine_id') ? (int) $request->get('vehicle_engine_id') : null;
+        $chassisId = $request->has('vehicle_chassis_id') ? (int) $request->get('vehicle_chassis_id') : null;
 
-            // 1. Mark Exact Matches
-            $query->withExists(['compatibleEngines as is_exact_fit' => function ($q) use ($engineId) {
-                $q->where('vehicle_engines.id', $engineId);
-            }]);
+        if ($engineId || $chassisId) {
+            // Mark exact fit by context (engine and/or chassis).
+            if ($engineId) {
+                $query->withExists(['compatibleEngines as is_exact_fit_engine' => function ($q) use ($engineId) {
+                    $q->where('vehicle_engines.id', $engineId);
+                }]);
+            }
 
-            // 2. Mark if product has ANY fitment constraints (to distinguish Universal)
-            $query->withExists('compatibleEngines as has_any_compatibility');
+            if ($chassisId) {
+                $query->withExists(['compatibleChassis as is_exact_fit_chassis' => function ($q) use ($chassisId) {
+                    $q->where('vehicle_chassis.id', $chassisId);
+                }]);
+            }
 
-            // 3. Strict Filter (Default: True)
-            // If strict_fitment is 'false' (string) or 0, we skip this.
-            // But default to strict to be safe in POS.
+            // Mark if product has ANY explicit fitment constraints (engine and/or chassis).
+            $query->withExists('vehicleCompatibility as has_any_compatibility');
+
+            // Strict filter (default true): exact fit OR universal.
             $strictFitment = $request->boolean('strict_fitment', true);
-
             if ($strictFitment) {
-                $query->where(function ($q) use ($engineId) {
-                     // Is Exact Fit
-                     $q->whereHas('compatibleEngines', function ($sub) use ($engineId) {
-                         $sub->where('vehicle_engines.id', $engineId);
-                     })
-                     // OR Is Universal (Has NO specific engines assigned)
-                     ->orWhereDoesntHave('compatibleEngines');
+                $query->where(function ($q) use ($engineId, $chassisId) {
+                    if ($engineId) {
+                        $q->whereHas('compatibleEngines', function ($sub) use ($engineId) {
+                            $sub->where('vehicle_engines.id', $engineId);
+                        });
+                    }
+
+                    if ($chassisId) {
+                        if ($engineId) {
+                            $q->orWhereHas('compatibleChassis', function ($sub) use ($chassisId) {
+                                $sub->where('vehicle_chassis.id', $chassisId);
+                            });
+                        } else {
+                            $q->whereHas('compatibleChassis', function ($sub) use ($chassisId) {
+                                $sub->where('vehicle_chassis.id', $chassisId);
+                            });
+                        }
+                    }
+
+                    // Universal product: no explicit compatibility records.
+                    $q->orWhereDoesntHave('vehicleCompatibility');
                 });
             }
         }
@@ -189,17 +218,48 @@ class ProductController extends Controller
         $products = $query->paginate($perPage);
 
         // Append fitment_status to resources
-        $products->getCollection()->transform(function ($product) {
-            // Check if we have context attributes
-            if (isset($product->is_exact_fit)) {
-                if ($product->is_exact_fit) {
+        $products->getCollection()->transform(function ($product) use ($normalizedSearchTokens) {
+            $hasExactFitContext = isset($product->is_exact_fit)
+                || isset($product->is_exact_fit_engine)
+                || isset($product->is_exact_fit_chassis);
+
+            if ($hasExactFitContext) {
+                $isExactFit = (bool) ($product->is_exact_fit ?? false)
+                    || (bool) ($product->is_exact_fit_engine ?? false)
+                    || (bool) ($product->is_exact_fit_chassis ?? false);
+
+                if ($isExactFit) {
                     $product->fitment_status = 'exact';
-                } elseif (!$product->has_any_compatibility) {
+                } elseif (!($product->has_any_compatibility ?? false)) {
                     $product->fitment_status = 'universal';
                 } else {
                     $product->fitment_status = 'incompatible'; // Should be filtered out by strict query above
                 }
             }
+
+            if ($normalizedSearchTokens->isNotEmpty()) {
+                $product->search_match_type = null;
+                $product->search_match_system_id = null;
+                $product->search_match_variant_id = null;
+
+                $productSystemId = mb_strtolower((string) ($product->system_id ?? ''));
+                if ($productSystemId !== '' && $normalizedSearchTokens->contains($productSystemId)) {
+                    $product->search_match_type = 'product';
+                    $product->search_match_system_id = $product->system_id;
+                } else {
+                    $matchedVariant = collect($product->variants ?? [])->first(function ($variant) use ($normalizedSearchTokens) {
+                        $variantSystemId = mb_strtolower((string) ($variant->system_id ?? ''));
+                        return $variantSystemId !== '' && $normalizedSearchTokens->contains($variantSystemId);
+                    });
+
+                    if ($matchedVariant) {
+                        $product->search_match_type = 'variant';
+                        $product->search_match_system_id = $matchedVariant->system_id;
+                        $product->search_match_variant_id = $matchedVariant->id;
+                    }
+                }
+            }
+
             return $product;
         });
 

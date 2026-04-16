@@ -158,11 +158,25 @@ class PurchaseOrderService
 
             // Replace items if provided
             if (isset($data['items'])) {
+                $existingItems = $po->items()
+                    ->get(['product_id', 'variant_id', 'pre_stock_applied_qty'])
+                    ->keyBy(function ($item) {
+                        return ($item->variant_id ?? 'nv') . '|' . $item->product_id;
+                    });
+
                 $po->items()->delete();
                 foreach ($data['items'] as $itemData) {
+                    $variantId = $itemData['variant_id'] ?? null;
+                    $productId = $itemData['product_id'];
+                    $itemKey = ($variantId ?? 'nv') . '|' . $productId;
+                    $existingPreApplied = (int) ($existingItems[$itemKey]->pre_stock_applied_qty ?? 0);
+                    $orderedQty = (int) ($itemData['quantity_ordered'] ?? 0);
+
                     $po->items()->create([
-                        'product_id' => $itemData['product_id'],
-                        'quantity_ordered' => $itemData['quantity_ordered'],
+                        'product_id' => $productId,
+                        'variant_id' => $variantId,
+                        'quantity_ordered' => $orderedQty,
+                        'pre_stock_applied_qty' => min($existingPreApplied, max(0, $orderedQty)),
                         'unit_cost' => $itemData['unit_cost'],
                         'notes' => $itemData['notes'] ?? null,
                     ]);
@@ -224,7 +238,8 @@ class PurchaseOrderService
                 $item = PurchaseOrderItem::findOrFail($received['item_id']);
 
                 // Validate not receiving more than ordered
-                $maxReceivable = $item->quantity_ordered - $item->quantity_received;
+                $preAppliedQty = max(0, (int) ($item->pre_stock_applied_qty ?? 0));
+                $maxReceivable = max(0, ((int) $item->quantity_ordered - $preAppliedQty) - (int) $item->quantity_received);
                 $qtyToReceive = min($received['quantity_received'], $maxReceivable);
 
                 if ($qtyToReceive <= 0) {

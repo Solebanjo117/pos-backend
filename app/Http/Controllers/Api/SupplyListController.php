@@ -6,6 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Models\SupplyListItem;
 use App\Models\PurchaseOrder;
 use App\Models\ProductVariant;
+use App\Models\ProductInventory;
+use App\Models\InventoryMovement;
 use App\Services\SmartReorderService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -48,22 +50,98 @@ class SupplyListController extends Controller
             'notes'           => 'nullable|string|max:500',
         ]);
 
-        $item = SupplyListItem::create([
-            'product_id'      => $validated['product_id'],
-            'variant_id'      => $validated['variant_id'] ?? null,
-            'supplier_id'     => $validated['supplier_id'] ?? null,
-            'added_by'        => Auth::id(),
-            'quantity_needed' => $validated['quantity_needed'] ?? 1,
-            'unit_cost'       => $validated['unit_cost'] ?? 0,
-            'tax_rate'        => $validated['tax_rate'] ?? 7.00,
-            'sale_price'      => $validated['sale_price'] ?? 0,
-            'notes'           => $validated['notes'] ?? null,
-        ]);
+        $warehouseId = (int) ($request->input('warehouse_id') ?? 0);
+        if ($warehouseId <= 0) {
+            return response()->json([
+                'message' => 'Se requiere contexto de almacén para abastecer stock.',
+            ], 422);
+        }
+
+        $stockToAdd = (int) ceil((float) ($validated['quantity_needed'] ?? 1));
+
+        $item = DB::transaction(function () use ($validated, $warehouseId, $stockToAdd) {
+            $variantId = $validated['variant_id'] ?? null;
+            $productId = (int) $validated['product_id'];
+
+            if ($variantId) {
+                $variant = ProductVariant::query()
+                    ->select(['id', 'product_id'])
+                    ->find($variantId);
+                if ($variant) {
+                    $productId = (int) $variant->product_id;
+                }
+            }
+
+            $item = SupplyListItem::create([
+                'product_id'      => $productId,
+                'variant_id'      => $variantId,
+                'supplier_id'     => $validated['supplier_id'] ?? null,
+                'added_by'        => Auth::id(),
+                'quantity_needed' => $validated['quantity_needed'] ?? 1,
+                'stock_added_qty' => $stockToAdd,
+                'unit_cost'       => $validated['unit_cost'] ?? 0,
+                'tax_rate'        => $validated['tax_rate'] ?? 7.00,
+                'sale_price'      => $validated['sale_price'] ?? 0,
+                'notes'           => $validated['notes'] ?? null,
+            ]);
+
+            if ($variantId) {
+                $inventory = ProductInventory::firstOrCreate(
+                    [
+                        'variant_id' => $variantId,
+                        'warehouse_id' => $warehouseId,
+                    ],
+                    [
+                        'product_id' => $productId,
+                        'quantity_available' => 0,
+                        'quantity_reserved' => 0,
+                        'reorder_point' => 10,
+                        'reorder_quantity' => 50,
+                    ]
+                );
+            } else {
+                $inventory = ProductInventory::firstOrCreate(
+                    [
+                        'product_id' => $productId,
+                        'variant_id' => null,
+                        'warehouse_id' => $warehouseId,
+                    ],
+                    [
+                        'quantity_available' => 0,
+                        'quantity_reserved' => 0,
+                        'reorder_point' => 10,
+                        'reorder_quantity' => 50,
+                    ]
+                );
+            }
+
+            $inventory->quantity_available += $stockToAdd;
+            $inventory->last_restocked_at = now();
+            $inventory->save();
+
+            InventoryMovement::create([
+                'movement_type' => 'in',
+                'reason' => 'Ingreso desde lista de abastecimiento',
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'warehouse_id' => $warehouseId,
+                'quantity' => $stockToAdd,
+                'reference_type' => 'supply_list',
+                'reference_id' => $item->id,
+                'notes' => 'Stock agregado al crear item en lista de abastecimiento',
+                'user_id' => Auth::id(),
+                'supplier_id' => $validated['supplier_id'] ?? null,
+            ]);
+
+            return $item;
+        });
 
         $item->load(['product:id,name,sku_base', 'variant:id,sku', 'supplier:id,name', 'addedBy:id,name']);
 
         return response()->json([
-            'message' => 'Ítem agregado a la lista de abastecimiento',
+            'message' => 'Ítem agregado a la lista de abastecimiento y stock actualizado',
+            'stock_added' => $stockToAdd,
+            'warehouse_id' => $warehouseId,
             'data'    => $item,
         ], 201);
     }
@@ -164,10 +242,14 @@ class SupplyListController extends Controller
                 ]);
 
                 foreach ($groupItems as $si) {
+                    $orderedQty = (int) ceil($si->quantity_needed);
+                    $preAppliedQty = min($orderedQty, max(0, (int) ($si->stock_added_qty ?? 0)));
+
                     $po->items()->create([
                         'product_id'       => $si->product_id,
                         'variant_id'       => $si->variant_id,
-                        'quantity_ordered' => (int) ceil($si->quantity_needed),
+                        'quantity_ordered' => $orderedQty,
+                        'pre_stock_applied_qty' => $preAppliedQty,
                         'unit_cost'        => $si->unit_cost ?? 0,
                         'notes'            => $si->notes,
                     ]);

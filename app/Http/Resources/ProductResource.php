@@ -19,6 +19,9 @@ class ProductResource extends JsonResource
         return [
             'id' => $this->id,
             'system_id' => $this->system_id,
+            'search_match_type' => $this->search_match_type ?? null,
+            'search_match_system_id' => $this->search_match_system_id ?? null,
+            'search_match_variant_id' => $this->search_match_variant_id ?? null,
             'sku_base' => $this->sku_base,
             'alternate_code' => $this->alternate_code,
             'pricing_formula'=> $this->pricing_formula,

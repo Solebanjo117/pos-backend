@@ -18,6 +18,7 @@ class PurchaseOrderItem extends Model
         'quantity_ordered',
         'units_per_package',
         'quantity_received',
+        'pre_stock_applied_qty',
         'unit_cost',
         'subtotal',
         'status',
@@ -31,11 +32,20 @@ class PurchaseOrderItem extends Model
         'quantity_ordered'  => 'integer',
         'units_per_package' => 'integer',
         'quantity_received' => 'integer',
+        'pre_stock_applied_qty' => 'integer',
         'unit_cost'         => 'decimal:2',
         'subtotal'          => 'decimal:2',
     ];
 
-    protected $appends = ['pending_quantity', 'is_fully_received', 'status_label', 'total_units_ordered', 'total_units_received'];
+    protected $appends = [
+        'pending_quantity',
+        'is_fully_received',
+        'status_label',
+        'total_units_ordered',
+        'total_units_received',
+        'effective_received_quantity',
+        'pre_applied_quantity',
+    ];
 
     // ==================== RELATIONSHIPS ====================
 
@@ -66,21 +76,38 @@ class PurchaseOrderItem extends Model
 
     public function getPendingQuantityAttribute(): int
     {
-        return max(0, $this->quantity_ordered - $this->quantity_received);
+        return max(0, (int) $this->quantity_ordered - (int) $this->effective_received_quantity);
     }
 
     public function getIsFullyReceivedAttribute(): bool
     {
-        return $this->quantity_received >= $this->quantity_ordered;
+        return $this->pending_quantity === 0;
+    }
+
+    public function getEffectiveReceivedQuantityAttribute(): int
+    {
+        $preApplied = max(0, (int) ($this->pre_stock_applied_qty ?? 0));
+        $manualReceived = max(0, (int) $this->quantity_received);
+
+        return min((int) $this->quantity_ordered, $manualReceived + $preApplied);
+    }
+
+    public function getPreAppliedQuantityAttribute(): int
+    {
+        return max(0, (int) ($this->pre_stock_applied_qty ?? 0));
     }
 
     public function getStatusLabelAttribute(): string
     {
-        return match($this->status ?? 'pending') {
-            'received' => 'Recibido',
-            'partial'  => 'Parcial',
-            default    => 'Pendiente',
-        };
+        if ($this->is_fully_received) {
+            return 'Recibido';
+        }
+
+        if ($this->quantity_received > 0) {
+            return 'Parcial';
+        }
+
+        return 'Pendiente';
     }
 
     public function getTotalUnitsOrderedAttribute(): int
@@ -90,7 +117,7 @@ class PurchaseOrderItem extends Model
 
     public function getTotalUnitsReceivedAttribute(): int
     {
-        return $this->quantity_received * ($this->units_per_package ?? 1);
+        return $this->effective_received_quantity * ($this->units_per_package ?? 1);
     }
 
     /**

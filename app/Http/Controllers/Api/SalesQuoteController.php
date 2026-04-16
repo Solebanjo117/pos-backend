@@ -220,6 +220,13 @@ class SalesQuoteController extends Controller
             unset($item);
         }
 
+        if (!empty($validated['items'])) {
+            $this->validateStockForQuoteItems(
+                $validated['items'],
+                $validated['warehouse_id'] ?? $quote->warehouse_id
+            );
+        }
+
         try {
             DB::transaction(function () use ($quote, $validated) {
                 $quote->update(collect($validated)->only(['customer_id', 'warehouse_id', 'valid_until', 'notes', 'internal_notes', 'status'])->toArray());
