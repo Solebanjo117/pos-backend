@@ -303,6 +303,8 @@ class Product extends Model
                                       ->orWhere('name', 'ilike', $wordBoundary)
                                       ->orWhere('sku_base', 'ilike', $prefix)
                                       ->orWhere('sku_base', 'ilike', $wordBoundary)
+                                      ->orWhere('alternate_code', 'ilike', $prefix)
+                                      ->orWhere('alternate_code', 'ilike', $wordBoundary)
                                       ->orWhereHas('variants', function ($vq) use ($word, $prefix, $wordBoundary) {
                                           $vq->where('sku', 'ilike', $prefix)
                                              ->orWhere('sku', 'ilike', $wordBoundary)
@@ -324,11 +326,29 @@ class Product extends Model
                                              ->orWhere('name', 'ilike', $wordBoundary)
                                              ->orWhere('unit', 'ilike', $prefix)
                                              ->orWhere('unit', 'ilike', $wordBoundary);
+                                      })
+                                      ->orWhereHas('category', function ($cq) use ($prefix, $wordBoundary) {
+                                          $cq->where('name', 'ilike', $prefix)
+                                             ->orWhere('name', 'ilike', $wordBoundary);
+                                      })
+                                      ->orWhereHas('productLine', function ($lq) use ($prefix, $wordBoundary) {
+                                          $lq->where('name', 'ilike', $prefix)
+                                             ->orWhere('name', 'ilike', $wordBoundary);
+                                      })
+                                      ->orWhereHas('variants.brand', function ($bq) use ($prefix, $wordBoundary) {
+                                          $bq->where('name', 'ilike', $prefix)
+                                             ->orWhere('name', 'ilike', $wordBoundary);
+                                      })
+                                      ->orWhereHas('vins', function ($vinQ) use ($word, $prefix, $wordBoundary) {
+                                          $vinQ->where('vin', $word)
+                                               ->orWhere('vin', 'ilike', $prefix)
+                                               ->orWhere('vin', 'ilike', $wordBoundary);
                                       });
                             } else {
                                 $w = '%' . $word . '%';
                                 $productInfo->where('name', 'ilike', $w)
                                       ->orWhere('sku_base', 'ilike', $w)
+                                      ->orWhere('alternate_code', 'ilike', $w)
                                       ->orWhereHas('variants', function ($vq) use ($w) {
                                           $vq->where('sku', 'ilike', $w)
                                              ->orWhere('upc', 'ilike', $w);
@@ -340,6 +360,18 @@ class Product extends Model
                                           $aq->where('value', 'ilike', $w)
                                              ->orWhere('name', 'ilike', $w)
                                              ->orWhere('unit', 'ilike', $w);
+                                      })
+                                      ->orWhereHas('category', function ($cq) use ($w) {
+                                          $cq->where('name', 'ilike', $w);
+                                      })
+                                      ->orWhereHas('productLine', function ($lq) use ($w) {
+                                          $lq->where('name', 'ilike', $w);
+                                      })
+                                      ->orWhereHas('variants.brand', function ($bq) use ($w) {
+                                          $bq->where('name', 'ilike', $w);
+                                      })
+                                      ->orWhereHas('vins', function ($vinQ) use ($w) {
+                                          $vinQ->where('vin', 'ilike', $w);
                                       });
                             }
 

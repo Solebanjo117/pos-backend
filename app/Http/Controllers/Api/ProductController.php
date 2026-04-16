@@ -104,8 +104,12 @@ class ProductController extends Controller
             });
         }
 
-        if ($request->has('search')) {
-            $query->search($request->get('search'));
+        $searchTerm = $request->filled('search')
+            ? $request->get('search')
+            : ($request->filled('sku') ? $request->get('sku') : null);
+
+        if (!empty($searchTerm)) {
+            $query->search($searchTerm);
         }
 
         // OEM Code Filter
