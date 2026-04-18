@@ -74,6 +74,8 @@ class SalesQuoteController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        $this->normalizeTaxPercentPayload($request);
+
         $validated = $request->validate([
             'customer_id'              => 'nullable|exists:customers,id',
             'warehouse_id'             => 'nullable|exists:warehouses,id',
@@ -88,7 +90,7 @@ class SalesQuoteController extends Controller
             'items.*.quantity'         => 'required|integer|min:1',
             'items.*.unit_price'       => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
-            'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+            'items.*.tax_percent'      => 'nullable|integer|min:0|max:100',
             'items.*.is_custom_line'   => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
@@ -173,6 +175,8 @@ class SalesQuoteController extends Controller
             return response()->json(['message' => 'Solo se pueden editar cotizaciones en borrador o enviadas.'], 422);
         }
 
+        $this->normalizeTaxPercentPayload($request);
+
         $validated = $request->validate([
             'customer_id'              => 'nullable|exists:customers,id',
             'warehouse_id'             => 'nullable|exists:warehouses,id',
@@ -187,7 +191,7 @@ class SalesQuoteController extends Controller
             'items.*.quantity'         => 'required|integer|min:1',
             'items.*.unit_price'       => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
-            'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+            'items.*.tax_percent'      => 'nullable|integer|min:0|max:100',
             'items.*.is_custom_line'   => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
@@ -267,6 +271,8 @@ class SalesQuoteController extends Controller
      */
     public function storeFromPos(Request $request): JsonResponse
     {
+        $this->normalizeTaxPercentPayload($request);
+
         $validated = $request->validate([
             'customer_id'              => 'nullable|exists:customers,id',
             'warehouse_id'             => 'nullable|exists:warehouses,id',
@@ -279,7 +285,7 @@ class SalesQuoteController extends Controller
             'items.*.quantity'         => 'required|integer|min:1',
             'items.*.unit_price'       => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
-            'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+            'items.*.tax_percent'      => 'nullable|integer|min:0|max:100',
             'items.*.is_custom_line'   => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
@@ -677,6 +683,30 @@ class SalesQuoteController extends Controller
         if (!empty($insufficient)) {
             throw new \Exception('Stock insuficiente para la cotización: ' . implode('; ', $insufficient));
         }
+    }
+
+    private function normalizeTaxPercentPayload(Request $request): void
+    {
+        if ($request->has('tax_percent') && is_numeric($request->input('tax_percent'))) {
+            $request->merge([
+                'tax_percent' => (int) round((float) $request->input('tax_percent')),
+            ]);
+        }
+
+        $items = $request->input('items');
+        if (!is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $index => $item) {
+            if (!is_array($item) || !array_key_exists('tax_percent', $item) || !is_numeric($item['tax_percent'])) {
+                continue;
+            }
+
+            $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+        }
+
+        $request->merge(['items' => $items]);
     }
 
     /**

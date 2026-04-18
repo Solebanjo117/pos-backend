@@ -99,4 +99,9 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     // Activity Logs: admin only
     // ---------------------------------------------------------------
     require __DIR__ . '/api_activity_logs.php';
+
+    // ---------------------------------------------------------------
+    // Changelog: authenticated users
+    // ---------------------------------------------------------------
+    require __DIR__ . '/api_changelog.php';
 });

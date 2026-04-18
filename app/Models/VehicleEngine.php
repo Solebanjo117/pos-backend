@@ -33,11 +33,28 @@ class VehicleEngine extends Model
     }
 
     /**
+     * Get all associated models for this engine.
+     */
+    public function models(): BelongsToMany
+    {
+        return $this->belongsToMany(VehicleModel::class, 'vehicle_engine_model', 'engine_id', 'model_id')
+            ->withTimestamps();
+    }
+
+    /**
      * Get the product compatibility records.
      */
     public function compatibility(): HasMany
     {
         return $this->hasMany(ProductVehicleCompatibility::class, 'engine_id');
+    }
+
+    /**
+     * Get VINs registered for this engine.
+     */
+    public function vins(): HasMany
+    {
+        return $this->hasMany(VehicleVin::class, 'engine_id');
     }
 
     /**

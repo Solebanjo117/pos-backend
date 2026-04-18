@@ -37,6 +37,8 @@ class StoreSettingController extends Controller
      */
     public function update(Request $request): JsonResponse
     {
+        $this->normalizeIntegerPercentField($request, 'store_tax_rate');
+
         $allowed = [
             'store_name', 'store_tagline', 'store_owner_name',
             'store_phone', 'store_email', 'store_address',
@@ -113,10 +115,12 @@ class StoreSettingController extends Controller
      */
     public function previewFormula(Request $request): JsonResponse
     {
+        $this->normalizeIntegerPercentField($request, 'tax_rate');
+
         $request->validate([
             'formula'  => 'required|string|max:255',
             'cost'     => 'required|numeric|min:0',
-            'tax_rate' => 'nullable|numeric|min:0|max:100',
+            'tax_rate' => 'nullable|integer|min:0|max:100',
         ]);
 
         $result = $this->formulaService->preview(
@@ -137,5 +141,17 @@ class StoreSettingController extends Controller
         return response()->json([
             'data' => PricingFormulaService::presets(),
         ]);
+    }
+
+    private function normalizeIntegerPercentField(Request $request, string $field): void
+    {
+        if (!$request->has($field)) {
+            return;
+        }
+
+        $value = $request->input($field);
+        if (is_numeric($value)) {
+            $request->merge([$field => (int) round((float) $value)]);
+        }
     }
 }

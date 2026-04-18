@@ -24,7 +24,7 @@ class SupplyListItem extends Model
         'quantity_needed' => 'decimal:2',
         'stock_added_qty' => 'integer',
         'unit_cost'       => 'decimal:2',
-        'tax_rate'        => 'decimal:2',
+        'tax_rate'        => 'integer',
         'sale_price'      => 'decimal:2',
     ];
 
@@ -67,5 +67,17 @@ class SupplyListItem extends Model
     public function getTotalAttribute(): float
     {
         return round($this->subtotal + $this->tax_amount, 2);
+    }
+
+    public function setTaxRateAttribute($value): void
+    {
+        if ($value === null || $value === '') {
+            $this->attributes['tax_rate'] = null;
+            return;
+        }
+
+        $this->attributes['tax_rate'] = is_numeric($value)
+            ? (int) round((float) $value)
+            : $value;
     }
 }

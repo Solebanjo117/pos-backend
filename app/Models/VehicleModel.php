@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class VehicleModel extends Model
@@ -42,11 +43,29 @@ class VehicleModel extends Model
     }
 
     /**
+     * Get engines associated through pivot (many-to-many).
+     */
+    public function enginesMany(): BelongsToMany
+    {
+        return $this->belongsToMany(VehicleEngine::class, 'vehicle_engine_model', 'model_id', 'engine_id')
+            ->withTimestamps();
+    }
+
+    /**
      * Get VINs registered for this model.
      */
     public function vins(): HasMany
     {
         return $this->hasMany(VehicleVin::class, 'model_id');
+    }
+
+    /**
+     * Get chassis associated to this model.
+     */
+    public function chassis(): BelongsToMany
+    {
+        return $this->belongsToMany(VehicleChassis::class, 'vehicle_chassis_model', 'model_id', 'chassis_id')
+            ->withTimestamps();
     }
 
     /**

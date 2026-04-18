@@ -39,13 +39,15 @@ class SupplyListController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        $this->normalizeIntegerPercentField($request, 'tax_rate');
+
         $validated = $request->validate([
             'product_id'      => 'required|exists:products,id',
             'variant_id'      => 'nullable|exists:product_variants,id',
             'supplier_id'     => 'nullable|exists:suppliers,id',
             'quantity_needed' => 'nullable|numeric|min:0.01',
             'unit_cost'       => 'nullable|numeric|min:0',
-            'tax_rate'        => 'nullable|numeric|min:0|max:100',
+            'tax_rate'        => 'nullable|integer|min:0|max:100',
             'sale_price'      => 'nullable|numeric|min:0',
             'notes'           => 'nullable|string|max:500',
         ]);
@@ -80,7 +82,7 @@ class SupplyListController extends Controller
                 'quantity_needed' => $validated['quantity_needed'] ?? 1,
                 'stock_added_qty' => $stockToAdd,
                 'unit_cost'       => $validated['unit_cost'] ?? 0,
-                'tax_rate'        => $validated['tax_rate'] ?? 7.00,
+                'tax_rate'        => $validated['tax_rate'] ?? 7,
                 'sale_price'      => $validated['sale_price'] ?? 0,
                 'notes'           => $validated['notes'] ?? null,
             ]);
@@ -154,11 +156,13 @@ class SupplyListController extends Controller
     {
         $item = SupplyListItem::findOrFail($id);
 
+        $this->normalizeIntegerPercentField($request, 'tax_rate');
+
         $validated = $request->validate([
             'supplier_id'     => 'nullable|exists:suppliers,id',
             'quantity_needed' => 'nullable|numeric|min:0.01',
             'unit_cost'       => 'nullable|numeric|min:0',
-            'tax_rate'        => 'nullable|numeric|min:0|max:100',
+            'tax_rate'        => 'nullable|integer|min:0|max:100',
             'sale_price'      => 'nullable|numeric|min:0',
             'notes'           => 'nullable|string|max:500',
         ]);
@@ -320,7 +324,7 @@ class SupplyListController extends Controller
                         'added_by'        => Auth::id(),
                         'quantity_needed' => $item['suggested_quantity'] ?? 1,
                         'unit_cost'       => $item['unit_cost'] ?? 0,
-                        'tax_rate'        => 7.00, // Panama ITBM default
+                        'tax_rate'        => 7, // Panama ITBM default
                         'sale_price'      => 0,
                         'notes'           => 'Importado desde Stock Bajo - ' . ($item['warehouse_name'] ?? 'Almacén'),
                     ]);
@@ -345,5 +349,17 @@ class SupplyListController extends Controller
             'skipped_count' => $skipped,
             'items' => $importedItems,
         ]);
+    }
+
+    private function normalizeIntegerPercentField(Request $request, string $field): void
+    {
+        if (!$request->has($field)) {
+            return;
+        }
+
+        $value = $request->input($field);
+        if (is_numeric($value)) {
+            $request->merge([$field => (int) round((float) $value)]);
+        }
     }
 }

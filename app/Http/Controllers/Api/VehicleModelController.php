@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\VehicleChassis;
 use App\Models\VehicleModel;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -69,7 +70,10 @@ class VehicleModelController extends Controller
             'generation' => 'nullable|string|max:20',
         ]);
 
+        $validated['generation'] = $this->normalizeGenerationCode($validated['generation'] ?? null);
+
         $model = VehicleModel::create($validated);
+        $this->syncGenerationChassis($model, $validated['generation'] ?? null);
 
         return response()->json([
             'message' => 'Modelo creado exitosamente',
@@ -102,7 +106,15 @@ class VehicleModelController extends Controller
             'generation' => 'nullable|string|max:20',
         ]);
 
+        if (array_key_exists('generation', $validated)) {
+            $validated['generation'] = $this->normalizeGenerationCode($validated['generation']);
+        }
+
         $model->update($validated);
+
+        if (array_key_exists('generation', $validated)) {
+            $this->syncGenerationChassis($model, $validated['generation']);
+        }
 
         return response()->json([
             'message' => 'Modelo actualizado exitosamente',
@@ -142,5 +154,45 @@ class VehicleModelController extends Controller
             ->get();
 
         return response()->json(['data' => $models]);
+    }
+
+    private function normalizeGenerationCode(?string $generation): ?string
+    {
+        if ($generation === null) {
+            return null;
+        }
+
+        $normalized = strtoupper(trim($generation));
+
+        return $normalized !== '' ? $normalized : null;
+    }
+
+    private function syncGenerationChassis(VehicleModel $model, ?string $generation): void
+    {
+        if ($generation === null || trim($generation) === '') {
+            return;
+        }
+
+        $normalizedCode = strtoupper(trim($generation));
+
+        $chassis = VehicleChassis::whereRaw('LOWER(code) = ?', [mb_strtolower($normalizedCode)])
+            ->orderBy('id')
+            ->first();
+
+        if (! $chassis) {
+            $chassis = VehicleChassis::create([
+                'code' => $normalizedCode,
+                'name' => null,
+                'model_id' => $model->id,
+                'year_from' => $model->year_from ? (string) $model->year_from : null,
+                'year_to' => $model->year_to ? (string) $model->year_to : null,
+                'notes' => null,
+            ]);
+        } elseif ($chassis->model_id === null) {
+            $chassis->model_id = $model->id;
+            $chassis->save();
+        }
+
+        $chassis->models()->syncWithoutDetaching([$model->id]);
     }
 }

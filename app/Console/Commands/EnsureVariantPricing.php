@@ -42,7 +42,9 @@ class EnsureVariantPricing extends Command
                 'base_price' => $productPricing->base_price,
                 'msrp' => $productPricing->msrp,
                 'cost' => $productPricing->cost,
-                'tax_rate' => $productPricing->tax_rate,
+                'tax_rate' => $productPricing->sale_tax_rate ?? $productPricing->tax_rate,
+                'sale_tax_rate' => $productPricing->sale_tax_rate ?? $productPricing->tax_rate,
+                'cost_tax_rate' => $productPricing->cost_tax_rate ?? $productPricing->sale_tax_rate ?? $productPricing->tax_rate,
                 'margin_percentage' => $productPricing->margin_percentage,
                 'max_discount_percentage' => $productPricing->max_discount_percentage,
             ]);

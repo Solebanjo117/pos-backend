@@ -265,7 +265,7 @@ class Product extends Model
      *
      * Splits the search term into individual words and requires ALL words to match
      * across product name, SKU, variant SKU/UPC, OEM codes, or attribute values.
-     * If the term is exactly 17 characters, it is also treated as a potential VIN.
+      * If the term is alphanumeric and has at least 5 characters, it is also treated as a potential VIN.
      */
     public function scopeSearch($query, ?string $term)
     {

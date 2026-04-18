@@ -45,6 +45,8 @@ class CategoryController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        $this->normalizeIntegerPercentField($request, 'itbm_percent');
+
         $validated = $request->validate([
             'name' => 'required|string|max:100',
             'slug' => 'nullable|string|max:100|unique:categories,slug',
@@ -59,7 +61,7 @@ class CategoryController extends Controller
             'pricing_formula' => 'nullable|string|max:500',
             'min_suggested_price' => 'nullable|numeric|min:0',
             'applies_itbm' => 'nullable|boolean',
-            'itbm_percent' => 'nullable|numeric|min:0|max:100',
+            'itbm_percent' => 'nullable|integer|min:0|max:100',
         ]);
 
         $category = Category::create($validated);
@@ -82,6 +84,8 @@ class CategoryController extends Controller
      */
     public function update(Request $request, Category $category): JsonResponse
     {
+        $this->normalizeIntegerPercentField($request, 'itbm_percent');
+
         $validated = $request->validate([
             'name' => 'sometimes|string|max:100',
             'slug' => 'sometimes|string|max:100|unique:categories,slug,' . $category->id,
@@ -96,7 +100,7 @@ class CategoryController extends Controller
             'pricing_formula' => 'nullable|string|max:500',
             'min_suggested_price' => 'nullable|numeric|min:0',
             'applies_itbm' => 'nullable|boolean',
-            'itbm_percent' => 'nullable|numeric|min:0|max:100',
+            'itbm_percent' => 'nullable|integer|min:0|max:100',
         ]);
 
         $category->update($validated);
@@ -112,11 +116,13 @@ class CategoryController extends Controller
      */
     public function previewPrice(Request $request, PricingFormulaService $formulaService): JsonResponse
     {
+        $this->normalizeIntegerPercentField($request, 'itbm_percent');
+
         $data = $request->validate([
             'formula'      => 'required|string|max:500',
             'costo'        => 'required|numeric|min:0',
             'applies_itbm' => 'nullable|boolean',
-            'itbm_percent' => 'nullable|numeric|min:0|max:100',
+            'itbm_percent' => 'nullable|integer|min:0|max:100',
         ]);
 
         $price = $formulaService->calculate(
@@ -148,5 +154,17 @@ class CategoryController extends Controller
         $category->delete();
 
         return response()->json(['message' => 'Category deleted successfully']);
+    }
+
+    private function normalizeIntegerPercentField(Request $request, string $field): void
+    {
+        if (!$request->has($field)) {
+            return;
+        }
+
+        $value = $request->input($field);
+        if (is_numeric($value)) {
+            $request->merge([$field => (int) round((float) $value)]);
+        }
     }
 }

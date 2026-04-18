@@ -30,6 +30,37 @@ return new class extends Migration
             DB::statement('ALTER TABLE vehicle_vins MODIFY engine_id BIGINT UNSIGNED NULL');
         } else {
             DB::statement('UPDATE vehicle_vins SET model_id = (SELECT model_id FROM vehicle_engines WHERE vehicle_engines.id = vehicle_vins.engine_id) WHERE model_id IS NULL');
+
+            // SQLite cannot alter an existing column nullability in place.
+            // Recreate the table so engine_id can be nullable for model-scoped VINs.
+            DB::statement('PRAGMA foreign_keys = OFF');
+
+            try {
+                DB::statement('CREATE TABLE vehicle_vins_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    engine_id INTEGER NULL,
+                    model_id INTEGER NULL,
+                    vin VARCHAR(17) NOT NULL,
+                    notes VARCHAR(255) NULL,
+                    created_at DATETIME NULL,
+                    updated_at DATETIME NULL,
+                    FOREIGN KEY (engine_id) REFERENCES vehicle_engines(id) ON DELETE CASCADE,
+                    FOREIGN KEY (model_id) REFERENCES vehicle_models(id) ON DELETE CASCADE
+                )');
+
+                DB::statement('INSERT INTO vehicle_vins_new (id, engine_id, model_id, vin, notes, created_at, updated_at)
+                    SELECT id, engine_id, model_id, vin, notes, created_at, updated_at
+                    FROM vehicle_vins');
+
+                DB::statement('DROP TABLE vehicle_vins');
+                DB::statement('ALTER TABLE vehicle_vins_new RENAME TO vehicle_vins');
+
+                DB::statement('CREATE UNIQUE INDEX vehicle_vins_vin_unique ON vehicle_vins(vin)');
+                DB::statement('CREATE INDEX vehicle_vins_engine_id_index ON vehicle_vins(engine_id)');
+                DB::statement('CREATE INDEX vehicle_vins_model_id_index ON vehicle_vins(model_id)');
+            } finally {
+                DB::statement('PRAGMA foreign_keys = ON');
+            }
         }
     }
 

@@ -89,6 +89,8 @@ class SalesOrderController extends Controller
     public function store(PosCheckoutRequest $request): JsonResponse
     {
         try {
+            $this->normalizeTaxPercentPayload($request);
+
             // Get all active payment method codes dynamically
             $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
             
@@ -118,7 +120,7 @@ class SalesOrderController extends Controller
                 'items.*.unit_price'       => 'required|numeric|min:0',
                 'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
                 'items.*.discount_amount'  => 'nullable|numeric|min:0',
-                'items.*.tax_percent'      => 'nullable|numeric|min:0|max:100',
+                'items.*.tax_percent'      => 'nullable|integer|min:0|max:100',
                 'items.*.seller_id'        => 'nullable|exists:users,id',
                 'items.*.is_custom_line'   => 'nullable|boolean',
                 'items.*.custom_description' => 'nullable|string|max:255',
@@ -303,6 +305,8 @@ class SalesOrderController extends Controller
     public function update(Request $request, int $id): JsonResponse
     {
         try {
+            $this->normalizeTaxPercentPayload($request);
+
             $validated = $request->validate([
                 'customer_id' => 'nullable|exists:customers,id',
                 'date' => 'nullable|date',
@@ -319,7 +323,7 @@ class SalesOrderController extends Controller
                 'items.*.unit_price' => 'required|numeric|min:0',
                 'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
                 'items.*.discount_amount' => 'nullable|numeric|min:0',
-                'items.*.tax_percent' => 'nullable|numeric|min:0|max:100',
+                'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
                 'items.*.seller_id'  => 'nullable|exists:users,id',
                 'items.*.is_custom_line' => 'nullable|boolean',
                 'items.*.custom_description' => 'nullable|string|max:255',
@@ -457,6 +461,8 @@ class SalesOrderController extends Controller
     public function addItem(Request $request, int $id): JsonResponse
     {
         try {
+            $this->normalizeTaxPercentPayload($request);
+
             $validated = $request->validate([
                 'product_id' => 'nullable|exists:products,id',
                 'variant_id' => 'nullable|exists:product_variants,id',
@@ -465,7 +471,7 @@ class SalesOrderController extends Controller
                 'unit_price' => 'required|numeric|min:0',
                 'discount_percent' => 'nullable|numeric|min:0|max:100',
                 'discount_amount' => 'nullable|numeric|min:0',
-                'tax_percent' => 'nullable|numeric|min:0|max:100',
+                'tax_percent' => 'nullable|integer|min:0|max:100',
                 'seller_id' => 'nullable|exists:users,id',
                 'is_custom_line' => 'nullable|boolean',
                 'custom_description' => 'nullable|string|max:255',
@@ -494,12 +500,14 @@ class SalesOrderController extends Controller
     public function updateItem(Request $request, int $itemId): JsonResponse
     {
         try {
+            $this->normalizeTaxPercentPayload($request);
+
             $validated = $request->validate([
                 'quantity' => 'nullable|integer|min:1',
                 'unit_price' => 'nullable|numeric|min:0',
                 'discount_percent' => 'nullable|numeric|min:0|max:100',
                 'discount_amount' => 'nullable|numeric|min:0',
-                'tax_percent' => 'nullable|numeric|min:0|max:100',
+                'tax_percent' => 'nullable|integer|min:0|max:100',
             ]);
 
             $item = $this->salesOrderService->updateItem($itemId, $validated);
@@ -562,6 +570,8 @@ class SalesOrderController extends Controller
     public function addItemsToExistingOrder(Request $request, int $id): JsonResponse
     {
         try {
+            $this->normalizeTaxPercentPayload($request);
+
             $validated = $request->validate([
                 'items' => 'required|array',
                 'items.*.product_id' => 'nullable|exists:products,id',
@@ -571,7 +581,7 @@ class SalesOrderController extends Controller
                 'items.*.price' => 'required|numeric|min:0',
                 'items.*.seller_id' => 'nullable|exists:users,id',
                 'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
-                'items.*.tax_percent' => 'nullable|numeric|min:0|max:100',
+                'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
                 'items.*.is_custom_line' => 'nullable|boolean',
                 'items.*.custom_description' => 'nullable|string|max:255',
                 'payment' => 'nullable|array',
@@ -783,6 +793,30 @@ class SalesOrderController extends Controller
                 'error' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    private function normalizeTaxPercentPayload(Request $request): void
+    {
+        if ($request->has('tax_percent') && is_numeric($request->input('tax_percent'))) {
+            $request->merge([
+                'tax_percent' => (int) round((float) $request->input('tax_percent')),
+            ]);
+        }
+
+        $items = $request->input('items');
+        if (!is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $index => $item) {
+            if (!is_array($item) || !array_key_exists('tax_percent', $item) || !is_numeric($item['tax_percent'])) {
+                continue;
+            }
+
+            $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+        }
+
+        $request->merge(['items' => $items]);
     }
 
     /**

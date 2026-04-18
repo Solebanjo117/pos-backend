@@ -8,7 +8,6 @@ use App\Models\ProductVariant;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
 
 class ProductVariantController extends Controller
 {
@@ -35,6 +34,8 @@ class ProductVariantController extends Controller
      */
     public function store(Request $request, Product $product): JsonResponse
     {
+        $this->normalizePricingTaxRates($request);
+
         $validated = $request->validate([
             'brand_id' => 'required|exists:brands,id',
             'sku' => [
@@ -54,7 +55,11 @@ class ProductVariantController extends Controller
             'pricing.base_price' => 'required_with:pricing|numeric|min:0',
             'pricing.msrp' => 'nullable|numeric|min:0',
             'pricing.cost' => 'nullable|numeric|min:0',
-            'pricing.tax_rate' => 'nullable|numeric|min:0|max:100',
+            'pricing.cost_base' => 'nullable|numeric|min:0',
+            'pricing.cost_miscellaneous' => 'nullable|numeric|min:0',
+            'pricing.tax_rate' => 'nullable|integer|min:0|max:100',
+            'pricing.cost_tax_rate' => 'nullable|integer|min:0|max:100',
+            'pricing.sale_tax_rate' => 'nullable|integer|min:0|max:100',
             'pricing.max_discount_percentage' => 'nullable|numeric|min:0|max:100',
             'pricing.pricing_formula' => 'nullable|string|max:255',
 
@@ -144,17 +149,25 @@ class ProductVariantController extends Controller
                 // Copy product's current pricing as independent variant pricing
                 $productPricing = $product->pricing;
                 if ($productPricing) {
+                    $saleTaxRate = $productPricing->sale_tax_rate ?? $productPricing->tax_rate;
+                    $costTaxRate = $productPricing->cost_tax_rate ?? $saleTaxRate;
+
                     $pricingData = [
                         'base_price' => $productPricing->base_price,
                         'msrp' => $productPricing->msrp,
-                        'cost' => $productPricing->cost,
-                        'tax_rate' => $productPricing->tax_rate,
+                        'cost' => (float) $productPricing->getRawOriginal('cost'),
+                        'cost_base' => $productPricing->getRawOriginal('cost_base'),
+                        'cost_miscellaneous' => $productPricing->getRawOriginal('cost_miscellaneous'),
+                        'tax_rate' => $saleTaxRate,
+                        'sale_tax_rate' => $saleTaxRate,
+                        'cost_tax_rate' => $costTaxRate,
                         'max_discount_percentage' => $productPricing->max_discount_percentage,
                     ];
                 }
             }
 
             if ($pricingData) {
+                $pricingData = $this->normalizePricingCostBreakdown($pricingData);
                 $pricingData['variant_id'] = $variant->id;
                 $pricingData['product_id'] = $product->id;
                 $pricing = $variant->pricing()->create($pricingData);
@@ -206,6 +219,8 @@ class ProductVariantController extends Controller
             return response()->json(['message' => 'Variante no corresponde al producto'], 404);
         }
 
+        $this->normalizePricingTaxRates($request);
+
         $validated = $request->validate([
             'sku' => [
                 'nullable', 
@@ -224,7 +239,11 @@ class ProductVariantController extends Controller
             'pricing.base_price' => 'required_with:pricing|numeric|min:0',
             'pricing.msrp' => 'nullable|numeric|min:0',
             'pricing.cost' => 'nullable|numeric|min:0',
-            'pricing.tax_rate' => 'nullable|numeric|min:0|max:100',
+            'pricing.cost_base' => 'nullable|numeric|min:0',
+            'pricing.cost_miscellaneous' => 'nullable|numeric|min:0',
+            'pricing.tax_rate' => 'nullable|integer|min:0|max:100',
+            'pricing.cost_tax_rate' => 'nullable|integer|min:0|max:100',
+            'pricing.sale_tax_rate' => 'nullable|integer|min:0|max:100',
             'pricing.max_discount_percentage' => 'nullable|numeric|min:0|max:100',
             'pricing.pricing_formula' => 'nullable|string|max:255',
 
@@ -240,7 +259,7 @@ class ProductVariantController extends Controller
 
             // Update or create variant-level pricing
             if (isset($validated['pricing'])) {
-                $pricingData = $validated['pricing'];
+                $pricingData = $this->normalizePricingCostBreakdown($validated['pricing']);
                 $existing = $variant->pricing;
                 if ($existing) {
                     $existing->update($pricingData);
@@ -287,5 +306,113 @@ class ProductVariantController extends Controller
         return response()->json([
             'message' => 'Variante eliminada'
         ]);
+    }
+
+    private function normalizePricingTaxRates(Request $request): void
+    {
+        $pricing = $request->input('pricing');
+
+        if (!is_array($pricing)) {
+            return;
+        }
+
+        $hasLegacyTaxRate = array_key_exists('tax_rate', $pricing);
+        $hasSaleTaxRate = array_key_exists('sale_tax_rate', $pricing);
+        $hasCostTaxRate = array_key_exists('cost_tax_rate', $pricing);
+
+        $legacyTaxRate = $this->normalizePercentValue($pricing['tax_rate'] ?? null);
+        $saleTaxRate = $this->normalizePercentValue($pricing['sale_tax_rate'] ?? null);
+        $costTaxRate = $this->normalizePercentValue($pricing['cost_tax_rate'] ?? null);
+
+        if ($hasLegacyTaxRate) {
+            $pricing['tax_rate'] = $legacyTaxRate;
+
+            if (!$hasSaleTaxRate) {
+                $pricing['sale_tax_rate'] = $legacyTaxRate;
+            }
+
+            if (!$hasCostTaxRate) {
+                $pricing['cost_tax_rate'] = $legacyTaxRate;
+            }
+        }
+
+        if ($hasSaleTaxRate) {
+            $pricing['sale_tax_rate'] = $saleTaxRate;
+            $pricing['tax_rate'] = $saleTaxRate;
+        }
+
+        if ($hasCostTaxRate) {
+            $pricing['cost_tax_rate'] = $costTaxRate;
+        }
+
+        $pricing = $this->normalizePricingCostBreakdown($pricing);
+
+        $request->merge(['pricing' => $pricing]);
+    }
+
+    private function normalizePricingCostBreakdown(array $pricing): array
+    {
+        $hasCostBase = array_key_exists('cost_base', $pricing);
+        $hasLegacyCost = array_key_exists('cost', $pricing);
+        $hasCostMiscellaneous = array_key_exists('cost_miscellaneous', $pricing);
+
+        $costBase = $this->normalizeMoneyValue($pricing['cost_base'] ?? null);
+        $legacyCost = $this->normalizeMoneyValue($pricing['cost'] ?? null);
+        $costMiscellaneous = $this->normalizeMoneyValue($pricing['cost_miscellaneous'] ?? null);
+        $costTaxRate = $this->normalizePercentValue($pricing['cost_tax_rate'] ?? null) ?? 0;
+
+        if ($hasCostBase) {
+            $pricing['cost_base'] = $costBase;
+        }
+
+        if ($hasCostMiscellaneous) {
+            $pricing['cost_miscellaneous'] = $costMiscellaneous ?? 0;
+        }
+
+        $effectiveCostBase = $hasCostBase ? $pricing['cost_base'] : null;
+        $effectiveCostMiscellaneous = $pricing['cost_miscellaneous'] ?? 0;
+
+        if ($effectiveCostBase !== null && is_numeric($effectiveCostBase)) {
+            $pricing['cost'] = $this->computeCostTotal(
+                (float) $effectiveCostBase,
+                $costTaxRate,
+                (float) $effectiveCostMiscellaneous,
+            );
+        } elseif ($hasLegacyCost && $legacyCost !== null) {
+            $pricing['cost'] = $legacyCost;
+        }
+
+        return $pricing;
+    }
+
+    private function normalizePercentValue(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        return (int) round((float) $value);
+    }
+
+    private function normalizeMoneyValue(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        return (float) $value;
+    }
+
+    private function computeCostTotal(float $costBase, int $costTaxRate, float $costMiscellaneous): float
+    {
+        return (float) round($costBase * (1 + ($costTaxRate / 100)) + $costMiscellaneous, 2);
     }
 }

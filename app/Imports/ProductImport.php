@@ -83,11 +83,15 @@ class ProductImport
 
                 if ($cost !== null || $price !== null) {
                     $basePrice = $price ?? 0.0;
+                    $storeTaxRate = (int) round((float) Setting::get('store_tax_rate', 7));
+
                     $productData['pricing'] = [
                         'base_price' => $basePrice,
                         'msrp' => $basePrice,
                         'cost' => $cost ?? 0.0,
-                        'tax_rate' => (float) Setting::get('store_tax_rate', 7.0),
+                        'tax_rate' => $storeTaxRate,
+                        'sale_tax_rate' => $storeTaxRate,
+                        'cost_tax_rate' => $storeTaxRate,
                         'tax_type' => 'standard',
                         'max_discount_percentage' => 0,
                     ];

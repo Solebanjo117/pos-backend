@@ -140,10 +140,16 @@ class PricingFormulaController extends Controller
      */
     public function preview(Request $request): JsonResponse
     {
+        if ($request->has('tax_rate') && is_numeric($request->input('tax_rate'))) {
+            $request->merge([
+                'tax_rate' => (int) round((float) $request->input('tax_rate')),
+            ]);
+        }
+
         $request->validate([
             'formula'  => 'required|string|max:500',
             'cost'     => 'required|numeric|min:0',
-            'tax_rate' => 'nullable|numeric|min:0|max:100',
+            'tax_rate' => 'nullable|integer|min:0|max:100',
         ]);
 
         $result = $this->formulaService->preview(

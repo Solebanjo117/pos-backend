@@ -32,16 +32,26 @@ class ProductVariantResource extends JsonResource
             
             'pricing' => $this->when(
                 $this->relationLoaded('pricing') && $this->pricing,
-                fn() => [
-                    'base_price' => (float) $this->pricing->base_price,
-                    'calculated_price' => (float) $this->pricing->calculated_price,
-                    'msrp' => (float) $this->pricing->msrp,
-                    'cost' => (float) $this->pricing->cost,
-                    'tax_rate' => (float) $this->pricing->tax_rate,
-                    'tax_type' => $this->pricing->tax_type ?? 'standard',
-                    'max_discount_percentage' => (float) $this->pricing->max_discount_percentage,
-                    'pricing_formula' => $this->pricing->pricing_formula,
-                ]
+                function () {
+                    $saleTaxRate = (float) ($this->pricing->sale_tax_rate ?? $this->pricing->tax_rate ?? 0);
+                    $costTaxRate = (float) ($this->pricing->cost_tax_rate ?? $this->pricing->tax_rate ?? $saleTaxRate);
+
+                    return [
+                        'base_price' => (float) $this->pricing->base_price,
+                        'calculated_price' => (float) $this->pricing->calculated_price,
+                        'msrp' => (float) $this->pricing->msrp,
+                        'cost' => (float) $this->pricing->cost_total,
+                        'cost_base' => (float) $this->pricing->cost_base,
+                        'cost_miscellaneous' => (float) $this->pricing->cost_miscellaneous,
+                        'cost_total' => (float) $this->pricing->cost_total,
+                        'tax_rate' => $saleTaxRate,
+                        'sale_tax_rate' => $saleTaxRate,
+                        'cost_tax_rate' => $costTaxRate,
+                        'tax_type' => $this->pricing->tax_type ?? 'standard',
+                        'max_discount_percentage' => (float) $this->pricing->max_discount_percentage,
+                        'pricing_formula' => $this->pricing->pricing_formula,
+                    ];
+                }
             ),
             
             'product' => $this->when($this->relationLoaded('product') && $this->product, fn() => [

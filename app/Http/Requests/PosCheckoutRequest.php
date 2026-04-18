@@ -9,6 +9,25 @@ use Illuminate\Support\Facades\Log;
 
 class PosCheckoutRequest extends FormRequest
 {
+    protected function prepareForValidation(): void
+    {
+        $items = $this->input('items');
+
+        if (!is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $index => $item) {
+            if (!is_array($item) || !array_key_exists('tax_percent', $item) || !is_numeric($item['tax_percent'])) {
+                continue;
+            }
+
+            $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+        }
+
+        $this->merge(['items' => $items]);
+    }
+
     public function authorize(): bool
     {
         return true;
@@ -50,7 +69,7 @@ class PosCheckoutRequest extends FormRequest
             'items.*.unit_price'      => 'required|numeric|min:0',
             'items.*.discount_percent'=> 'nullable|numeric|min:0|max:100',
             'items.*.discount_amount' => 'nullable|numeric|min:0',
-            'items.*.tax_percent'     => 'nullable|numeric|min:0|max:100',
+            'items.*.tax_percent'     => 'nullable|integer|min:0|max:100',
             'items.*.seller_id'       => 'nullable|exists:users,id',
         ];
     }

@@ -11,39 +11,33 @@ use Illuminate\Http\JsonResponse;
 class VehicleVinController extends Controller
 {
     /**
-     * Legacy endpoint: List VINs by engine.
-     * Kept temporarily for backward compatibility.
+     * List VINs for a given engine.
      */
     public function index(int $engineId): JsonResponse
     {
-        $modelId = $this->resolveModelIdFromEngine($engineId);
-        if (! $modelId) {
-            return response()->json(['data' => []]);
-        }
+        VehicleEngine::query()->whereKey($engineId)->firstOrFail();
 
-        return $this->indexByModel($modelId);
+        $vins = VehicleVin::where('engine_id', $engineId)
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json(['data' => $vins]);
     }
 
     /**
-     * Legacy endpoint: Store VIN by engine.
-     * Kept temporarily for backward compatibility.
+     * Store a VIN for a given engine.
      */
     public function store(Request $request, int $engineId): JsonResponse
     {
-        $modelId = $this->resolveModelIdFromEngine($engineId);
-        if (! $modelId) {
-            return response()->json([
-                'message' => 'El motor no tiene un modelo asociado',
-            ], 422);
-        }
+        $engine = VehicleEngine::with('models:id')->findOrFail($engineId);
 
         $validated = $request->validate([
-            'vin'   => 'required|string|max:17|unique:vehicle_vins,vin',
+            'vin'   => 'required|string|max:40|unique:vehicle_vins,vin',
             'notes' => 'nullable|string|max:255',
         ]);
 
         $vin = VehicleVin::create([
-            'model_id'  => $modelId,
+            'model_id'  => $this->resolveModelIdFromEngine($engine),
             'engine_id' => $engineId,
             'vin'       => strtoupper($validated['vin']),
             'notes'     => $validated['notes'] ?? null,
@@ -53,19 +47,16 @@ class VehicleVinController extends Controller
     }
 
     /**
-     * Legacy endpoint: Delete VIN by engine.
-     * Kept temporarily for backward compatibility.
+     * Delete a VIN by engine.
      */
     public function destroy(int $engineId, int $vinId): JsonResponse
     {
-        $modelId = $this->resolveModelIdFromEngine($engineId);
-        if (! $modelId) {
-            return response()->json([
-                'message' => 'El motor no tiene un modelo asociado',
-            ], 422);
-        }
+        VehicleEngine::query()->whereKey($engineId)->firstOrFail();
 
-        return $this->destroyByModel($modelId, $vinId);
+        $vin = VehicleVin::where('engine_id', $engineId)->findOrFail($vinId);
+        $vin->delete();
+
+        return response()->json(['message' => 'VIN eliminado'], 200);
     }
 
     /** List VINs for a given model */
@@ -82,7 +73,7 @@ class VehicleVinController extends Controller
     public function storeByModel(Request $request, int $modelId): JsonResponse
     {
         $validated = $request->validate([
-            'vin'   => 'required|string|max:17|unique:vehicle_vins,vin',
+            'vin'   => 'required|string|max:40|unique:vehicle_vins,vin',
             'notes' => 'nullable|string|max:255',
         ]);
 
@@ -105,8 +96,21 @@ class VehicleVinController extends Controller
         return response()->json(['message' => 'VIN eliminado'], 200);
     }
 
-    private function resolveModelIdFromEngine(int $engineId): ?int
+    private function resolveModelIdFromEngine(VehicleEngine $engine): ?int
     {
-        return VehicleEngine::whereKey($engineId)->value('model_id');
+        if ($engine->model_id !== null) {
+            return (int) $engine->model_id;
+        }
+
+        $engine->loadMissing('models:id');
+
+        $pivotModelId = $engine->models
+            ->pluck('id')
+            ->filter(fn ($id) => $id !== null)
+            ->map(fn ($id) => (int) $id)
+            ->sort()
+            ->first();
+
+        return $pivotModelId !== null ? (int) $pivotModelId : null;
     }
 }

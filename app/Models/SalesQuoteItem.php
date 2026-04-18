@@ -33,7 +33,7 @@ class SalesQuoteItem extends Model
         'unit_price'       => 'decimal:2',
         'discount_percent' => 'decimal:2',
         'discount_amount'  => 'decimal:2',
-        'tax_percent'      => 'decimal:2',
+        'tax_percent'      => 'integer',
         'tax_amount'       => 'decimal:2',
         'subtotal'         => 'decimal:2',
         'total'            => 'decimal:2',
@@ -114,6 +114,18 @@ class SalesQuoteItem extends Model
         $this->calculateTax();
         $this->total = $this->subtotal + $this->tax_amount;
         return (float) $this->total;
+    }
+
+    public function setTaxPercentAttribute($value): void
+    {
+        if ($value === null || $value === '') {
+            $this->attributes['tax_percent'] = null;
+            return;
+        }
+
+        $this->attributes['tax_percent'] = is_numeric($value)
+            ? (int) round((float) $value)
+            : $value;
     }
 
     // ==================== BOOT ====================

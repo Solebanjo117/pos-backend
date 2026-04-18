@@ -39,6 +39,66 @@ class ProductService
             ->all();
     }
 
+    private function normalizeMoneyValue(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        return (float) $value;
+    }
+
+    private function normalizePercentValue(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        return (int) round((float) $value);
+    }
+
+    private function normalizePricingPayload(array $pricingData): array
+    {
+        $hasCostBase = array_key_exists('cost_base', $pricingData);
+        $hasLegacyCost = array_key_exists('cost', $pricingData);
+        $hasCostMiscellaneous = array_key_exists('cost_miscellaneous', $pricingData);
+
+        $costBase = $this->normalizeMoneyValue($pricingData['cost_base'] ?? null);
+        $legacyCost = $this->normalizeMoneyValue($pricingData['cost'] ?? null);
+        $costMiscellaneous = $this->normalizeMoneyValue($pricingData['cost_miscellaneous'] ?? null);
+        $costTaxRate = $this->normalizePercentValue($pricingData['cost_tax_rate'] ?? null) ?? 0;
+
+        if ($hasCostBase) {
+            $pricingData['cost_base'] = $costBase;
+        }
+
+        if ($hasCostMiscellaneous) {
+            $pricingData['cost_miscellaneous'] = $costMiscellaneous ?? 0;
+        }
+
+        $effectiveCostBase = $hasCostBase ? $pricingData['cost_base'] : null;
+        $effectiveCostMiscellaneous = $pricingData['cost_miscellaneous'] ?? 0;
+
+        if ($effectiveCostBase !== null && is_numeric($effectiveCostBase)) {
+            $pricingData['cost'] = (float) round(
+                ((float) $effectiveCostBase * (1 + ($costTaxRate / 100))) + (float) $effectiveCostMiscellaneous,
+                2,
+            );
+        } elseif ($hasLegacyCost && $legacyCost !== null) {
+            $pricingData['cost'] = $legacyCost;
+        }
+
+        return $pricingData;
+    }
+
     /**
      * Create a new product with default variant, pricing and optional inventory.
      * 
@@ -105,7 +165,7 @@ class ProductService
 
                 // Create pricing for the default variant (not product)
                 if (isset($data['pricing'])) {
-                    $pricingData = $data['pricing'];
+                    $pricingData = $this->normalizePricingPayload($data['pricing']);
                     $pricingData['variant_id'] = $variant->id;
                     $pricingData['product_id'] = $product->id;
                     $pricing = $variant->pricing()->create($pricingData);
@@ -230,13 +290,14 @@ class ProductService
 
             // Update pricing for product if provided
             if (isset($data['pricing'])) {
+                $pricingData = $this->normalizePricingPayload($data['pricing']);
                 $pricing = $product->pricing;
                 if ($pricing) {
-                    $pricing->update($data['pricing']);
+                    $pricing->update($pricingData);
                     $pricing->calculateMargin();
                     $pricing->save();
                 } else {
-                    $pricing = $product->pricing()->create($data['pricing']);
+                    $pricing = $product->pricing()->create($pricingData);
                     $pricing->calculateMargin();
                     $pricing->save();
                 }
@@ -736,18 +797,29 @@ class ProductService
             ]);
 
             if ($source->pricing) {
-                $pricing = $duplicatedProduct->pricing()->create([
+                $productSaleTaxRate = $source->pricing->sale_tax_rate ?? $source->pricing->tax_rate;
+                $productCostTaxRate = $source->pricing->cost_tax_rate ?? $productSaleTaxRate;
+
+                $productPricingData = [
                     'product_id' => $duplicatedProduct->id,
                     'variant_id' => null,
                     'base_price' => $source->pricing->base_price,
                     'msrp' => $source->pricing->msrp,
-                    'cost' => $source->pricing->cost,
+                    'cost' => $source->pricing->cost_total,
+                    'cost_base' => $source->pricing->getRawOriginal('cost_base'),
+                    'cost_miscellaneous' => $source->pricing->cost_miscellaneous,
                     'margin_percentage' => $source->pricing->margin_percentage,
-                    'tax_rate' => $source->pricing->tax_rate,
+                    'tax_rate' => $productSaleTaxRate,
+                    'sale_tax_rate' => $productSaleTaxRate,
+                    'cost_tax_rate' => $productCostTaxRate,
                     'tax_type' => $source->pricing->tax_type,
                     'max_discount_percentage' => $source->pricing->max_discount_percentage,
                     'pricing_formula' => $source->pricing->pricing_formula,
-                ]);
+                ];
+
+                $pricing = $duplicatedProduct->pricing()->create(
+                    $this->normalizePricingPayload($productPricingData)
+                );
                 $pricing->calculateMargin();
                 $pricing->save();
             }
@@ -762,18 +834,29 @@ class ProductService
                 ]);
 
                 if ($sourceVariant->pricing) {
-                    $variantPricing = $newVariant->pricing()->create([
+                    $variantSaleTaxRate = $sourceVariant->pricing->sale_tax_rate ?? $sourceVariant->pricing->tax_rate;
+                    $variantCostTaxRate = $sourceVariant->pricing->cost_tax_rate ?? $variantSaleTaxRate;
+
+                    $variantPricingData = [
                         'product_id' => $duplicatedProduct->id,
                         'variant_id' => $newVariant->id,
                         'base_price' => $sourceVariant->pricing->base_price,
                         'msrp' => $sourceVariant->pricing->msrp,
-                        'cost' => $sourceVariant->pricing->cost,
+                        'cost' => $sourceVariant->pricing->cost_total,
+                        'cost_base' => $sourceVariant->pricing->getRawOriginal('cost_base'),
+                        'cost_miscellaneous' => $sourceVariant->pricing->cost_miscellaneous,
                         'margin_percentage' => $sourceVariant->pricing->margin_percentage,
-                        'tax_rate' => $sourceVariant->pricing->tax_rate,
+                        'tax_rate' => $variantSaleTaxRate,
+                        'sale_tax_rate' => $variantSaleTaxRate,
+                        'cost_tax_rate' => $variantCostTaxRate,
                         'tax_type' => $sourceVariant->pricing->tax_type,
                         'max_discount_percentage' => $sourceVariant->pricing->max_discount_percentage,
                         'pricing_formula' => $sourceVariant->pricing->pricing_formula,
-                    ]);
+                    ];
+
+                    $variantPricing = $newVariant->pricing()->create(
+                        $this->normalizePricingPayload($variantPricingData)
+                    );
                     $variantPricing->calculateMargin();
                     $variantPricing->save();
                 }

@@ -6,6 +6,96 @@ use Illuminate\Foundation\Http\FormRequest;
 
 class StoreProductRequest extends FormRequest
 {
+    protected function prepareForValidation(): void
+    {
+        $pricing = $this->input('pricing');
+
+        if (!is_array($pricing)) {
+            return;
+        }
+
+        $legacyTaxRate = $this->normalizePercentValue($pricing['tax_rate'] ?? null);
+        $saleTaxRate = $this->normalizePercentValue($pricing['sale_tax_rate'] ?? null);
+        $costTaxRate = $this->normalizePercentValue($pricing['cost_tax_rate'] ?? null);
+
+        $effectiveSaleTaxRate = $saleTaxRate ?? $legacyTaxRate;
+        $effectiveCostTaxRate = $costTaxRate ?? $legacyTaxRate ?? $effectiveSaleTaxRate;
+
+        if ($effectiveSaleTaxRate !== null) {
+            $pricing['sale_tax_rate'] = $effectiveSaleTaxRate;
+            // tax_rate remains as compatibility alias.
+            $pricing['tax_rate'] = $effectiveSaleTaxRate;
+        }
+
+        if ($effectiveCostTaxRate !== null) {
+            $pricing['cost_tax_rate'] = $effectiveCostTaxRate;
+        }
+
+        $pricing = $this->normalizePricingCostBreakdown($pricing);
+
+        $this->merge(['pricing' => $pricing]);
+    }
+
+    private function normalizePercentValue($value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        return (int) round((float) $value);
+    }
+
+    private function normalizeMoneyValue($value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        return (float) $value;
+    }
+
+    private function normalizePricingCostBreakdown(array $pricing): array
+    {
+        $hasCostBase = array_key_exists('cost_base', $pricing);
+        $hasLegacyCost = array_key_exists('cost', $pricing);
+        $hasCostMiscellaneous = array_key_exists('cost_miscellaneous', $pricing);
+
+        $costBase = $this->normalizeMoneyValue($pricing['cost_base'] ?? null);
+        $legacyCost = $this->normalizeMoneyValue($pricing['cost'] ?? null);
+        $costMiscellaneous = $this->normalizeMoneyValue($pricing['cost_miscellaneous'] ?? null);
+        $costTaxRate = $this->normalizePercentValue($pricing['cost_tax_rate'] ?? null) ?? 0;
+
+        if ($hasCostBase) {
+            $pricing['cost_base'] = $costBase;
+        }
+
+        if ($hasCostMiscellaneous) {
+            $pricing['cost_miscellaneous'] = $costMiscellaneous ?? 0;
+        }
+
+        $effectiveCostBase = $hasCostBase ? $pricing['cost_base'] : null;
+        $effectiveCostMiscellaneous = $pricing['cost_miscellaneous'] ?? 0;
+
+        if ($effectiveCostBase !== null && is_numeric($effectiveCostBase)) {
+            $pricing['cost'] = (float) round(
+                ((float) $effectiveCostBase * (1 + ($costTaxRate / 100))) + (float) $effectiveCostMiscellaneous,
+                2,
+            );
+        } elseif ($hasLegacyCost && $legacyCost !== null) {
+            $pricing['cost'] = $legacyCost;
+        }
+
+        return $pricing;
+    }
+
     /**
      * Determine if the user is authorized to make this request.
      */
@@ -45,7 +135,11 @@ class StoreProductRequest extends FormRequest
             'pricing.base_price' => 'required_with:pricing|numeric|min:0',
             'pricing.msrp' => 'nullable|numeric|min:0',
             'pricing.cost' => 'nullable|numeric|min:0',
-            'pricing.tax_rate' => 'required_with:pricing|numeric|between:0,15',
+            'pricing.cost_base' => 'nullable|numeric|min:0',
+            'pricing.cost_miscellaneous' => 'nullable|numeric|min:0',
+            'pricing.tax_rate' => 'nullable|integer|between:0,100',
+            'pricing.cost_tax_rate' => 'nullable|integer|between:0,100',
+            'pricing.sale_tax_rate' => 'nullable|integer|between:0,100',
             'pricing.tax_type' => 'sometimes|in:standard,exempt,custom',
             'pricing.max_discount_percentage' => 'nullable|numeric|between:0,100',
             
@@ -80,8 +174,9 @@ class StoreProductRequest extends FormRequest
             'brand_id.exists'   => 'La marca seleccionada no existe',
             'pricing.base_price.required_with' => 'El precio base es obligatorio cuando se define el pricing',
             'pricing.base_price.min'      => 'El precio base debe ser mayor o igual a 0',
-            'pricing.tax_rate.required_with'   => 'La tasa de impuesto es obligatoria cuando se define el pricing',
-            'pricing.tax_rate.between'    => 'La tasa de impuesto debe estar entre 0 y 15%',
+            'pricing.tax_rate.between'    => 'La tasa de impuesto de venta debe estar entre 0 y 100%',
+            'pricing.sale_tax_rate.between' => 'La tasa de impuesto de venta debe estar entre 0 y 100%',
+            'pricing.cost_tax_rate.between' => 'La tasa de impuesto de costo debe estar entre 0 y 100%',
             'category_id.exists'          => 'La categoría seleccionada no existe',
             'status.in'                   => 'El estado debe ser: activo, discontinuado o pendiente',
             'initial_inventory.*.warehouse_id.required'    => 'El almacén es obligatorio',

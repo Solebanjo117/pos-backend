@@ -37,6 +37,15 @@ class VehicleChassis extends Model
     }
 
     /**
+     * Get all associated models for this chassis.
+     */
+    public function models(): BelongsToMany
+    {
+        return $this->belongsToMany(VehicleModel::class, 'vehicle_chassis_model', 'chassis_id', 'model_id')
+            ->withTimestamps();
+    }
+
+    /**
      * Get the product compatibility records for this chassis.
      */
     public function compatibility(): HasMany

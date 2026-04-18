@@ -34,7 +34,7 @@ class Category extends Model
         'default_margin_percent' => 'float',
         'min_suggested_price' => 'float',
         'applies_itbm' => 'boolean',
-        'itbm_percent' => 'float',
+        'itbm_percent' => 'integer',
     ];
 
     /**
@@ -98,5 +98,17 @@ class Category extends Model
     public function hasChildren(): bool
     {
         return $this->children()->count() > 0;
+    }
+
+    public function setItbmPercentAttribute($value): void
+    {
+        if ($value === null || $value === '') {
+            $this->attributes['itbm_percent'] = null;
+            return;
+        }
+
+        $this->attributes['itbm_percent'] = is_numeric($value)
+            ? (int) round((float) $value)
+            : $value;
     }
 }
