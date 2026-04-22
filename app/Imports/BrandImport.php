@@ -11,7 +11,6 @@ class BrandImport extends BaseImport
     {
         return [
             ['key' => 'nombre', 'label' => 'Nombre', 'type' => 'text', 'required' => true],
-            ['key' => 'prefijo', 'label' => 'Prefijo', 'type' => 'text'],
             ['key' => 'descripcion', 'label' => 'Descripción', 'type' => 'text'],
             ['key' => 'website', 'label' => 'Website', 'type' => 'text'],
             ['key' => 'estado', 'label' => 'Estado', 'type' => 'text'],
@@ -23,7 +22,6 @@ class BrandImport extends BaseImport
     {
         return [
             'nombre' => 'Bosch',
-            'prefijo' => 'BOS',
             'descripcion' => 'Fabricante alemán de autopartes',
             'website' => 'https://www.bosch.com',
             'estado' => 'active',
@@ -40,7 +38,6 @@ class BrandImport extends BaseImport
     {
         return match ($header) {
             'nombre', 'name' => 'nombre',
-            'prefijo', 'prefix' => 'prefijo',
             'descripcion', 'description' => 'descripcion',
             'website' => 'website',
             'estado', 'status' => 'estado',
@@ -77,7 +74,6 @@ class BrandImport extends BaseImport
 
         $data = [
             'name' => $name,
-            'prefix' => $this->nullIfEmpty($row['prefijo'] ?? null),
             'description' => $this->nullIfEmpty($row['descripcion'] ?? null),
             'website' => $this->nullIfEmpty($row['website'] ?? null),
             'status' => $status,
