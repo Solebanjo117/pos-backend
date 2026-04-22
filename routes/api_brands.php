@@ -20,5 +20,7 @@ Route::prefix('brands')->group(function () {
         Route::post('/', [BrandController::class, 'store']);
         Route::put('/{id}', [BrandController::class, 'update']);
         Route::delete('/{id}', [BrandController::class, 'destroy']);
+        Route::post('/{id}/suppliers', [BrandController::class, 'attachSupplier']);
+        Route::delete('/{id}/suppliers/{supplierId}', [BrandController::class, 'detachSupplier']);
     });
 });

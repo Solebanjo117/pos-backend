@@ -2,14 +2,13 @@
 
 namespace App\Services;
 
-use App\Models\Product;
-use App\Models\ProductVariant;
-use App\Models\ProductAttribute;
-use App\Models\ProductVehicleCompatibility;
-use App\Models\OemReference;
 use App\Models\Category;
-use Illuminate\Support\Facades\DB;
+use App\Models\Product;
+use App\Models\ProductAttribute;
+use App\Models\ProductVariant;
+use App\Models\ProductVehicleCompatibility;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\DB;
 
 class ProductService
 {
@@ -45,7 +44,7 @@ class ProductService
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 
@@ -58,7 +57,7 @@ class ProductService
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 
@@ -101,22 +100,22 @@ class ProductService
 
     /**
      * Create a new product with default variant, pricing and optional inventory.
-     * 
-     * @param array $data Expected structure:
-     *   - sku_base: Base SKU for the product
-     *   - name: Product name
-     *   - description: Product description
-     *   - product_line_id: Optional product line
-     *   - brand_id: Brand for the default variant
-     *   - sku: SKU for the default variant
-     *   - upc: UPC for the default variant (optional)
-     *   - pricing: Pricing data for the variant
-     *   - initial_inventory: Array of inventory records per warehouse
+     *
+     * @param  array  $data  Expected structure:
+     *                       - sku_base: Base SKU for the product
+     *                       - name: Product name
+     *                       - description: Product description
+     *                       - product_line_id: Optional product line
+     *                       - brand_id: Brand for the default variant
+     *                       - sku: SKU for the default variant
+     *                       - upc: UPC for the default variant (optional)
+     *                       - pricing: Pricing data for the variant
+     *                       - initial_inventory: Array of inventory records per warehouse
      */
     public function createProduct(array $data): Product
     {
         DB::beginTransaction();
-        
+
         try {
             // sku_base is required — auto-generate if not provided or empty
             $skuBase = $data['sku_base'] ?? null;
@@ -140,21 +139,21 @@ class ProductService
 
             // Create the base product (without brand)
             $product = Product::create([
-                'system_id'      => $systemId,
-                'sku_base'       => $skuBase,
+                'system_id' => $systemId,
+                'sku_base' => $skuBase,
                 'alternate_code' => $data['alternate_code'] ?? null,
-                'pricing_formula'=> $data['pricing_formula'] ?? null,
+                'pricing_formula' => $data['pricing_formula'] ?? null,
                 'product_line_id' => $data['product_line_id'] ?? null,
-                'category_id'    => $data['category_id'] ?? null,
-                'name'           => $name,
-                'description'    => $data['description'] ?? null,
-                'status'         => $data['status'] ?? 'active',
-                'is_universal'   => $data['is_universal'] ?? false,
+                'category_id' => $data['category_id'] ?? null,
+                'name' => $name,
+                'description' => $data['description'] ?? null,
+                'status' => $data['status'] ?? 'active',
+                'is_universal' => $data['is_universal'] ?? false,
             ]);
 
             // Create default variant with brand (only if brand_id is provided)
             $variant = null;
-            if (!empty($data['brand_id'])) {
+            if (! empty($data['brand_id'])) {
                 $variant = $this->createVariant($product, [
                     'brand_id' => $data['brand_id'],
                     'sku' => $data['sku'] ?? $skuBase,
@@ -183,34 +182,50 @@ class ProductService
             }
 
             // Assign attributes at product level, regardless of default variant presence.
-            if (isset($data['attributes']) && is_array($data['attributes'])) {
-                $normalizedAttributes = $this->normalizeAttributes($data['attributes']);
-                if (!empty($normalizedAttributes)) {
-                    $this->assignAttributes($product, $normalizedAttributes);
+            $providedAttributes = isset($data['attributes']) && is_array($data['attributes'])
+                ? $this->normalizeAttributes($data['attributes'])
+                : [];
 
-                    // Keep default variant in sync for compatibility with legacy variant-level displays.
-                    if ($variant) {
-                        $this->assignVariantAttributes($variant, $normalizedAttributes);
-                    }
+            if (empty($providedAttributes) && ! empty($data['category_id'])) {
+                $category = Category::find($data['category_id']);
+                if ($category && ! empty($category->default_attributes)) {
+                    $providedAttributes = collect($category->default_attributes)
+                        ->map(fn ($attr) => [
+                            'name' => $attr['name'] ?? '',
+                            'value' => $attr['default_value'] ?? $attr['value'] ?? '',
+                            'unit' => $attr['unit'] ?? null,
+                        ])
+                        ->filter(fn ($attr) => $attr['name'] !== '')
+                        ->values()
+                        ->all();
+                }
+            }
+
+            if (! empty($providedAttributes)) {
+                $this->assignAttributes($product, $providedAttributes);
+
+                // Keep default variant in sync for compatibility with legacy variant-level displays.
+                if ($variant) {
+                    $this->assignVariantAttributes($variant, $providedAttributes);
                 }
             }
 
             // Assign vehicle compatibility
-            if (!empty($data['vehicle_compatibility'])) {
+            if (! empty($data['vehicle_compatibility'])) {
                 foreach ($data['vehicle_compatibility'] as $engineId) {
                     $product->vehicleCompatibility()->firstOrCreate(['engine_id' => $engineId]);
                 }
             }
 
             // Assign VINs
-            if (!empty($data['vins'])) {
+            if (! empty($data['vins'])) {
                 foreach ($data['vins'] as $vin) {
                     $product->vins()->firstOrCreate(['vin' => strtoupper(trim($vin))]);
                 }
             }
 
             // Assign OEM / Cross References
-            if (!empty($data['oem_references'])) {
+            if (! empty($data['oem_references'])) {
                 foreach ($data['oem_references'] as $refCode) {
                     $product->oemReferences()->firstOrCreate([
                         'oem_code' => trim($refCode),
@@ -219,14 +234,14 @@ class ProductService
             }
 
             // Append vehicle/VIN info only for backend auto-generated names.
-            if ($nameWasAutoGenerated && (!empty($data['vehicle_compatibility']) || !empty($data['vins']))) {
+            if ($nameWasAutoGenerated && (! empty($data['vehicle_compatibility']) || ! empty($data['vins']))) {
                 $this->updateProductNameWithVehicles($product);
             }
 
             DB::commit();
-            
+
             return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine']);
-            
+
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -240,7 +255,7 @@ class ProductService
     {
         // Generate variant system_id if brand_id is present
         $systemId = null;
-        if (!empty($data['brand_id'])) {
+        if (! empty($data['brand_id'])) {
             $systemId = $this->generateVariantSystemId();
         }
 
@@ -262,18 +277,18 @@ class ProductService
     public function updateProduct(Product $product, array $data): Product
     {
         DB::beginTransaction();
-        
+
         try {
             // Update basic product info (only base product fields)
             $updatePayload = [];
             foreach (['name', 'description', 'status', 'product_line_id', 'is_universal',
-                      'sku_base', 'alternate_code', 'pricing_formula'] as $field) {
+                'sku_base', 'alternate_code', 'pricing_formula'] as $field) {
                 if (array_key_exists($field, $data)) {
                     $updatePayload[$field] = $data[$field];
                 }
             }
-            
-            if (!empty($updatePayload)) {
+
+            if (! empty($updatePayload)) {
                 $product->update($updatePayload);
             }
 
@@ -309,9 +324,9 @@ class ProductService
             }
 
             DB::commit();
-            
+
             return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine']);
-            
+
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -324,7 +339,7 @@ class ProductService
     public function updateVariant(ProductVariant $variant, array $data): ProductVariant
     {
         DB::beginTransaction();
-        
+
         try {
             // Update variant fields
             $variant->update(array_filter([
@@ -333,12 +348,10 @@ class ProductService
                 'status' => $data['status'] ?? $variant->status,
             ]));
 
-
-
             DB::commit();
-            
+
             return $variant->fresh(['brand', 'inventory']);
-            
+
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -351,14 +364,15 @@ class ProductService
     public function deleteProduct(Product $product): bool
     {
         DB::beginTransaction();
-        
+
         try {
             // Soft delete will cascade to variants due to DB constraints
             $product->delete();
-            
+
             DB::commit();
+
             return true;
-            
+
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -372,7 +386,7 @@ class ProductService
     {
         // Remove only product-level attributes; keep variant-level overrides intact.
         $product->attributes()->whereNull('variant_id')->delete();
-        
+
         // Create new product-level attributes.
         foreach ($attributes as $attribute) {
             $product->attributes()->create([
@@ -390,23 +404,23 @@ class ProductService
     public function getProductDetail(int $productId, array $includes = [], ?int $warehouseId = null): ?Product
     {
         $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing', 'productLine', 'category', 'engine', 'media']);
-        
+
         // Eager load inventory with optional warehouse filtering
         $query->with([
-            'variants.inventory' => function($baseQuery) use ($warehouseId) {
+            'variants.inventory' => function ($baseQuery) use ($warehouseId) {
                 $baseQuery->with('warehouse'); // Always load warehouse details
                 if ($warehouseId) {
                     $baseQuery->where('warehouse_id', $warehouseId);
                 }
             },
-            'inventory' => function($baseQuery) use ($warehouseId) {
+            'inventory' => function ($baseQuery) use ($warehouseId) {
                 $baseQuery->with('warehouse');
                 if ($warehouseId) {
                     $baseQuery->where('warehouse_id', $warehouseId);
                 }
-            }
+            },
         ]);
-        
+
         // Add additional relationships if specified
         foreach ($includes as $include) {
             switch ($include) {
@@ -427,20 +441,19 @@ class ProductService
                     $query->with(['alternatives', 'oemReferences']);
                     break;
                 case 'compatibility':
-                    $query->with('vehicleCompatibility.engine.model.make');
+                    $query->with('vehicleCompatibility.engine.model.make', 'vehicleCompatibility.chassis.model.make');
                     break;
                 case 'vins':
                     $query->with('vins');
                     break;
             }
         }
-        
+
         $product = $query->find($productId);
 
         // After loading, merge implicit OEM-based cross-references into alternatives
         if ($product && in_array('alternatives', $includes)) {
             $product = $this->mergeOemAlternatives($product);
-            $product = $this->mergeCategoryAlternatives($product);
         }
 
         return $product;
@@ -488,45 +501,12 @@ class ProductService
             // Attach a synthetic pivot so the frontend sees it the same way
             $alt->setRelation('pivot', (object) [
                 'relationship_type' => 'cross_reference',
-                'source'            => 'oem',
-                'shared_codes'      => $sharedCodes->implode(', '),
+                'source' => 'oem',
+                'shared_codes' => $sharedCodes->implode(', '),
             ]);
 
             $existing->push($alt);
             $existingIds[] = $alt->id;
-        });
-
-        $product->setRelation('alternatives', $existing);
-
-        return $product;
-    }
-
-    /**
-     * Merge category-based siblings into the alternatives collection.
-     * Products in the same category (or subcategory) are treated as category siblings.
-     */
-    private function mergeCategoryAlternatives(Product $product): Product
-    {
-        if (!$product->category_id) {
-            return $product;
-        }
-
-        $existing = $product->alternatives ?? collect();
-        $existingIds = $existing->pluck('id')->push($product->id)->toArray();
-
-        $categorySiblings = Product::with(['defaultVariant.brand', 'pricing'])
-            ->where('category_id', $product->category_id)
-            ->whereNotIn('id', $existingIds)
-            ->limit(20)
-            ->get();
-
-        $categorySiblings->each(function (Product $alt) use (&$existing) {
-            $alt->setRelation('pivot', (object) [
-                'relationship_type' => 'category_sibling',
-                'source'            => 'category',
-                'shared_codes'      => '',
-            ]);
-            $existing->push($alt);
         });
 
         $product->setRelation('alternatives', $existing);
@@ -553,24 +533,24 @@ class ProductService
         }
 
         // Fetch SKUs to find the max number safely in PHP
-    $skus = Product::where('sku_base', 'LIKE', $prefix . '-%')
-        ->pluck('sku_base');
+        $skus = Product::where('sku_base', 'LIKE', $prefix.'-%')
+            ->pluck('sku_base');
 
-    $maxNumber = 0;
-    foreach ($skus as $sku) {
-        $parts = explode('-', $sku);
-        $lastPart = end($parts);
-        if (is_numeric($lastPart)) {
-            $num = (int)$lastPart;
-            if ($num > $maxNumber) {
-                $maxNumber = $num;
+        $maxNumber = 0;
+        foreach ($skus as $sku) {
+            $parts = explode('-', $sku);
+            $lastPart = end($parts);
+            if (is_numeric($lastPart)) {
+                $num = (int) $lastPart;
+                if ($num > $maxNumber) {
+                    $maxNumber = $num;
+                }
             }
         }
-    }
 
-    $nextNumber = $maxNumber + 1;
+        $nextNumber = $maxNumber + 1;
 
-    return $prefix . '-' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+        return $prefix.'-'.str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -610,13 +590,13 @@ class ProductService
 
     /**
      * Recalculate the product name including compatible vehicles.
-     * 
+     *
      * Naming convention depends on the category:
      * - Engine parts (motor, pistón, biela, cigüeñal, etc.):
      *   "Category EngineCode - Make Model YY-YY" (engine code first)
      * - Suspension/general parts:
      *   "Category Make Model YY-YY" (chassis first, engine irrelevant)
-     * 
+     *
      * Years use 2-digit format (e.g. 00-08 instead of 2000-2008).
      * Capped at 3 unique vehicle labels.
      */
@@ -651,15 +631,17 @@ class ProductService
 
         foreach ($explicitVehicles as $compat) {
             $engine = $compat->engine;
-            $model  = $engine?->model;
-            $make   = $model?->make;
+            $model = $engine?->model;
+            $make = $model?->make;
 
-            if (!$make || !$model) continue;
+            if (! $make || ! $model) {
+                continue;
+            }
 
             $engineCode = $engine->engine_code ?? null;
-            $yearFrom   = $model->year_from ? substr((string) $model->year_from, -2) : null;
-            $yearTo     = $model->year_to   ? substr((string) $model->year_to,   -2) : null;
-            $yearRange  = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
+            $yearFrom = $model->year_from ? substr((string) $model->year_from, -2) : null;
+            $yearTo = $model->year_to ? substr((string) $model->year_to, -2) : null;
+            $yearRange = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
 
             if ($isEnginePart && $engineCode) {
                 // Engine parts: "EngineCode Make Model YY-YY"
@@ -674,22 +656,24 @@ class ProductService
 
         // Source B: VIN-based cross-reference
         $productVins = $product->vins()->pluck('vin')->toArray();
-        if (!empty($productVins)) {
+        if (! empty($productVins)) {
             $vehicleVins = \App\Models\VehicleVin::whereIn('vin', $productVins)
                 ->with('engine.model.make')
                 ->get();
 
             foreach ($vehicleVins as $vv) {
                 $engine = $vv->engine;
-                $model  = $engine?->model;
-                $make   = $model?->make;
+                $model = $engine?->model;
+                $make = $model?->make;
 
-                if (!$make || !$model) continue;
+                if (! $make || ! $model) {
+                    continue;
+                }
 
                 $engineCode = $engine->engine_code ?? null;
-                $yearFrom   = $model->year_from ? substr((string) $model->year_from, -2) : null;
-                $yearTo     = $model->year_to   ? substr((string) $model->year_to,   -2) : null;
-                $yearRange  = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
+                $yearFrom = $model->year_from ? substr((string) $model->year_from, -2) : null;
+                $yearTo = $model->year_to ? substr((string) $model->year_to, -2) : null;
+                $yearRange = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
 
                 if ($isEnginePart && $engineCode) {
                     $label = "{$engineCode} {$make->name} {$model->name}{$yearRange}";
@@ -707,7 +691,7 @@ class ProductService
         if ($uniqueVehicles->isNotEmpty()) {
             $displayed = $uniqueVehicles->take(3)->implode(', ');
             $suffix = $uniqueVehicles->count() > 3 ? ' y más' : '';
-            $baseName .= ' - ' . $displayed . $suffix;
+            $baseName .= ' - '.$displayed.$suffix;
         }
 
         // 5. Save
@@ -722,42 +706,42 @@ class ProductService
     public function searchProducts(array $filters = [], int $perPage = 15)
     {
         $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'productLine', 'category']);
-        
+
         // Filter by status
         if (isset($filters['status'])) {
             $query->where('status', $filters['status']);
         }
-        
+
         // Filter by product line
         if (isset($filters['product_line_id'])) {
             $query->where('product_line_id', $filters['product_line_id']);
         }
-        
+
         // Filter by category
         if (isset($filters['category_id'])) {
             $query->where('category_id', $filters['category_id']);
         }
-        
+
         // Filter by brand (through variants)
         if (isset($filters['brand_id'])) {
-            $query->whereHas('variants', function($q) use ($filters) {
+            $query->whereHas('variants', function ($q) use ($filters) {
                 $q->where('brand_id', $filters['brand_id']);
             });
         }
-        
+
         // Search by name or SKU (base or variant)
         if (isset($filters['search'])) {
             $search = $filters['search'];
-            $query->where(function($q) use ($search) {
+            $query->where(function ($q) use ($search) {
                 $q->where('name', 'ILIKE', "%{$search}%")
-                  ->orWhere('sku_base', 'ILIKE', "%{$search}%")
-                  ->orWhereHas('variants', function ($q2) use ($search) {
-                      $q2->where('sku', 'ILIKE', "%{$search}%")
-                         ->orWhere('upc', 'ILIKE', "%{$search}%");
-                  });
+                    ->orWhere('sku_base', 'ILIKE', "%{$search}%")
+                    ->orWhereHas('variants', function ($q2) use ($search) {
+                        $q2->where('sku', 'ILIKE', "%{$search}%")
+                            ->orWhere('upc', 'ILIKE', "%{$search}%");
+                    });
             });
         }
-        
+
         return $query->paginate($perPage);
     }
 
@@ -773,19 +757,13 @@ class ProductService
             $source = Product::with([
                 'pricing',
                 'attributes',
-                'productSuppliers',
                 'vehicleCompatibility',
                 'oemReferences',
                 'media',
-                'variants.pricing',
-                'variants.attributes',
-                'variants.suppliers',
-                'variants.brand',
             ])->findOrFail($product->id);
 
-            $duplicatedProduct = Product::create([
-                'sku_base' => $this->autoGenerateSku($source->category_id),
-                'alternate_code' => $source->alternate_code,
+$duplicatedProduct = Product::create([
+                'sku_base' => '',
                 'pricing_formula' => $source->pricing_formula,
                 'product_line_id' => $source->product_line_id,
                 'category_id' => $source->category_id,
@@ -824,89 +802,19 @@ class ProductService
                 $pricing->save();
             }
 
-            foreach ($source->variants as $sourceVariant) {
-                $newVariant = $this->createVariant($duplicatedProduct, [
-                    'brand_id' => $sourceVariant->brand_id,
-                    'sku' => $sourceVariant->sku,
-                    'upc' => $sourceVariant->upc,
-                    'status' => $sourceVariant->status,
-                    'is_default' => $sourceVariant->is_default,
-                ]);
-
-                if ($sourceVariant->pricing) {
-                    $variantSaleTaxRate = $sourceVariant->pricing->sale_tax_rate ?? $sourceVariant->pricing->tax_rate;
-                    $variantCostTaxRate = $sourceVariant->pricing->cost_tax_rate ?? $variantSaleTaxRate;
-
-                    $variantPricingData = [
-                        'product_id' => $duplicatedProduct->id,
-                        'variant_id' => $newVariant->id,
-                        'base_price' => $sourceVariant->pricing->base_price,
-                        'msrp' => $sourceVariant->pricing->msrp,
-                        'cost' => $sourceVariant->pricing->cost_total,
-                        'cost_base' => $sourceVariant->pricing->getRawOriginal('cost_base'),
-                        'cost_miscellaneous' => $sourceVariant->pricing->cost_miscellaneous,
-                        'margin_percentage' => $sourceVariant->pricing->margin_percentage,
-                        'tax_rate' => $variantSaleTaxRate,
-                        'sale_tax_rate' => $variantSaleTaxRate,
-                        'cost_tax_rate' => $variantCostTaxRate,
-                        'tax_type' => $sourceVariant->pricing->tax_type,
-                        'max_discount_percentage' => $sourceVariant->pricing->max_discount_percentage,
-                        'pricing_formula' => $sourceVariant->pricing->pricing_formula,
-                    ];
-
-                    $variantPricing = $newVariant->pricing()->create(
-                        $this->normalizePricingPayload($variantPricingData)
-                    );
-                    $variantPricing->calculateMargin();
-                    $variantPricing->save();
-                }
-
-                if ($sourceVariant->attributes->isNotEmpty()) {
-                    $this->assignVariantAttributes(
-                        $newVariant,
-                        $sourceVariant->attributes->map(fn(ProductAttribute $attribute) => [
-                            'name' => $attribute->name,
-                            'value' => $attribute->value,
-                            'unit' => $attribute->unit,
-                        ])->values()->toArray()
-                    );
-                }
-
-                if ($sourceVariant->suppliers->isNotEmpty()) {
-                    $newVariant->suppliers()->sync(
-                        $sourceVariant->suppliers->mapWithKeys(fn($supplier) => [
-                            $supplier->id => [
-                                'supplier_cost' => $supplier->pivot->supplier_cost,
-                                'lead_time_days' => $supplier->pivot->lead_time_days,
-                                'minimum_order_quantity' => $supplier->pivot->minimum_order_quantity,
-                                'is_preferred' => (bool) $supplier->pivot->is_preferred,
-                            ],
-                        ])->toArray()
-                    );
-                }
-            }
-
-            $productLevelAttributes = $source->attributes->whereNull('variant_id')->values();
+            // Duplicate product-level attributes (not variant-level)
+            $productLevelAttributes = collect($source->attributes)
+                ->filter(fn (ProductAttribute $a) => $a->variant_id === null)
+                ->values();
             if ($productLevelAttributes->isNotEmpty()) {
                 $this->assignAttributes(
                     $duplicatedProduct,
-                    $productLevelAttributes->map(fn(ProductAttribute $attribute) => [
+                    $productLevelAttributes->map(fn (ProductAttribute $attribute) => [
                         'name' => $attribute->name,
                         'value' => $attribute->value,
                         'unit' => $attribute->unit,
                     ])->toArray()
                 );
-            }
-
-            $legacyProductSuppliers = $source->productSuppliers->whereNull('variant_id')->values();
-            foreach ($legacyProductSuppliers as $productSupplier) {
-                $duplicatedProduct->productSuppliers()->create([
-                    'supplier_id' => $productSupplier->supplier_id,
-                    'supplier_cost' => $productSupplier->supplier_cost,
-                    'lead_time_days' => $productSupplier->lead_time_days,
-                    'minimum_order_quantity' => $productSupplier->minimum_order_quantity,
-                    'is_preferred' => (bool) $productSupplier->is_preferred,
-                ]);
             }
 
             foreach ($source->vehicleCompatibility as $compatibility) {
@@ -963,7 +871,7 @@ class ProductService
                 'lead_time_days' => $data['lead_time_days'] ?? null,
                 'minimum_order_quantity' => $data['minimum_order_quantity'] ?? null,
                 'is_preferred' => $data['is_preferred'] ?? false,
-            ]
+            ],
         ]);
     }
 
@@ -973,7 +881,7 @@ class ProductService
     public function addCompatibility(Product $product, int $engineId, ?string $notes = null): void
     {
         $product->compatibleEngines()->syncWithoutDetaching([
-            $engineId => ['notes' => $notes]
+            $engineId => ['notes' => $notes],
         ]);
     }
 
@@ -987,7 +895,7 @@ class ProductService
             ->lockForUpdate()
             ->first();
 
-        if (!$row) {
+        if (! $row) {
             // Fallback: create if missing
             $nextValue = Product::count() + 1;
             DB::table('system_sequences')->insert([
@@ -996,6 +904,7 @@ class ProductService
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+
             return str_pad($nextValue, 8, '0', STR_PAD_LEFT);
         }
 
@@ -1017,13 +926,13 @@ class ProductService
             ->lockForUpdate()
             ->first();
 
-        if (!$row) {
+        if (! $row) {
             // Fallback: initialize from the current max numeric variant system_id
             $maxNumericId = DB::table('product_variants')
                 ->whereNotNull('system_id')
                 ->pluck('system_id')
-                ->filter(fn($id) => preg_match('/^\d{8}$/', (string) $id))
-                ->map(fn($id) => (int) $id)
+                ->filter(fn ($id) => preg_match('/^\d{8}$/', (string) $id))
+                ->map(fn ($id) => (int) $id)
                 ->max() ?? 0;
 
             $nextValue = $maxNumericId + 1;

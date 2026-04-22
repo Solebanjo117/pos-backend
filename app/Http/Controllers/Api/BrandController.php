@@ -4,8 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Brand;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class BrandController extends Controller
 {
@@ -19,7 +19,7 @@ class BrandController extends Controller
 
         // Search by name
         if ($request->filled('search')) {
-            $query->where('name', 'ilike', '%' . $request->search . '%');
+            $query->where('name', 'ilike', '%'.$request->search.'%');
         }
 
         // Sorting
@@ -106,8 +106,8 @@ class BrandController extends Controller
         $brand = Brand::findOrFail($id);
 
         $validated = $request->validate([
-            'name' => 'sometimes|required|string|max:255|unique:brands,name,' . $id,
-            'prefix' => 'nullable|string|max:5|unique:brands,prefix,' . $id,
+            'name' => 'sometimes|required|string|max:255|unique:brands,name,'.$id,
+            'prefix' => 'nullable|string|max:5|unique:brands,prefix,'.$id,
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
@@ -150,6 +150,41 @@ class BrandController extends Controller
 
         return response()->json([
             'message' => 'Marca eliminada exitosamente',
+        ]);
+    }
+
+    /**
+     * POST /api/v1/brands/{id}/suppliers
+     * Attach a supplier to a brand.
+     */
+    public function attachSupplier(Request $request, int $id): JsonResponse
+    {
+        $brand = Brand::findOrFail($id);
+
+        $validated = $request->validate([
+            'supplier_id' => 'required|exists:suppliers,id',
+        ]);
+
+        $brand->suppliers()->syncWithoutDetaching([$validated['supplier_id']]);
+
+        return response()->json([
+            'message' => 'Proveedor asociado a la marca exitosamente',
+            'data' => $brand->fresh()->load('suppliers:id,name'),
+        ]);
+    }
+
+    /**
+     * DELETE /api/v1/brands/{id}/suppliers/{supplierId}
+     * Detach a supplier from a brand.
+     */
+    public function detachSupplier(int $id, int $supplierId): JsonResponse
+    {
+        $brand = Brand::findOrFail($id);
+        $brand->suppliers()->detach($supplierId);
+
+        return response()->json([
+            'message' => 'Proveedor desasociado de la marca exitosamente',
+            'data' => $brand->fresh()->load('suppliers:id,name'),
         ]);
     }
 }

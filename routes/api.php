@@ -17,6 +17,7 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     require __DIR__ . '/api_inventory.php';
     require __DIR__ . '/api_products.php';
     require __DIR__ . '/api_product_import.php';
+    require __DIR__ . '/api_imports.php';
     require __DIR__ . '/api_warehouses.php';
     require __DIR__ . '/api_inventory_movements.php';
     require __DIR__ . '/api_inventory_transfers.php';

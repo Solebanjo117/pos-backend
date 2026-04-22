@@ -1,12 +1,12 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\ProductCompatibilityController;
+use App\Http\Controllers\Api\VehicleChassisController;
+use App\Http\Controllers\Api\VehicleEngineController;
 use App\Http\Controllers\Api\VehicleMakeController;
 use App\Http\Controllers\Api\VehicleModelController;
-use App\Http\Controllers\Api\VehicleEngineController;
-use App\Http\Controllers\Api\VehicleChassisController;
 use App\Http\Controllers\Api\VehicleVinController;
-use App\Http\Controllers\Api\ProductCompatibilityController;
+use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
@@ -14,8 +14,9 @@ use App\Http\Controllers\Api\ProductCompatibilityController;
 |--------------------------------------------------------------------------
 */
 
-Route::apiResource('vehicle-makes', VehicleMakeController::class)->only(['index', 'show']);
-Route::apiResource('vehicle-makes', VehicleMakeController::class)->only(['store', 'update', 'destroy'])->middleware('role:admin,manager');
+Route::get('vehicle-makes/all', [VehicleMakeController::class, 'all']);
+Route::apiResource('vehicle-makes', VehicleMakeController::class)->only(['index', 'show'])->whereNumber('vehicle_make');
+Route::apiResource('vehicle-makes', VehicleMakeController::class)->only(['store', 'update', 'destroy'])->middleware('role:admin,manager')->whereNumber('vehicle_make');
 
 // Vehicle Models
 Route::apiResource('vehicle-models', VehicleModelController::class)->only(['index', 'show']);

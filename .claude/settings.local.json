@@ -10,7 +10,8 @@
       "Bash(C:\\\\Users\\\\JUANANTONIOCASTILLAO\\\\AppData\\\\Local\\\\Herd\\\\bin\\\\php.exe artisan:*)",
       "Bash(/c/Users/JUANANTONIOCASTILLAO/AppData/Local/Herd/bin/php.exe artisan:*)",
       "Bash(cat resources/js/routes/sales-orders/*.ts)",
-      "Bash(grep -E \"\\\\.php$\")"
+      "Bash(grep -E \"\\\\.php$\")",
+      "Bash(grep -E \"\\\\.\\(php|rb\\)$\")"
     ]
   }
 }

@@ -19,7 +19,8 @@ return new class extends Migration
             $table->string('fuel_type', 50)->nullable()->comment('Gasoline, Diesel, Hybrid, etc.');
             $table->timestamps();
             
-            $table->index(['model_id', 'engine_code']);
+            // Base integrity for legacy single-model records.
+            $table->unique(['model_id', 'engine_code']);
         });
     }
 

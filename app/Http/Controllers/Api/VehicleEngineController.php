@@ -6,9 +6,17 @@ use App\Http\Controllers\Controller;
 use App\Models\VehicleEngine;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class VehicleEngineController extends Controller
 {
+    private const ALLOWED_FUEL_TYPES = [
+        'Gasoline',
+        'Diesel',
+        'Hybrid',
+        'Electric',
+    ];
+
     /**
      * Display a listing of vehicle engines.
      */
@@ -46,8 +54,8 @@ class VehicleEngineController extends Controller
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
                 $q->where('engine_code', 'ilike', "%{$search}%")
-                  ->orWhere('displacement', 'ilike', "%{$search}%")
-                  ->orWhere('fuel_type', 'ilike', "%{$search}%");
+                    ->orWhere('displacement', 'ilike', "%{$search}%")
+                    ->orWhere('fuel_type', 'ilike', "%{$search}%");
             });
         }
 
@@ -86,6 +94,17 @@ class VehicleEngineController extends Controller
         ]);
 
         $modelIds = $this->resolveModelIds($validated, false);
+        $validated['engine_code'] = $this->normalizeEngineCode($validated['engine_code'] ?? null);
+        $this->assertEngineCodeNotBlank($validated['engine_code']);
+        $this->assertEngineCodeHasNoWhitespace($validated['engine_code']);
+
+        if (array_key_exists('fuel_type', $validated)) {
+            $validated['fuel_type'] = $this->normalizeFuelType($validated['fuel_type'] ?? null);
+            $this->assertFuelTypeIsAllowed($validated['fuel_type']);
+        }
+
+        $this->ensureEngineCodeIsUniquePerModel($validated['engine_code'], $modelIds);
+
         $validated['model_id'] = $modelIds[0] ?? null;
         unset($validated['model_ids']);
 
@@ -130,9 +149,31 @@ class VehicleEngineController extends Controller
             'aspiration' => 'nullable|string|max:50',
         ]);
 
-        $modelIds = $this->resolveModelIds($validated, true);
+        $modelIds = $this->resolveModelIdsForUpdate($validated);
+        $targetModelIds = $modelIds ?? $this->extractModelIdsFromEngine($engine);
+
+        if (array_key_exists('engine_code', $validated)) {
+            $validated['engine_code'] = $this->normalizeEngineCode($validated['engine_code'] ?? null);
+            $this->assertEngineCodeNotBlank($validated['engine_code']);
+            $this->assertEngineCodeHasNoWhitespace($validated['engine_code']);
+        }
+
+        if (array_key_exists('fuel_type', $validated)) {
+            $validated['fuel_type'] = $this->normalizeFuelType($validated['fuel_type'] ?? null);
+            $this->assertFuelTypeIsAllowed($validated['fuel_type']);
+        }
+
+        $targetEngineCode = array_key_exists('engine_code', $validated)
+            ? $validated['engine_code']
+            : $this->normalizeEngineCode($engine->engine_code);
+
+        $this->ensureEngineCodeIsUniquePerModel($targetEngineCode, $targetModelIds, (int) $engine->id);
+
         if ($modelIds !== null) {
             $validated['model_id'] = $modelIds[0] ?? null;
+        } else {
+            // Ignore legacy singular model_id updates unless model_ids is explicitly sent.
+            unset($validated['model_id']);
         }
         unset($validated['model_ids']);
 
@@ -195,7 +236,7 @@ class VehicleEngineController extends Controller
      *
      * @return array<int>|null
      */
-    private function resolveModelIds(array $validated, bool $allowNoChange): ?array
+    private function resolveModelIds(array $validated, bool $allowNoChange, bool $fallbackToLegacyWhenModelIdsEmpty = true): ?array
     {
         $hasModelIds = array_key_exists('model_ids', $validated);
         $hasLegacyModelId = array_key_exists('model_id', $validated);
@@ -216,7 +257,7 @@ class VehicleEngineController extends Controller
                 return $modelIds;
             }
 
-            if ($hasLegacyModelId && !empty($validated['model_id'])) {
+            if ($fallbackToLegacyWhenModelIdsEmpty && $hasLegacyModelId && !empty($validated['model_id'])) {
                 return [(int) $validated['model_id']];
             }
 
@@ -226,6 +267,139 @@ class VehicleEngineController extends Controller
         $legacyModelId = $validated['model_id'] ?? null;
 
         return !empty($legacyModelId) ? [(int) $legacyModelId] : [];
+    }
+
+    /**
+     * Resolve model IDs for update without side-effects on legacy payloads.
+     *
+     * Legacy clients may still send model_id on update. We only mutate pivot
+     * associations when model_ids is explicitly provided.
+     *
+     * @return array<int>|null
+     */
+    private function resolveModelIdsForUpdate(array $validated): ?array
+    {
+        if (!array_key_exists('model_ids', $validated)) {
+            return null;
+        }
+
+        return $this->resolveModelIds($validated, true, false);
+    }
+
+    private function normalizeEngineCode(?string $engineCode): string
+    {
+        return mb_strtoupper(trim((string) $engineCode));
+    }
+
+    private function assertEngineCodeNotBlank(string $engineCode): void
+    {
+        if ($engineCode === '') {
+            throw ValidationException::withMessages([
+                'engine_code' => ['El codigo del motor es obligatorio.'],
+            ]);
+        }
+    }
+
+    private function assertEngineCodeHasNoWhitespace(string $engineCode): void
+    {
+        if (preg_match('/\s/u', $engineCode) === 1) {
+            throw ValidationException::withMessages([
+                'engine_code' => ['El codigo del motor no puede contener espacios.'],
+            ]);
+        }
+    }
+
+    private function normalizeFuelType(?string $fuelType): ?string
+    {
+        $normalized = trim((string) $fuelType);
+
+        if ($normalized === '') {
+            return null;
+        }
+
+        foreach (self::ALLOWED_FUEL_TYPES as $allowedFuelType) {
+            if (mb_strtolower($allowedFuelType) === mb_strtolower($normalized)) {
+                return $allowedFuelType;
+            }
+        }
+
+        return $normalized;
+    }
+
+    private function assertFuelTypeIsAllowed(?string $fuelType): void
+    {
+        if ($fuelType === null) {
+            return;
+        }
+
+        if (!in_array($fuelType, self::ALLOWED_FUEL_TYPES, true)) {
+            throw ValidationException::withMessages([
+                'fuel_type' => ['Tipo de combustible invalido. Valores permitidos: Gasoline, Diesel, Hybrid, Electric.'],
+            ]);
+        }
+    }
+
+    /**
+     * @return array<int>
+     */
+    private function extractModelIdsFromEngine(VehicleEngine $engine): array
+    {
+        $engine->loadMissing('models:id');
+
+        $modelIds = $engine->models
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        if (empty($modelIds) && $engine->model_id !== null) {
+            $modelIds = [(int) $engine->model_id];
+        }
+
+        return $modelIds;
+    }
+
+    /**
+     * @param  array<int>  $modelIds
+     */
+    private function ensureEngineCodeIsUniquePerModel(string $engineCode, array $modelIds, ?int $ignoreEngineId = null): void
+    {
+        $normalizedModelIds = collect($modelIds)
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        $query = VehicleEngine::query()
+            ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower(trim($engineCode))]);
+
+        if ($ignoreEngineId !== null) {
+            $query->where('id', '!=', $ignoreEngineId);
+        }
+
+        if (empty($normalizedModelIds)) {
+            // Explicit independent-engine strategy: only collide with other independent engines.
+            $query->where(function ($scopedQuery) {
+                $scopedQuery->whereNull('model_id')
+                    ->whereDoesntHave('models');
+            });
+        } else {
+            $query->where(function ($scopedQuery) use ($normalizedModelIds) {
+                $scopedQuery->whereIn('model_id', $normalizedModelIds)
+                    ->orWhereHas('models', function ($modelsQuery) use ($normalizedModelIds) {
+                        $modelsQuery->whereIn('vehicle_models.id', $normalizedModelIds);
+                    });
+            });
+        }
+
+        if ($query->exists()) {
+            throw ValidationException::withMessages([
+                'engine_code' => ['Ya existe un motor con este codigo para el/los modelo(s) seleccionado(s).'],
+            ]);
+        }
     }
 
     private function serializeEngine(VehicleEngine $engine): VehicleEngine

@@ -12,7 +12,8 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
- $middleware->appendToGroup('api', \Illuminate\Http\Middleware\HandleCors::class);
+        $middleware->prepend(\Illuminate\Http\Middleware\HandleCors::class);
+        $middleware->appendToGroup('api', \Illuminate\Http\Middleware\HandleCors::class);
 
         // Register role middleware alias
         $middleware->alias([

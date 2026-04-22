@@ -5,8 +5,8 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSupplierRequest;
 use App\Models\Supplier;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class SupplierController extends Controller
 {
@@ -50,6 +50,7 @@ class SupplierController extends Controller
     public function show(int $id): JsonResponse
     {
         $supplier = Supplier::withCount('productSuppliers as products_count')
+            ->with('brands:id,name,prefix')
             ->findOrFail($id);
 
         // Load products with pricing
@@ -184,5 +185,52 @@ class SupplierController extends Controller
             ->paginate(15);
 
         return response()->json($orders);
+    }
+
+    /**
+     * GET /api/v1/suppliers/{id}/brands
+     * Get brands associated with a supplier.
+     */
+    public function brands(int $id): JsonResponse
+    {
+        $supplier = Supplier::findOrFail($id);
+        $brands = $supplier->brands()->orderBy('brands.name')->get(['brands.id', 'brands.name', 'brands.prefix']);
+
+        return response()->json(['data' => $brands]);
+    }
+
+    /**
+     * POST /api/v1/suppliers/{id}/brands
+     * Attach a brand to a supplier.
+     */
+    public function attachBrand(Request $request, int $id): JsonResponse
+    {
+        $supplier = Supplier::findOrFail($id);
+
+        $validated = $request->validate([
+            'brand_id' => 'required|exists:brands,id',
+        ]);
+
+        $supplier->brands()->syncWithoutDetaching([$validated['brand_id']]);
+
+        return response()->json([
+            'message' => 'Marca asociada al proveedor exitosamente',
+            'data' => $supplier->fresh()->load('brands:id,name,prefix'),
+        ]);
+    }
+
+    /**
+     * DELETE /api/v1/suppliers/{id}/brands/{brandId}
+     * Detach a brand from a supplier.
+     */
+    public function detachBrand(int $id, int $brandId): JsonResponse
+    {
+        $supplier = Supplier::findOrFail($id);
+        $supplier->brands()->detach($brandId);
+
+        return response()->json([
+            'message' => 'Marca desasociada del proveedor exitosamente',
+            'data' => $supplier->fresh()->load('brands:id,name,prefix'),
+        ]);
     }
 }

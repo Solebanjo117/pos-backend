@@ -4,300 +4,148 @@ namespace App\Imports;
 
 use App\Models\Brand;
 use App\Models\Category;
-use App\Models\Setting;
-use App\Models\Supplier;
 use App\Services\ProductService;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Collection;
-use Maatwebsite\Excel\Facades\Excel;
 
-class ProductImport
+class ProductImport extends BaseImport
 {
-    public array $results = [];
+    public function __construct(private readonly ProductService $productService) {}
 
-    public array $errors = [];
-
-    public int $successCount = 0;
-
-    public int $errorCount = 0;
-
-    public function __construct(private readonly ProductService $productService)
+    public function getColumns(): array
     {
+        return [
+            ['key' => 'nombre', 'label' => 'Nombre', 'type' => 'text', 'required' => true],
+            ['key' => 'sku', 'label' => 'SKU', 'type' => 'text'],
+            ['key' => 'descripcion', 'label' => 'Descripción', 'type' => 'text'],
+            ['key' => 'categoria', 'label' => 'Categoría', 'type' => 'searchable', 'required' => true, 'endpoint' => '/categories/all'],
+        ];
+    }
+
+    public function getExampleRow(): array
+    {
+        return [
+            'nombre' => 'Bujía Iridium',
+            'sku'    => 'SKU-001',
+            'descripcion' => 'Bujía para motor gasolina',
+            'categoria'   => 'Encendido',
+        ];
+    }
+
+    public function getEntityLabel(): string
+    {
+        return 'producto';
     }
 
     public function preview(UploadedFile $file, int $maxRows = 200): array
     {
-        [$rows] = $this->extractRows($file);
-
-        return $rows
-            ->take($maxRows)
-            ->map(function (array $row): array {
-                $rowErrors = $this->validateRow($row);
-
-                return [
-                    'row' => $row['__row'],
-                    'nombre' => $row['name'] ?? '',
-                    'sku' => $row['sku'] ?? '',
-                    'descripcion' => $row['description'] ?? '',
-                    'marca' => $row['brand'] ?? '',
-                    'categoria' => $row['category'] ?? '',
-                    'costo' => $row['cost'] ?? '',
-                    'precio' => $row['price'] ?? '',
-                    'sku_variante' => $row['variant_sku'] ?? '',
-                    'proveedor' => $row['supplier'] ?? '',
-                    'is_valid' => empty($rowErrors),
-                    'errors' => $rowErrors,
-                ];
-            })
-            ->values()
-            ->all();
+        return parent::preview($file, $maxRows);
     }
 
-    public function import(UploadedFile $file): void
+    public function execute(array $rows): void
     {
-        [$rows] = $this->extractRows($file);
-
-        foreach ($rows as $row) {
-            $rowNum = (int) ($row['__row'] ?? 0);
-
-            try {
-                $rowErrors = $this->validateRow($row);
-                if (!empty($rowErrors)) {
-                    throw new \RuntimeException(implode(' ', $rowErrors));
-                }
-
-                $brandId = $this->resolveBrandId($row['brand']);
-                $categoryId = $this->resolveCategoryId($row['category']);
-                $cost = $this->parseMoney($row['cost'] ?? null);
-                $price = $this->parseMoney($row['price'] ?? null);
-
-                $productData = [
-                    'name' => $row['name'],
-                    'sku_base' => $this->nullIfEmpty($row['sku'] ?? null),
-                    'description' => $this->nullIfEmpty($row['description'] ?? null),
-                    'brand_id' => $brandId,
-                    'category_id' => $categoryId,
-                    'sku' => $this->nullIfEmpty($row['variant_sku'] ?? null) ?: $this->nullIfEmpty($row['sku'] ?? null),
-                    'status' => 'active',
-                ];
-
-                if ($cost !== null || $price !== null) {
-                    $basePrice = $price ?? 0.0;
-                    $storeTaxRate = (int) round((float) Setting::get('store_tax_rate', 7));
-
-                    $productData['pricing'] = [
-                        'base_price' => $basePrice,
-                        'msrp' => $basePrice,
-                        'cost' => $cost ?? 0.0,
-                        'tax_rate' => $storeTaxRate,
-                        'sale_tax_rate' => $storeTaxRate,
-                        'cost_tax_rate' => $storeTaxRate,
-                        'tax_type' => 'standard',
-                        'max_discount_percentage' => 0,
-                    ];
-                }
-
-                $product = $this->productService->createProduct($productData);
-
-                $supplierName = $this->nullIfEmpty($row['supplier'] ?? null);
-                if ($supplierName) {
-                    $supplierId = $this->resolveSupplierId($supplierName);
-                    if (!$supplierId) {
-                        throw new \RuntimeException("Proveedor '{$supplierName}' no encontrado.");
-                    }
-
-                    $variant = $product->variants->firstWhere('is_default', true) ?? $product->variants->first();
-                    if ($variant) {
-                        $variant->suppliers()->syncWithoutDetaching([
-                            $supplierId => [
-                                'supplier_cost' => $cost ?? 0,
-                                'is_preferred' => true,
-                            ],
-                        ]);
-                    }
-                }
-
-                $this->successCount++;
-                $this->results[] = [
-                    'row' => $rowNum,
-                    'status' => 'ok',
-                    'name' => $row['name'],
-                    'product_id' => $product->id,
-                ];
-            } catch (\Throwable $e) {
-                $this->errorCount++;
-                $this->errors[] = [
-                    'row' => $rowNum,
-                    'name' => $row['name'] ?? '',
-                    'error' => $e->getMessage(),
-                ];
-            }
-        }
+        parent::execute($rows);
     }
 
-    private function extractRows(UploadedFile $file): array
+    protected function mapHeader(string $header): string
     {
-        $sheet = Excel::toCollection(null, $file)->first() ?? collect();
-
-        if ($sheet->isEmpty()) {
-            return [collect()];
-        }
-
-        $rawHeaders = $sheet->shift();
-        $headers = collect($rawHeaders?->toArray() ?? [])->map(fn ($header) => $this->normalizeHeader((string) $header))->all();
-
-        $rows = collect();
-        foreach ($sheet->values() as $index => $row) {
-            $values = $row->toArray();
-            $assoc = [];
-
-            foreach ($headers as $position => $header) {
-                if ($header === '') {
-                    continue;
-                }
-                $assoc[$header] = $this->cleanCell($values[$position] ?? null);
-            }
-
-            $assoc['__row'] = $index + 2;
-
-            if ($this->isEmptyDataRow($assoc)) {
-                continue;
-            }
-
-            $rows->push($assoc);
-        }
-
-        return [$rows];
+        return match ($header) {
+            'nombre', 'name' => 'nombre',
+            'sku'            => 'sku',
+            'descripcion', 'description' => 'descripcion',
+            'categoria', 'category'      => 'categoria',
+            default => $header,
+        };
     }
 
-    private function validateRow(array $row): array
+    public function validateRow(array $row): array
     {
         $errors = [];
 
-        $name = trim((string) ($row['name'] ?? ''));
-        $brandName = trim((string) ($row['brand'] ?? ''));
-        $categoryName = trim((string) ($row['category'] ?? ''));
-
-        if ($name === '') {
+        if (trim((string) ($row['nombre'] ?? '')) === '') {
             $errors[] = 'El campo nombre es obligatorio.';
         }
 
-        if ($brandName === '') {
-            $errors[] = 'El campo marca es obligatorio.';
-        } elseif (!$this->resolveBrandId($brandName)) {
-            $errors[] = "Marca '{$brandName}' no encontrada.";
-        }
-
-        if ($categoryName === '') {
+        if (trim((string) ($row['categoria'] ?? '')) === '') {
             $errors[] = 'El campo categoria es obligatorio.';
-        } elseif (!$this->resolveCategoryId($categoryName)) {
-            $errors[] = "Categoria '{$categoryName}' no encontrada.";
-        }
-
-        $price = $this->parseMoney($row['price'] ?? null);
-        if ($price !== null && $price < 0) {
-            $errors[] = 'El precio no puede ser negativo.';
-        }
-
-        $cost = $this->parseMoney($row['cost'] ?? null);
-        if ($cost !== null && $cost < 0) {
-            $errors[] = 'El costo no puede ser negativo.';
         }
 
         return $errors;
     }
 
-    private function normalizeHeader(string $header): string
+    public function processRow(array $row): mixed
     {
-        $normalized = mb_strtolower(trim($header));
-        $normalized = str_replace([' ', '-', '.'], '_', $normalized);
+        $categoryId = $this->resolveOrCreate(Category::class, 'name', $row['categoria']);
 
-        return match ($normalized) {
-            'nombre', 'name' => 'name',
-            'sku' => 'sku',
-            'descripcion', 'description' => 'description',
-            'marca', 'brand' => 'brand',
-            'categoria', 'category' => 'category',
-            'costo', 'cost' => 'cost',
-            'precio', 'price' => 'price',
-            'sku_variante', 'variant_sku', 'sku_variant' => 'variant_sku',
-            'proveedor', 'supplier' => 'supplier',
-            default => $normalized,
-        };
-    }
+        $productData = [
+            'name'        => $row['nombre'],
+            'sku_base'    => $this->nullIfEmpty($row['sku'] ?? null),
+            'description' => $this->nullIfEmpty($row['descripcion'] ?? null),
+            'category_id' => $categoryId,
+            'status'      => 'active',
+        ];
 
-    private function cleanCell(mixed $value): mixed
-    {
-        if (is_string($value)) {
-            return trim($value);
+        // Atributos enriquecidos desde la UI
+        $attributes = $row['__attributes'] ?? [];
+        if (is_array($attributes) && ! empty($attributes)) {
+            $productData['attributes'] = array_values(array_filter(
+                $attributes,
+                fn ($a) => ! empty($a['name']) && ! empty($a['value'])
+            ));
         }
 
-        return $value;
-    }
-
-    private function parseMoney(mixed $value): ?float
-    {
-        if ($value === null || $value === '') {
-            return null;
+        // Compatibilidad vehicular enriquecida desde la UI
+        $compatibility = $row['__compatibility'] ?? [];
+        if (is_array($compatibility) && ! empty($compatibility)) {
+            $productData['vehicle_compatibility'] = array_column($compatibility, 'engine_id');
         }
 
-        if (is_numeric($value)) {
-            return (float) $value;
-        }
+        $product = $this->productService->createProduct($productData);
 
-        $normalized = preg_replace('/[^0-9,.-]/', '', (string) $value);
-        if ($normalized === null || $normalized === '') {
-            return null;
-        }
+        // Variantes enriquecidas desde la UI (draft variants del VariantManager)
+        $variants = $row['__variants'] ?? [];
+        if (is_array($variants) && ! empty($variants)) {
+            foreach ($variants as $variantData) {
+                $brandId = null;
+                if (! empty($variantData['brand_id'])) {
+                    $brandId = (int) $variantData['brand_id'];
+                } elseif (! empty($variantData['brand']['name'])) {
+                    $brandId = $this->resolveOrCreate(Brand::class, 'name', $variantData['brand']['name'], ['status' => 'active']);
+                }
 
-        if (str_contains($normalized, ',') && str_contains($normalized, '.')) {
-            $normalized = str_replace(',', '', $normalized);
-        } elseif (str_contains($normalized, ',')) {
-            $normalized = str_replace(',', '.', $normalized);
-        }
+                if (! $brandId) {
+                    continue;
+                }
 
-        return is_numeric($normalized) ? (float) $normalized : null;
-    }
+                $variant = $this->productService->createVariant($product, [
+                    'brand_id'   => $brandId,
+                    'sku'        => $this->nullIfEmpty($variantData['sku'] ?? null) ?? ($product->sku_base ?? ''),
+                    'status'     => 'active',
+                    'is_default' => false,
+                ]);
 
-    private function nullIfEmpty(mixed $value): ?string
-    {
-        $value = trim((string) ($value ?? ''));
-        return $value === '' ? null : $value;
-    }
-
-    private function resolveBrandId(string $name): ?int
-    {
-        return Brand::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim($name))])
-            ->value('id');
-    }
-
-    private function resolveCategoryId(string $name): ?int
-    {
-        return Category::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim($name))])
-            ->value('id');
-    }
-
-    private function resolveSupplierId(string $name): ?int
-    {
-        return Supplier::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim($name))])
-            ->value('id');
-    }
-
-    private function isEmptyDataRow(array $row): bool
-    {
-        foreach ($row as $key => $value) {
-            if ($key === '__row') {
-                continue;
-            }
-
-            if ($value !== null && $value !== '') {
-                return false;
+                if (! empty($variantData['pricing']) && $variant) {
+                    $pricing = $variant->pricing()->create([
+                        'product_id'             => $product->id,
+                        'base_price'             => (float) ($variantData['pricing']['base_price'] ?? 0),
+                        'msrp'                   => (float) ($variantData['pricing']['msrp'] ?? 0),
+                        'cost'                   => (float) ($variantData['pricing']['cost'] ?? 0),
+                        'tax_rate'               => (int) ($variantData['pricing']['tax_rate'] ?? 7),
+                        'sale_tax_rate'          => (int) ($variantData['pricing']['sale_tax_rate'] ?? 7),
+                        'cost_tax_rate'          => (int) ($variantData['pricing']['cost_tax_rate'] ?? 7),
+                        'tax_type'               => $variantData['pricing']['tax_type'] ?? 'standard',
+                        'max_discount_percentage' => 0,
+                    ]);
+                    $pricing->calculateMargin();
+                    $pricing->save();
+                }
             }
         }
 
-        return true;
+        return $product;
+    }
+
+    protected function getLabelColumn(): string
+    {
+        return 'nombre';
     }
 }

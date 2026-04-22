@@ -22,4 +22,7 @@ Route::prefix('suppliers')->middleware('role:admin,manager,buyer')->group(functi
 
     // Sub-resources
     Route::get('/{id}/purchase-orders', [SupplierController::class, 'purchaseOrders']);
+    Route::get('/{id}/brands', [SupplierController::class, 'brands']);
+    Route::post('/{id}/brands', [SupplierController::class, 'attachBrand']);
+    Route::delete('/{id}/brands/{brandId}', [SupplierController::class, 'detachBrand']);
 });

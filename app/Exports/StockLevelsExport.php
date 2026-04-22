@@ -3,15 +3,14 @@
 namespace App\Exports;
 
 use Maatwebsite\Excel\Concerns\FromArray;
+use Maatwebsite\Excel\Concerns\ShouldAutoSize;
 use Maatwebsite\Excel\Concerns\WithHeadings;
 use Maatwebsite\Excel\Concerns\WithStyles;
 use Maatwebsite\Excel\Concerns\WithTitle;
-use Maatwebsite\Excel\Concerns\ShouldAutoSize;
-use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
-use PhpOffice\PhpSpreadsheet\Style\Color;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
-class StockLevelsExport implements FromArray, WithHeadings, WithStyles, WithTitle, ShouldAutoSize
+class StockLevelsExport implements FromArray, ShouldAutoSize, WithHeadings, WithStyles, WithTitle
 {
     protected array $reportData;
 
@@ -23,7 +22,7 @@ class StockLevelsExport implements FromArray, WithHeadings, WithStyles, WithTitl
     public function array(): array
     {
         $rows = [];
-        
+
         foreach ($this->reportData['products'] as $product) {
             $rows[] = [
                 $product['sku'],
@@ -63,7 +62,7 @@ class StockLevelsExport implements FromArray, WithHeadings, WithStyles, WithTitl
                 'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
                 'fill' => [
                     'fillType' => Fill::FILL_SOLID,
-                    'startColor' => ['rgb' => '4F46E5'] // indigo-600
+                    'startColor' => ['rgb' => '4F46E5'], // indigo-600
                 ],
             ],
         ];
@@ -76,7 +75,7 @@ class StockLevelsExport implements FromArray, WithHeadings, WithStyles, WithTitl
 
     protected function translateStatus(string $status): string
     {
-        return match($status) {
+        return match ($status) {
             'critical' => 'Crítico',
             'low' => 'Bajo',
             'normal' => 'Normal',

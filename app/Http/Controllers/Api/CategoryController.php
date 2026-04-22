@@ -41,6 +41,18 @@ class CategoryController extends Controller
     }
 
     /**
+     * Get all categories (for dropdowns).
+     */
+    public function all(): JsonResponse
+    {
+        $categories = Category::orderBy('name')
+            ->select('id', 'name', 'parent_id')
+            ->get();
+
+        return response()->json(['data' => $categories]);
+    }
+
+    /**
      * Store a newly created category.
      */
     public function store(Request $request): JsonResponse

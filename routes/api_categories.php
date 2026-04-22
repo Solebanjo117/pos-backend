@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('categories')->group(function () {
     Route::middleware('role:admin,manager,buyer,seller,cashier,assistant')->group(function () {
         Route::get('/', [CategoryController::class, 'index']);
+        Route::get('/all', [CategoryController::class, 'all']);
         Route::get('/{category}', [CategoryController::class, 'show']);
         Route::post('/preview-price', [CategoryController::class, 'previewPrice']);
     });

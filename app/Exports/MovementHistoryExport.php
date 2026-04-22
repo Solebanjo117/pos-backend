@@ -3,14 +3,14 @@
 namespace App\Exports;
 
 use Maatwebsite\Excel\Concerns\FromArray;
+use Maatwebsite\Excel\Concerns\ShouldAutoSize;
 use Maatwebsite\Excel\Concerns\WithHeadings;
 use Maatwebsite\Excel\Concerns\WithStyles;
 use Maatwebsite\Excel\Concerns\WithTitle;
-use Maatwebsite\Excel\Concerns\ShouldAutoSize;
-use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
-class MovementHistoryExport implements FromArray, WithHeadings, WithStyles, WithTitle, ShouldAutoSize
+class MovementHistoryExport implements FromArray, ShouldAutoSize, WithHeadings, WithStyles, WithTitle
 {
     protected array $reportData;
 
@@ -22,7 +22,7 @@ class MovementHistoryExport implements FromArray, WithHeadings, WithStyles, With
     public function array(): array
     {
         $rows = [];
-        
+
         foreach ($this->reportData['movements'] as $movement) {
             $rows[] = [
                 $movement['date'],
@@ -60,7 +60,7 @@ class MovementHistoryExport implements FromArray, WithHeadings, WithStyles, With
                 'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
                 'fill' => [
                     'fillType' => Fill::FILL_SOLID,
-                    'startColor' => ['rgb' => '4F46E5']
+                    'startColor' => ['rgb' => '4F46E5'],
                 ],
             ],
         ];
@@ -73,7 +73,7 @@ class MovementHistoryExport implements FromArray, WithHeadings, WithStyles, With
 
     protected function translateType(string $type): string
     {
-        return match($type) {
+        return match ($type) {
             'in' => 'Entrada',
             'out' => 'Salida',
             'transfer' => 'Transferencia',

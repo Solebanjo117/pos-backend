@@ -49,7 +49,7 @@ class InventoryController extends Controller
         // Sorting
         $sortBy = $request->get('sort_by', 'product_id');
         $sortOrder = $request->get('sort_order', 'asc');
-        
+
         if ($sortBy === 'stock_available' || $sortBy === 'reorder_point') {
             $query->orderBy($sortBy, $sortOrder);
         }
@@ -60,6 +60,7 @@ class InventoryController extends Controller
         return response()->json([
             'data' => $inventory->map(function ($item) {
                 $pricing = $item->product->defaultVariant?->pricing;
+
                 return [
                     'id' => $item->id,
                     'product_id' => $item->product_id,
@@ -92,9 +93,16 @@ class InventoryController extends Controller
 
     /**
      * Update inventory for a specific product and warehouse.
+     * Supports optional variant_id for variant-level inventory.
      */
     public function update(Request $request, int $productId, int $warehouseId): JsonResponse
     {
+        $variantId = $request->input('variant_id');
+
+        if ($variantId) {
+            return $this->updateVariantInventory($request, $productId, $warehouseId, (int) $variantId);
+        }
+
         $validated = $request->validate([
             'stock_available' => 'sometimes|integer|min:0',
             'stock_reserved' => 'sometimes|integer|min:0',
@@ -121,17 +129,78 @@ class InventoryController extends Controller
     }
 
     /**
+     * Update variant-level inventory (product_inventory table).
+     */
+    private function updateVariantInventory(Request $request, int $productId, int $warehouseId, int $variantId): JsonResponse
+    {
+        $validated = $request->validate([
+            'variant_id' => 'required|exists:product_variants,id',
+            'stock_available' => 'sometimes|integer|min:0',
+            'reorder_point' => 'sometimes|integer|min:0',
+            'reorder_quantity' => 'sometimes|integer|min:0',
+        ]);
+
+        $variant = \App\Models\ProductVariant::where('id', $variantId)
+            ->where('product_id', $productId)
+            ->first();
+
+        if (! $variant) {
+            return response()->json([
+                'message' => 'Variante no encontrada para este producto',
+            ], 404);
+        }
+
+        $inventory = ProductInventory::updateOrCreate(
+            [
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'warehouse_id' => $warehouseId,
+            ],
+            collect($validated)->only([
+                'stock_available',
+                'reorder_point',
+                'reorder_quantity',
+            ])->filter(fn ($value) => $value !== null)->toArray()
+        );
+
+        InventoryMovement::create([
+            'movement_type' => 'adjustment',
+            'reason' => 'Ajuste manual de inventario',
+            'product_id' => $productId,
+            'variant_id' => $variantId,
+            'warehouse_id' => $warehouseId,
+            'quantity' => $validated['stock_available'] ?? $inventory->quantity_available,
+            'reference_type' => 'manual_adjustment',
+            'user_id' => $request->user()?->id,
+        ]);
+
+        return response()->json([
+            'data' => [
+                'id' => $inventory->id,
+                'product_id' => $inventory->product_id,
+                'variant_id' => $inventory->variant_id,
+                'warehouse_id' => $inventory->warehouse_id,
+                'quantity_available' => $inventory->quantity_available,
+                'quantity_reserved' => $inventory->quantity_reserved,
+                'reorder_point' => $inventory->reorder_point,
+                'reorder_quantity' => $inventory->reorder_quantity,
+            ],
+            'message' => 'Inventario de variante actualizado correctamente',
+        ]);
+    }
+
+    /**
      * Record a waste/loss adjustment.
      * POST /api/v1/inventory/waste
      */
     public function storeWaste(StoreInventoryRequest $request): JsonResponse
     {
         $validated = $request->validate([
-            'variant_id'   => 'required|exists:product_variants,id',
+            'variant_id' => 'required|exists:product_variants,id',
             'warehouse_id' => 'required|exists:warehouses,id',
-            'quantity'     => 'required|integer|min:1',
-            'reason'       => 'required|string|max:255',
-            'notes'        => 'nullable|string|max:500',
+            'quantity' => 'required|integer|min:1',
+            'reason' => 'required|string|max:255',
+            'notes' => 'nullable|string|max:500',
         ]);
 
         return DB::transaction(function () use ($validated, $request) {
@@ -143,7 +212,7 @@ class InventoryController extends Controller
                 ->where('warehouse_id', $validated['warehouse_id'])
                 ->first();
 
-            if (!$inventory || $inventory->quantity_available < $validated['quantity']) {
+            if (! $inventory || $inventory->quantity_available < $validated['quantity']) {
                 return response()->json([
                     'message' => 'Stock insuficiente para registrar la merma',
                     'available' => $inventory?->quantity_available ?? 0,
@@ -156,18 +225,18 @@ class InventoryController extends Controller
             // Record movement
             InventoryMovement::create([
                 'movement_type' => 'out',
-                'reason'        => $validated['reason'],
-                'product_id'    => $variant->product_id,
-                'variant_id'    => $validated['variant_id'],
-                'warehouse_id'  => $validated['warehouse_id'],
-                'quantity'      => $validated['quantity'],
+                'reason' => $validated['reason'],
+                'product_id' => $variant->product_id,
+                'variant_id' => $validated['variant_id'],
+                'warehouse_id' => $validated['warehouse_id'],
+                'quantity' => $validated['quantity'],
                 'reference_type' => 'waste',
-                'notes'         => $validated['notes'] ?? null,
-                'user_id'       => $request->user()?->id,
+                'notes' => $validated['notes'] ?? null,
+                'user_id' => $request->user()?->id,
             ]);
 
             return response()->json([
-                'message'   => 'Merma registrada correctamente',
+                'message' => 'Merma registrada correctamente',
                 'remaining' => $inventory->fresh()->quantity_available,
             ], 201);
         });
@@ -190,22 +259,22 @@ class InventoryController extends Controller
         $movements = $query->paginate(20);
 
         return response()->json([
-            'data' => $movements->map(fn($m) => [
-                'id'           => $m->id,
+            'data' => $movements->map(fn ($m) => [
+                'id' => $m->id,
                 'product_name' => $m->variant?->product?->name ?? 'N/A',
-                'sku'          => $m->variant?->sku ?? 'N/A',
-                'brand'        => $m->variant?->brand?->name ?? 'N/A',
-                'warehouse'    => $m->warehouse?->name,
-                'quantity'     => $m->quantity,
-                'reason'       => $m->reason,
-                'notes'        => $m->notes,
-                'user'         => $m->user?->name,
-                'date'         => $m->created_at->toDateTimeString(),
+                'sku' => $m->variant?->sku ?? 'N/A',
+                'brand' => $m->variant?->brand?->name ?? 'N/A',
+                'warehouse' => $m->warehouse?->name,
+                'quantity' => $m->quantity,
+                'reason' => $m->reason,
+                'notes' => $m->notes,
+                'user' => $m->user?->name,
+                'date' => $m->created_at->toDateTimeString(),
             ]),
             'meta' => [
                 'current_page' => $movements->currentPage(),
-                'last_page'    => $movements->lastPage(),
-                'total'        => $movements->total(),
+                'last_page' => $movements->lastPage(),
+                'total' => $movements->total(),
             ],
         ]);
     }

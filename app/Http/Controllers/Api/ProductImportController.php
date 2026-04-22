@@ -13,21 +13,13 @@ use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class ProductImportController extends Controller
 {
-    public function __construct(private readonly ProductService $productService)
-    {
-    }
+    public function __construct(private readonly ProductService $productService) {}
 
-    /**
-     * GET /api/v1/products/import/template
-     */
     public function template(): BinaryFileResponse
     {
-        return Excel::download(new ProductImportTemplate(), 'plantilla_productos.xlsx');
+        return Excel::download(new ProductImportTemplate, 'plantilla_productos.xlsx');
     }
 
-    /**
-     * POST /api/v1/products/import/preview
-     */
     public function preview(Request $request): JsonResponse
     {
         $request->validate([
@@ -46,9 +38,28 @@ class ProductImportController extends Controller
         ]);
     }
 
-    /**
-     * POST /api/v1/products/import
-     */
+    public function execute(Request $request): JsonResponse
+    {
+        $request->validate([
+            'rows' => 'required|array',
+            'rows.*.__row' => 'required|integer',
+        ]);
+
+        $import = new ProductImport($this->productService);
+        $import->execute($request->input('rows', []));
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'success_count' => $import->successCount,
+                'error_count' => $import->errorCount,
+                'results' => $import->results,
+                'errors' => $import->errors,
+            ],
+            'message' => "Importados: {$import->successCount}, Errores: {$import->errorCount}",
+        ]);
+    }
+
     public function import(Request $request): JsonResponse
     {
         $request->validate([

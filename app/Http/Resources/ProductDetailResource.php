@@ -24,7 +24,7 @@ class ProductDetailResource extends JsonResource
             'system_id' => $this->system_id,
             'sku_base' => $this->sku_base,
             'alternate_code' => $this->alternate_code,
-            'pricing_formula'=> $this->pricing_formula,
+            'pricing_formula' => $this->pricing_formula,
             'name' => $this->name,
             'description' => $this->description,
             'status' => $this->status,
@@ -32,8 +32,8 @@ class ProductDetailResource extends JsonResource
             'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
             'product_line_id' => $this->product_line_id,
-            'image_url' => $this->image_url ? url('storage/' . $this->image_url) : null,
-            
+            'image_url' => $this->image_url ? url('storage/'.$this->image_url) : null,
+
             'pricing' => $this->when($this->relationLoaded('pricing') && $this->pricing, [
                 'base_price' => (float) $this->pricing?->base_price,
                 'calculated_price' => (float) $this->pricing?->calculated_price,
@@ -49,13 +49,13 @@ class ProductDetailResource extends JsonResource
                 'tax_type' => $this->pricing?->tax_type ?? 'standard',
                 'max_discount_percentage' => (float) $this->pricing?->max_discount_percentage,
             ]),
-            
+
             'product_line' => $this->when($this->productLine, [
                 'id' => $this->productLine?->id,
                 'name' => $this->productLine?->name,
                 'description' => $this->productLine?->description,
             ]),
-            
+
             'category' => $this->when($this->category, [
                 'id' => $this->category?->id,
                 'name' => $this->category?->name,
@@ -79,20 +79,20 @@ class ProductDetailResource extends JsonResource
             // All variants
             'variants' => $this->when(
                 $this->relationLoaded('variants'),
-                fn() => ProductVariantResource::collection($this->variants)
+                fn () => ProductVariantResource::collection($this->variants)
             ),
-            
+
             'variants_count' => $this->when(
                 $this->relationLoaded('variants'),
-                fn() => $this->variants->count()
+                fn () => $this->variants->count()
             ),
-            
+
             'attributes' => $this->when(
                 $this->relationLoaded('attributes'),
-                fn() => $this->attributes->map(fn($attr) => [
+                fn () => $this->attributes->map(fn ($attr) => [
                     'name' => $attr->definition?->name,
-                    'value' => $attr->definition?->data_type === 'string' 
-                        ? $attr->text_value 
+                    'value' => $attr->definition?->data_type === 'string'
+                        ? $attr->text_value
                         : $attr->numeric_value,
                     'unit' => $attr->definition?->unit,
                     'data_type' => $attr->definition?->data_type,
@@ -102,19 +102,20 @@ class ProductDetailResource extends JsonResource
             // Total stock across all variants
             'total_stock' => $this->when(
                 $this->relationLoaded('variants'),
-                function() {
-                    return $this->variants->sum(function($variant) {
+                function () {
+                    return $this->variants->sum(function ($variant) {
                         if ($variant->relationLoaded('inventory')) {
                             return $variant->inventory->sum('quantity_available');
                         }
+
                         return 0;
                     });
                 }
             ),
-            
+
             'suppliers' => $this->when(
                 $this->relationLoaded('productSuppliers'),
-                fn() => $this->productSuppliers->map(fn($ps) => [
+                fn () => $this->productSuppliers->map(fn ($ps) => [
                     'id' => $ps->supplier->id,
                     'name' => $ps->supplier->name,
                     'supplier_cost' => (float) $ps->supplier_cost,
@@ -123,10 +124,10 @@ class ProductDetailResource extends JsonResource
                     'is_preferred' => (bool) $ps->is_preferred,
                 ])
             ),
-            
+
             'media' => $this->when(
                 $this->relationLoaded('media'),
-                fn() => $this->media->map(fn($media) => [
+                fn () => $this->media->map(fn ($media) => [
                     'id' => $media->id,
                     'media_type' => $media->media_type,
                     'category' => $media->category,
@@ -136,33 +137,33 @@ class ProductDetailResource extends JsonResource
                     'display_order' => $media->display_order,
                 ])
             ),
-            
+
             'oem_references' => $this->when(
                 $this->relationLoaded('oemReferences'),
-                fn() => $this->oemReferences->map(fn($ref) => [
+                fn () => $this->oemReferences->map(fn ($ref) => [
                     'oem_code' => $ref->oem_code,
                     'manufacturer' => $ref->manufacturer,
                 ])
             ),
-            
+
             'alternatives' => $this->when(
                 $this->relationLoaded('alternatives'),
-                fn() => $this->alternatives->map(fn($alt) => [
+                fn () => $this->alternatives->map(fn ($alt) => [
                     'id' => $alt->id,
                     'sku' => $alt->sku,
                     'name' => $alt->name,
                     'relationship_type' => $alt->pivot->relationship_type,
                 ])
             ),
-            
+
             // Product images (photos from media)
             'images' => $this->when(
                 $this->relationLoaded('media'),
-                fn() => $this->media
+                fn () => $this->media
                     ->where('media_type', 'image')
                     ->sortBy('display_order')
                     ->values()
-                    ->map(fn($m) => [
+                    ->map(fn ($m) => [
                         'id' => $m->id,
                         'url' => $m->url,
                         'original_filename' => $m->original_filename,
@@ -171,24 +172,34 @@ class ProductDetailResource extends JsonResource
             ),
 
             'compatibility' => $this->when(
-                $this->relationLoaded('compatibility'),
-                fn() => $this->compatibility->map(fn($comp) => [
-                    'make' => $comp->engine?->model?->make?->name,
-                    'model' => $comp->engine?->model?->name,
-                    'year_range' => $comp->engine?->model?->year_range,
+                $this->relationLoaded('vehicleCompatibility'),
+                fn () => $this->vehicleCompatibility->map(fn ($comp) => [
+                    'id' => $comp->id,
+                    'make' => $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
+                    'model' => $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
+                    'year_range' => $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
                     'engine' => $comp->engine?->full_description,
+                    'chassis' => $comp->chassis ? [
+                        'id' => $comp->chassis->id,
+                        'code' => $comp->chassis->code,
+                        'name' => $comp->chassis->name,
+                        'full_description' => $comp->chassis->full_description,
+                    ] : null,
+                    'all_engines' => (bool) $comp->all_engines,
+                    'all_chassis' => (bool) $comp->all_chassis,
                     'notes' => $comp->notes,
                 ])
             ),
-            
+
             'inventory' => $this->when(
                 $this->relationLoaded('variants'),
-                function() {
-                    return $this->variants->flatMap(function($variant) {
-                        if (!$variant->relationLoaded('inventory')) {
+                function () {
+                    return $this->variants->flatMap(function ($variant) {
+                        if (! $variant->relationLoaded('inventory')) {
                             return [];
                         }
-                        return $variant->inventory->map(function($inv) use ($variant) {
+
+                        return $variant->inventory->map(function ($inv) use ($variant) {
                             return [
                                 'id' => $inv->id,
                                 'warehouse_id' => $inv->warehouse_id,

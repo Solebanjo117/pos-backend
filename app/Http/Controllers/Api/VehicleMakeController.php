@@ -4,8 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\VehicleMake;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class VehicleMakeController extends Controller
 {
@@ -74,7 +74,7 @@ class VehicleMakeController extends Controller
         $make = VehicleMake::findOrFail($id);
 
         $validated = $request->validate([
-            'name' => 'required|string|max:100|unique:vehicle_makes,name,' . $id,
+            'name' => 'required|string|max:100|unique:vehicle_makes,name,'.$id,
         ]);
 
         $make->update($validated);
@@ -104,5 +104,17 @@ class VehicleMakeController extends Controller
         return response()->json([
             'message' => 'Marca eliminada exitosamente',
         ]);
+    }
+
+    /**
+     * Get all vehicle makes (for dropdowns).
+     */
+    public function all(): JsonResponse
+    {
+        $makes = VehicleMake::orderBy('name')
+            ->select('id', 'name')
+            ->get();
+
+        return response()->json(['data' => $makes]);
     }
 }

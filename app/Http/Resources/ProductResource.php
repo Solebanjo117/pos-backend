@@ -28,7 +28,7 @@ class ProductResource extends JsonResource
             'name' => $this->name,
             'status' => $this->status,
             'is_universal' => (bool) $this->is_universal,
-            'image_url' => $this->image_url ? url('storage/' . $this->image_url) : null,
+            'image_url' => $this->getImageUrl(),
             
             'pricing' => $this->when($this->relationLoaded('pricing'), [
                 'base_price' => (float) $this->pricing?->base_price,
@@ -128,5 +128,24 @@ class ProductResource extends JsonResource
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
         ];
+    }
+
+    /**
+     * Get the product image URL, falling back to the first media file.
+     */
+    private function getImageUrl(): ?string
+    {
+        // 1. Legacy column on products table
+        if ($this->image_url) {
+            return url('storage/' . $this->image_url);
+        }
+
+        // 2. First image from product_media relation
+        if ($this->relationLoaded('media') && $this->media->isNotEmpty()) {
+            $firstMedia = $this->media->first();
+            return $firstMedia->file_path ? url('storage/' . $firstMedia->file_path) : null;
+        }
+
+        return null;
     }
 }

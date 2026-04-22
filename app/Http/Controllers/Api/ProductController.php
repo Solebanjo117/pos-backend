@@ -9,6 +9,7 @@ use App\Http\Requests\UpdateProductRequest;
 use App\Http\Resources\ProductDetailResource;
 use App\Http\Resources\ProductResource;
 use App\Models\Product;
+use App\Models\ProductVehicleCompatibility;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -30,11 +31,11 @@ class ProductController extends Controller
         // Archive filter: 'true' = only trashed, 'all' = withTrashed, default = active only
         $archived = $request->get('archived', 'false');
         if ($archived === 'true') {
-            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
+            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine', 'media']);
         } elseif ($archived === 'all') {
-            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
+            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine', 'media']);
         } else {
-            $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes', 'engine']);
+            $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes', 'engine', 'media']);
         }
 
         // Filters
@@ -46,11 +47,11 @@ class ProductController extends Controller
             $brandIds = $request->get('brand_id');
             // Support both single value and array
             if (is_array($brandIds)) {
-                $query->whereHas('variants', function($q) use ($brandIds) {
+                $query->whereHas('variants', function ($q) use ($brandIds) {
                     $q->whereIn('brand_id', $brandIds);
                 });
             } else {
-                $query->whereHas('variants', function($q) use ($brandIds) {
+                $query->whereHas('variants', function ($q) use ($brandIds) {
                     $q->where('brand_id', $brandIds);
                 });
             }
@@ -109,12 +110,12 @@ class ProductController extends Controller
             : ($request->filled('sku') ? $request->get('sku') : null);
 
         $normalizedSearchTokens = collect();
-        if (!empty($searchTerm)) {
+        if (! empty($searchTerm)) {
             $normalizedSearchTokens = collect(preg_split('/\s+/', mb_strtolower(trim((string) $searchTerm))))
-                ->filter(fn($token) => $token !== '');
+                ->filter(fn ($token) => $token !== '');
         }
 
-        if (!empty($searchTerm)) {
+        if (! empty($searchTerm)) {
             $query->search($searchTerm);
         }
 
@@ -133,13 +134,13 @@ class ProductController extends Controller
                 [$name, $value] = explode(':', $attrValue, 2);
                 $query->whereHas('attributes', function ($q) use ($name, $value) {
                     $q->whereNull('variant_id')
-                      ->where('name', $name)
-                      ->where('value', $value);
+                        ->where('name', $name)
+                        ->where('value', $value);
                 });
             } else {
                 $query->whereHas('attributes', function ($q) use ($attrValue) {
                     $q->whereNull('variant_id')
-                      ->where('value', $attrValue);
+                        ->where('value', $attrValue);
                 });
             }
         }
@@ -207,10 +208,10 @@ class ProductController extends Controller
         if ($sortField === 'sku') {
             $sortField = 'sku_base';
         }
-        if (!in_array($sortField, $allowedSortFields)) {
+        if (! in_array($sortField, $allowedSortFields)) {
             $sortField = 'created_at';
         }
-        if (!in_array(strtolower($sortDirection), ['asc', 'desc'])) {
+        if (! in_array(strtolower($sortDirection), ['asc', 'desc'])) {
             $sortDirection = 'desc';
         }
         $query->orderBy($sortField, $sortDirection);
@@ -230,7 +231,7 @@ class ProductController extends Controller
 
                 if ($isExactFit) {
                     $product->fitment_status = 'exact';
-                } elseif (!($product->has_any_compatibility ?? false)) {
+                } elseif (! ($product->has_any_compatibility ?? false)) {
                     $product->fitment_status = 'universal';
                 } else {
                     $product->fitment_status = 'incompatible'; // Should be filtered out by strict query above
@@ -249,6 +250,7 @@ class ProductController extends Controller
                 } else {
                     $matchedVariant = collect($product->variants ?? [])->first(function ($variant) use ($normalizedSearchTokens) {
                         $variantSystemId = mb_strtolower((string) ($variant->system_id ?? ''));
+
                         return $variantSystemId !== '' && $normalizedSearchTokens->contains($variantSystemId);
                     });
 
@@ -267,37 +269,22 @@ class ProductController extends Controller
     }
 
     /**
-     * Check for potential duplicate products by name or SKU.
-     * R20: Alert user when creating products with similar name/SKU.
-     *
-     * GET /api/v1/products/check-duplicate?name=xxx&sku=yyy
+     * Check for potential duplicate products by SKU base (primary) or name.
+     * GET /api/v1/products/check-duplicate?sku=xxx&name=yyy
      */
     public function checkDuplicate(Request $request): JsonResponse
     {
-        $name = $request->get('name');
         $sku = $request->get('sku');
+        $name = $request->get('name');
 
-        // Need at least one search param
-        if (empty($name) && empty($sku)) {
+        if (empty($sku)) {
             return response()->json(['data' => []]);
         }
 
         $query = Product::query()
             ->select(['id', 'name', 'sku_base'])
+            ->where('sku_base', 'ilike', '%'.$sku.'%')
             ->limit(5);
-
-        if (!empty($name) && !empty($sku)) {
-            // Search by name OR sku
-            $query->where(function ($q) use ($name, $sku) {
-                $q->where('name', 'ilike', '%' . $name . '%')
-                  ->orWhere('sku_base', 'ilike', $sku);
-            });
-        } elseif (!empty($name)) {
-            $query->where('name', 'ilike', '%' . $name . '%');
-        } else {
-            // Only SKU
-            $query->where('sku_base', 'ilike', $sku);
-        }
 
         $duplicates = $query->get();
 
@@ -355,9 +342,9 @@ class ProductController extends Controller
             $warehouseId = reset($warehouseId);
         }
         $warehouseId = filter_var($warehouseId, FILTER_VALIDATE_INT) ?: null;
-        
+
         // Fallback to user's current warehouse if not specified
-        if (!$warehouseId) {
+        if (! $warehouseId) {
             $warehouseId = $request->user()?->current_warehouse_id;
         }
 
@@ -430,7 +417,7 @@ class ProductController extends Controller
             ->where('attribute_definition_id', $attributeDefinitionId)
             ->delete();
 
-        if (!$deleted) {
+        if (! $deleted) {
             return response()->json([
                 'message' => 'Atributo no encontrado',
             ], 404);
@@ -534,7 +521,7 @@ class ProductController extends Controller
     {
         $deleted = $product->oemReferences()->where('id', $referenceId)->delete();
 
-        if (!$deleted) {
+        if (! $deleted) {
             return response()->json([
                 'message' => 'Referencia no encontrada',
             ], 404);
@@ -558,7 +545,7 @@ class ProductController extends Controller
         $product->alternatives()->syncWithoutDetaching([
             $validated['alternative_product_id'] => [
                 'relationship_type' => $validated['relationship_type'],
-            ]
+            ],
         ]);
 
         return response()->json([
@@ -610,18 +597,19 @@ class ProductController extends Controller
             }),
         ]);
     }
+
     /**
      * Get all images for a product.
      */
     public function getImages(int $id): JsonResponse
     {
         $product = Product::findOrFail($id);
-        
+
         $images = $product->media()
             ->where('media_type', 'image')
             ->orderBy('display_order')
             ->get()
-            ->map(fn($media) => [
+            ->map(fn ($media) => [
                 'id' => $media->id,
                 'url' => $media->url,
                 'original_filename' => $media->original_filename,
@@ -642,10 +630,10 @@ class ProductController extends Controller
         ]);
 
         $product = Product::findOrFail($id);
-        
+
         // Support both single 'image' field and multiple 'images' field
         $files = $request->file('images');
-        if (!is_array($files)) {
+        if (! is_array($files)) {
             // Single file upload (backwards compat with 'image' field)
             $singleFile = $request->file('image') ?? $request->file('images');
             $files = $singleFile ? [$singleFile] : [];
@@ -679,7 +667,7 @@ class ProductController extends Controller
         }
 
         // Set first image as product thumbnail if none exists
-        if (!$product->image_url && count($uploaded) > 0) {
+        if (! $product->image_url && count($uploaded) > 0) {
             $firstMedia = $product->media()
                 ->where('media_type', 'image')
                 ->orderBy('display_order')
@@ -690,7 +678,7 @@ class ProductController extends Controller
         }
 
         return response()->json([
-            'message' => count($uploaded) . ' image(s) uploaded successfully',
+            'message' => count($uploaded).' image(s) uploaded successfully',
             'data' => $uploaded,
         ]);
     }
@@ -702,7 +690,7 @@ class ProductController extends Controller
     {
         $product = Product::findOrFail($productId);
         $media = $product->media()->where('id', $mediaId)->firstOrFail();
-        
+
         // Delete file from storage
         if (\Illuminate\Support\Facades\Storage::disk('public')->exists($media->file_path)) {
             \Illuminate\Support\Facades\Storage::disk('public')->delete($media->file_path);
@@ -740,65 +728,28 @@ class ProductController extends Controller
     /**
      * GET /api/v1/products/{id}/alternatives
      *
-     * Returns explicit alternatives (from pivot table) merged with
-     * implicit alternatives (products in the same parent-category branch).
-     * Limited to 30 total results.
+     * Returns upsale products (compatible, substitute, upgrade).
+     * Excludes cross_reference and same_category types.
      */
     public function alternatives(Product $product): JsonResponse
     {
-        $limit = 30;
+        $upsaleTypes = ['compatible', 'substitute', 'upgrade'];
 
-        // 1. Explicit alternatives from pivot table
-        $explicit = $product->alternatives()->get()->map(function ($alt) {
-            return [
-                'id' => $alt->id,
-                'sku' => $alt->sku_base,
-                'name' => $alt->name,
-                'relationship_type' => $alt->pivot->relationship_type,
-                'source' => 'manual',
-            ];
-        });
-
-        $explicitIds = $explicit->pluck('id')->toArray();
-        $remaining   = $limit - $explicit->count();
-
-        // 2. Implicit alternatives: products under the same parent category
-        $implicit = collect();
-
-        if ($remaining > 0 && $product->category_id) {
-            $category = $product->category;
-
-            if ($category) {
-                // Determine the parent category id (go up one level if subcategory)
-                $parentId = $category->parent_id ?? $category->id;
-
-                // Get all subcategory IDs under the parent (including the parent itself)
-                $siblingCategoryIds = \App\Models\Category::where('id', $parentId)
-                    ->orWhere('parent_id', $parentId)
-                    ->pluck('id')
-                    ->toArray();
-
-                // Fetch sibling products, excluding self and already-explicit ones
-                $implicit = Product::whereIn('category_id', $siblingCategoryIds)
-                    ->where('id', '!=', $product->id)
-                    ->whereNotIn('id', $explicitIds)
-                    ->where('status', 'active')
-                    ->limit($remaining)
-                    ->get()
-                    ->map(function ($p) {
-                        return [
-                            'id' => $p->id,
-                            'sku' => $p->sku_base,
-                            'name' => $p->name,
-                            'relationship_type' => 'same_category',
-                            'source' => 'category',
-                        ];
-                    });
-            }
-        }
+        $alternatives = $product->alternatives()
+            ->wherePivotIn('relationship_type', $upsaleTypes)
+            ->get()
+            ->map(function ($alt) {
+                return [
+                    'id' => $alt->id,
+                    'sku' => $alt->sku_base,
+                    'name' => $alt->name,
+                    'relationship_type' => $alt->pivot->relationship_type,
+                    'source' => 'manual',
+                ];
+            });
 
         return response()->json([
-            'data' => $explicit->concat($implicit)->values(),
+            'data' => $alternatives->values(),
         ]);
     }
 
@@ -822,7 +773,7 @@ class ProductController extends Controller
     public function addVin(Request $request, Product $product): JsonResponse
     {
         $validated = $request->validate([
-            'vin'   => ['required', 'string', 'min:1', 'max:40', 'regex:/^[A-HJ-NPR-Z0-9]+$/i'],
+            'vin' => ['required', 'string', 'min:1', 'max:40', 'regex:/^[A-HJ-NPR-Z0-9]+$/i'],
             'notes' => 'nullable|string|max:255',
         ]);
 
@@ -836,7 +787,7 @@ class ProductController extends Controller
 
         return response()->json([
             'message' => 'VIN vinculado correctamente',
-            'data'    => $vin,
+            'data' => $vin,
         ], 201);
     }
 
@@ -860,40 +811,39 @@ class ProductController extends Controller
     /**
      * GET /api/v1/products/{id}/vehicle-compatibility
      * Cross-reference product VINs with vehicle_vins table to return
-     * full vehicle compatibility info (make → model → engine → VIN).
+     * full vehicle compatibility info (make → model → engine → chassis).
      */
     public function vehicleCompatibility(Product $product): JsonResponse
     {
-        // Get all VINs linked to this product
-        $productVins = $product->vins()->pluck('vin')->toArray();
-
-        if (empty($productVins)) {
-            return response()->json(['data' => []]);
-        }
-
-        // Look up matching vehicle VINs with eager-loaded engine/model/make
-        $vehicleVins = \App\Models\VehicleVin::whereIn('vin', $productVins)
-            ->with([
-                'engine.model.make',
-            ])
+        // Get compatibility records with chassis data
+        $compatibility = ProductVehicleCompatibility::where('product_id', $product->id)
+            ->with(['engine.model.make', 'chassis.model.make'])
             ->get()
-            ->map(function ($vv) {
-                $engine = $vv->engine;
-                $model  = $engine?->model;
-                $make   = $model?->make;
-
-                return [
-                    'vin'        => $vv->vin,
-                    'make'       => $make?->name ?? 'N/A',
-                    'model'      => $model?->name ?? 'N/A',
-                    'year_from'  => $model?->year_from,
-                    'year_to'    => $model?->year_to,
-                    'engine'     => $engine?->engine_code ?? 'N/A',
-                    'displacement' => $engine?->displacement ?? null,
+            ->map(function ($comp) {
+                $entry = [
+                    'id' => $comp->id,
+                    'make' => $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
+                    'model' => $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
+                    'year_range' => $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
+                    'engine' => $comp->engine?->full_description,
+                    'chassis' => null,
+                    'all_engines' => (bool) $comp->all_engines,
+                    'all_chassis' => (bool) $comp->all_chassis,
+                    'notes' => $comp->notes,
                 ];
+
+                if ($comp->chassis) {
+                    $entry['chassis'] = [
+                        'id' => $comp->chassis->id,
+                        'code' => $comp->chassis->code,
+                        'name' => $comp->chassis->name,
+                        'full_description' => $comp->chassis->full_description,
+                    ];
+                }
+
+                return $entry;
             });
 
-        return response()->json(['data' => $vehicleVins]);
+        return response()->json(['data' => $compatibility]);
     }
 }
-
