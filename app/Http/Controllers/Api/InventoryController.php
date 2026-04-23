@@ -150,21 +150,27 @@ class InventoryController extends Controller
             ], 404);
         }
 
+        // Map frontend field name to DB column name
+        $updateData = collect($validated)->only([
+            'reorder_point',
+            'reorder_quantity',
+        ])->filter(fn ($value) => $value !== null)->toArray();
+
+        if (isset($validated['stock_available'])) {
+            $updateData['quantity_available'] = $validated['stock_available'];
+        }
+
         $inventory = ProductInventory::updateOrCreate(
             [
                 'product_id' => $productId,
                 'variant_id' => $variantId,
                 'warehouse_id' => $warehouseId,
             ],
-            collect($validated)->only([
-                'stock_available',
-                'reorder_point',
-                'reorder_quantity',
-            ])->filter(fn ($value) => $value !== null)->toArray()
+            $updateData
         );
 
         InventoryMovement::create([
-            'movement_type' => 'adjustment',
+            'movement_type' => 'in',
             'reason' => 'Ajuste manual de inventario',
             'product_id' => $productId,
             'variant_id' => $variantId,
