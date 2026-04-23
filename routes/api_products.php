@@ -1,8 +1,8 @@
 <?php
 
-use App\Http\Controllers\Api\ProductController;
 use App\Http\Controllers\Api\ProductAttributeController;
 use App\Http\Controllers\Api\ProductCompatibilityController;
+use App\Http\Controllers\Api\ProductController;
 use Illuminate\Support\Facades\Route;
 
 // Product Routes
@@ -16,17 +16,18 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     Route::post('/{product}/duplicate', [ProductController::class, 'duplicate']);
     Route::get('/{product}', [ProductController::class, 'show']);
     Route::put('/{product}', [ProductController::class, 'update']);
+    Route::post('/{product}/regenerate-name', [ProductController::class, 'regenerateName']);
     Route::delete('/{product}', [ProductController::class, 'destroy']);
     Route::post('/{id}/restore', [ProductController::class, 'restore']);
-    
+
     // --> Product Images (Multi-photo)
     Route::get('/{product}/images', [ProductController::class, 'getImages']);
     Route::post('/{product}/images', [ProductController::class, 'uploadImage']);
     Route::delete('/{product}/images/{media}', [ProductController::class, 'deleteImage']);
-    
+
     // --> Product Attributes (Specifications) - Nested
     Route::get('/{product}/attributes', [ProductAttributeController::class, 'index']);
-    
+
     // --> Vehicle Compatibility (Fitment) - Nested
     Route::get('/{product}/compatibility', [ProductCompatibilityController::class, 'index']);
 

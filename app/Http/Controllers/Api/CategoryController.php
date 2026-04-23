@@ -4,9 +4,12 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Category;
+use App\Models\Product;
+use App\Models\ProductAttribute;
 use App\Services\PricingFormulaService;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class CategoryController extends Controller
 {
@@ -87,7 +90,7 @@ class CategoryController extends Controller
     public function show(Category $category): JsonResponse
     {
         $category->load(['parent', 'children', 'products']);
-        
+
         return response()->json($category);
     }
 
@@ -100,7 +103,7 @@ class CategoryController extends Controller
 
         $validated = $request->validate([
             'name' => 'sometimes|string|max:100',
-            'slug' => 'sometimes|string|max:100|unique:categories,slug,' . $category->id,
+            'slug' => 'sometimes|string|max:100|unique:categories,slug,'.$category->id,
             'parent_id' => 'nullable|exists:categories,id',
             'description' => 'nullable|string',
             'default_attributes' => 'nullable|array',
@@ -115,9 +118,55 @@ class CategoryController extends Controller
             'itbm_percent' => 'nullable|integer|min:0|max:100',
         ]);
 
+        $oldDefaults = $category->default_attributes ?? [];
+
         $category->update($validated);
 
+        // Propagate attribute name renames to existing products
+        if (array_key_exists('default_attributes', $validated)) {
+            $newDefaults = $validated['default_attributes'] ?? [];
+            $this->propagateAttributeRenames($category, $oldDefaults, $newDefaults);
+        }
+
         return response()->json($category);
+    }
+
+    /**
+     * When a category's default_attributes names change, rename the matching
+     * product_attributes on all products that belong to this category.
+     * Matching is index-based: position 0 old → position 0 new, etc.
+     */
+    private function propagateAttributeRenames(Category $category, array $oldDefaults, array $newDefaults): void
+    {
+        $renames = [];
+
+        $count = min(count($oldDefaults), count($newDefaults));
+        for ($i = 0; $i < $count; $i++) {
+            $oldName = trim($oldDefaults[$i]['name'] ?? '');
+            $newName = trim($newDefaults[$i]['name'] ?? '');
+
+            if ($oldName !== '' && $newName !== '' && $oldName !== $newName) {
+                $renames[$oldName] = $newName;
+            }
+        }
+
+        if (empty($renames)) {
+            return;
+        }
+
+        $productIds = Product::where('category_id', $category->id)->pluck('id');
+
+        if ($productIds->isEmpty()) {
+            return;
+        }
+
+        DB::transaction(function () use ($productIds, $renames) {
+            foreach ($renames as $oldName => $newName) {
+                ProductAttribute::whereIn('product_id', $productIds)
+                    ->where('name', $oldName)
+                    ->update(['name' => $newName]);
+            }
+        });
     }
 
     /**
@@ -131,8 +180,8 @@ class CategoryController extends Controller
         $this->normalizeIntegerPercentField($request, 'itbm_percent');
 
         $data = $request->validate([
-            'formula'      => 'required|string|max:500',
-            'costo'        => 'required|numeric|min:0',
+            'formula' => 'required|string|max:500',
+            'costo' => 'required|numeric|min:0',
             'applies_itbm' => 'nullable|boolean',
             'itbm_percent' => 'nullable|integer|min:0|max:100',
         ]);
@@ -159,7 +208,7 @@ class CategoryController extends Controller
         // Check if category has products
         if ($category->products()->count() > 0) {
             return response()->json([
-                'message' => 'Cannot delete category with associated products'
+                'message' => 'Cannot delete category with associated products',
             ], 422);
         }
 
@@ -170,7 +219,7 @@ class CategoryController extends Controller
 
     private function normalizeIntegerPercentField(Request $request, string $field): void
     {
-        if (!$request->has($field)) {
+        if (! $request->has($field)) {
             return;
         }
 

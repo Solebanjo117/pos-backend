@@ -367,6 +367,20 @@ class ProductController extends Controller
     }
 
     /**
+     * POST /api/v1/products/{product}/regenerate-name
+     * Re-generate auto name from category + vehicle compatibility.
+     */
+    public function regenerateName(Product $product): JsonResponse
+    {
+        $updated = $this->productService->updateProductNameWithVehicles($product);
+
+        return response()->json([
+            'data' => new ProductResource($updated),
+            'message' => 'Descripción regenerada correctamente',
+        ]);
+    }
+
+    /**
      * Remove the specified product (soft delete / archive).
      */
     public function destroy(Product $product): JsonResponse

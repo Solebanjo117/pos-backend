@@ -241,7 +241,6 @@ class ProductService
             DB::commit();
 
             return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine']);
-
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -279,10 +278,23 @@ class ProductService
         DB::beginTransaction();
 
         try {
+            $previousCategoryId = $product->category_id;
+
             // Update basic product info (only base product fields)
             $updatePayload = [];
-            foreach (['name', 'description', 'status', 'product_line_id', 'is_universal',
-                'sku_base', 'alternate_code', 'pricing_formula'] as $field) {
+            foreach (
+                [
+                    'name',
+                    'description',
+                    'status',
+                    'product_line_id',
+                    'category_id',
+                    'is_universal',
+                    'sku_base',
+                    'alternate_code',
+                    'pricing_formula',
+                ] as $field
+            ) {
                 if (array_key_exists($field, $data)) {
                     $updatePayload[$field] = $data[$field];
                 }
@@ -290,6 +302,33 @@ class ProductService
 
             if (! empty($updatePayload)) {
                 $product->update($updatePayload);
+            }
+
+            // When category changes, replace product-level attributes with new category defaults
+            if (array_key_exists('category_id', $data) && $data['category_id'] != $previousCategoryId && ! isset($data['attributes'])) {
+                $newCategoryId = $data['category_id'];
+                $newDefaults = [];
+
+                if ($newCategoryId) {
+                    $newCategory = Category::find($newCategoryId);
+                    if ($newCategory && ! empty($newCategory->default_attributes)) {
+                        $newDefaults = collect($newCategory->default_attributes)
+                            ->map(fn ($attr) => [
+                                'name' => $attr['name'] ?? '',
+                                'value' => $attr['default_value'] ?? $attr['value'] ?? '',
+                                'unit' => $attr['unit'] ?? null,
+                            ])
+                            ->filter(fn ($attr) => $attr['name'] !== '')
+                            ->values()
+                            ->all();
+                    }
+                }
+
+                if (! empty($newDefaults)) {
+                    $this->assignAttributes($product, $newDefaults);
+                } else {
+                    $product->attributes()->whereNull('variant_id')->delete();
+                }
             }
 
             // Update default variant if provided
@@ -326,7 +365,6 @@ class ProductService
             DB::commit();
 
             return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine']);
-
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -351,7 +389,6 @@ class ProductService
             DB::commit();
 
             return $variant->fresh(['brand', 'inventory']);
-
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -372,7 +409,6 @@ class ProductService
             DB::commit();
 
             return true;
-
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -611,9 +647,28 @@ class ProductService
             $category = Category::find($product->category_id);
             if ($category) {
                 $catName = mb_strtolower($category->name);
-                $engineKeywords = ['motor', 'pistón', 'piston', 'biela', 'cigüeñal', 'cigueñal', 'culata',
-                    'válvula', 'valvula', 'árbol de levas', 'arbol de levas', 'empaque', 'junta de culata',
-                    'bomba de aceite', 'cadena', 'correa', 'timing', 'engine', 'piston ring', 'anillo'];
+                $engineKeywords = [
+                    'motor',
+                    'pistón',
+                    'piston',
+                    'biela',
+                    'cigüeñal',
+                    'cigueñal',
+                    'culata',
+                    'válvula',
+                    'valvula',
+                    'árbol de levas',
+                    'arbol de levas',
+                    'empaque',
+                    'junta de culata',
+                    'bomba de aceite',
+                    'cadena',
+                    'correa',
+                    'timing',
+                    'engine',
+                    'piston ring',
+                    'anillo',
+                ];
                 foreach ($engineKeywords as $keyword) {
                     if (str_contains($catName, $keyword)) {
                         $isEnginePart = true;
@@ -762,13 +817,13 @@ class ProductService
                 'media',
             ])->findOrFail($product->id);
 
-$duplicatedProduct = Product::create([
+            $duplicatedProduct = Product::create([
                 'sku_base' => '',
                 'pricing_formula' => $source->pricing_formula,
                 'product_line_id' => $source->product_line_id,
                 'category_id' => $source->category_id,
                 'engine_id' => $source->engine_id,
-                'name' => $source->name . ' (Copia)',
+                'name' => $source->name,
                 'description' => $source->description,
                 'status' => $source->status,
                 'is_universal' => $source->is_universal,
