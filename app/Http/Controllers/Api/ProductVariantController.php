@@ -25,7 +25,7 @@ class ProductVariantController extends Controller
             ->get();
 
         return response()->json([
-            'data' => $variants
+            'data' => $variants,
         ]);
     }
 
@@ -41,12 +41,12 @@ class ProductVariantController extends Controller
             'sku' => [
                 'nullable',
                 'string',
-                'max:255'
+                'max:255',
             ],
             'upc' => [
                 'nullable',
                 'string',
-                'max:50'
+                'max:50',
             ],
             'status' => 'nullable|in:active,discontinued,pending',
 
@@ -70,26 +70,22 @@ class ProductVariantController extends Controller
             'initial_inventory.*.reorder_point' => 'nullable|integer|min:0',
             'initial_inventory.*.reorder_quantity' => 'nullable|integer|min:0',
 
-            // Attributes (variant-level specs)
-            'attributes' => 'nullable|array',
-            'attributes.*.name' => 'required_with:attributes|string|max:100',
-            'attributes.*.value' => 'required_with:attributes|string|max:255',
-            'attributes.*.unit' => 'nullable|string|max:50',
+            'attributes' => 'missing',
         ]);
 
         try {
             // Create variant using service (reusing logic creates pricing/inventory)
-            // We need to adapt the structure slightly for helper method if needed, 
+            // We need to adapt the structure slightly for helper method if needed,
             // but ProductService::createVariant is simple. Let's use it or extend it.
-            // ProductService::createVariant doesn't handle pricing/inventory in one go 
+            // ProductService::createVariant doesn't handle pricing/inventory in one go
             // inside the *method* shown earlier, it returned the variant.
             // Let's implement the full transaction here or call a service method if we add one.
-            // For now, I'll implement logic here wrapping service calls or just using models 
+            // For now, I'll implement logic here wrapping service calls or just using models
             // since ProductService::createVariant didn't include pricing/inventory logic in the snippet I saw?
             // Wait, looking at ProductService.php again...
             // createProduct DOES it all. createVariant ONLY creates the variant model.
             // I should handle pricing and inventory creation here.
-            
+
             \DB::beginTransaction();
 
             // Auto-generate SKU if not provided
@@ -99,7 +95,7 @@ class ProductVariantController extends Controller
                 $base = $product->sku_base ?: ($product->name ? substr($product->name, 0, 10) : 'PROD');
                 $brand = \App\Models\Brand::find($validated['brand_id']);
                 $brandCode = $brand ? substr($brand->name, 0, 3) : 'XXX';
-                $sku = strtoupper($base . '-' . $brandCode . '-' . substr(uniqid(), -6));
+                $sku = strtoupper($base.'-'.$brandCode.'-'.substr(uniqid(), -6));
             }
 
             $variant = $this->productService->createVariant($product, [
@@ -111,9 +107,8 @@ class ProductVariantController extends Controller
                 'is_default' => false,
             ]);
 
-
             // Add Initial Inventory
-            if (!empty($validated['initial_inventory'])) {
+            if (! empty($validated['initial_inventory'])) {
                 foreach ($validated['initial_inventory'] as $invData) {
                     // Skip if warehouse_id is not valid
                     if (empty($invData['warehouse_id'])) {
@@ -142,10 +137,10 @@ class ProductVariantController extends Controller
                 }
             }
 
-            // Create variant-level pricing (always — either from request or copied from product)
+            // Create variant-level pricing (always - either from request or copied from product)
             $pricingData = $validated['pricing'] ?? null;
 
-            if (!$pricingData) {
+            if (! $pricingData) {
                 // Copy product's current pricing as independent variant pricing
                 $productPricing = $product->pricing;
                 if ($productPricing) {
@@ -177,34 +172,16 @@ class ProductVariantController extends Controller
 
             \DB::commit();
 
-            // Assign variant-level attributes (outside transaction for simplicity)
-            // R27: If no attributes provided, inherit from parent product
-            if (!empty($validated['attributes'])) {
-                $this->productService->assignVariantAttributes($variant, $validated['attributes']);
-            } else {
-                // Inherit attributes from parent product if available
-                $parentAttributes = $product->attributes;
-                if ($parentAttributes->isNotEmpty()) {
-                    $attributesData = $parentAttributes->map(function ($attr) {
-                        return [
-                            'name' => $attr->name,
-                            'value' => $attr->value,
-                            'unit' => $attr->unit,
-                        ];
-                    })->toArray();
-                    $this->productService->assignVariantAttributes($variant, $attributesData);
-                }
-            }
-
             return response()->json([
                 'message' => 'Variante creada exitosamente',
-                'data' => $variant->load(['brand', 'pricing', 'inventory', 'attributes'])
+                'data' => $variant->load(['brand', 'pricing', 'inventory']),
             ], 201);
 
         } catch (\Exception $e) {
             \DB::rollBack();
+
             return response()->json([
-                'message' => 'Error al crear la variante: ' . $e->getMessage()
+                'message' => 'Error al crear la variante: '.$e->getMessage(),
             ], 500);
         }
     }
@@ -223,14 +200,14 @@ class ProductVariantController extends Controller
 
         $validated = $request->validate([
             'sku' => [
-                'nullable', 
-                'string', 
-                'max:255'
+                'nullable',
+                'string',
+                'max:255',
             ],
             'upc' => [
-                'nullable', 
-                'string', 
-                'max:50'
+                'nullable',
+                'string',
+                'max:50',
             ],
             'status' => 'nullable|in:active,discontinued,pending',
 
@@ -247,11 +224,7 @@ class ProductVariantController extends Controller
             'pricing.max_discount_percentage' => 'nullable|numeric|min:0|max:100',
             'pricing.pricing_formula' => 'nullable|string|max:255',
 
-            // Attributes (variant-level specs)
-            'attributes' => 'nullable|array',
-            'attributes.*.name' => 'required_with:attributes|string|max:100',
-            'attributes.*.value' => 'required_with:attributes|string|max:255',
-            'attributes.*.unit' => 'nullable|string|max:50',
+            'attributes' => 'missing',
         ]);
 
         try {
@@ -274,20 +247,13 @@ class ProductVariantController extends Controller
                 }
             }
 
-            // Update variant-level attributes if provided and non-empty.
-            // Guard against empty array: calling assignVariantAttributes([]) would
-            // delete all existing attributes and recreate nothing — data loss.
-            if (isset($validated['attributes']) && !empty($validated['attributes'])) {
-                $this->productService->assignVariantAttributes($variant, $validated['attributes']);
-            }
-
             return response()->json([
                 'message' => 'Variante actualizada correctamente',
-                'data' => $variant->fresh(['brand', 'pricing', 'inventory', 'attributes'])
+                'data' => $variant->fresh(['brand', 'pricing', 'inventory']),
             ]);
         } catch (\Exception $e) {
             return response()->json([
-                'message' => 'Error al actualizar: ' . $e->getMessage()
+                'message' => 'Error al actualizar: '.$e->getMessage(),
             ], 500);
         }
     }
@@ -304,7 +270,7 @@ class ProductVariantController extends Controller
         $variant->delete();
 
         return response()->json([
-            'message' => 'Variante eliminada'
+            'message' => 'Variante eliminada',
         ]);
     }
 
@@ -312,7 +278,7 @@ class ProductVariantController extends Controller
     {
         $pricing = $request->input('pricing');
 
-        if (!is_array($pricing)) {
+        if (! is_array($pricing)) {
             return;
         }
 
@@ -327,11 +293,11 @@ class ProductVariantController extends Controller
         if ($hasLegacyTaxRate) {
             $pricing['tax_rate'] = $legacyTaxRate;
 
-            if (!$hasSaleTaxRate) {
+            if (! $hasSaleTaxRate) {
                 $pricing['sale_tax_rate'] = $legacyTaxRate;
             }
 
-            if (!$hasCostTaxRate) {
+            if (! $hasCostTaxRate) {
                 $pricing['cost_tax_rate'] = $legacyTaxRate;
             }
         }
@@ -391,7 +357,7 @@ class ProductVariantController extends Controller
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 
@@ -404,7 +370,7 @@ class ProductVariantController extends Controller
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 

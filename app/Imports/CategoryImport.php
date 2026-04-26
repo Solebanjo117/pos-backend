@@ -83,7 +83,7 @@ class CategoryImport extends BaseImport
         $parentId = null;
         $parentName = $this->nullIfEmpty($row['categoria_padre'] ?? null);
         if ($parentName) {
-            $parentId = $this->resolveOrCreate(Category::class, 'name', $parentName);
+            $parentId = $this->resolveIdOrCreateByName(Category::class, 'name', $parentName);
         }
 
         $slug = $this->nullIfEmpty($row['slug'] ?? null) ?: Str::slug($row['nombre']);
@@ -118,7 +118,6 @@ class CategoryImport extends BaseImport
                 }
             }
         }
-
 
         $existing = Category::query()
             ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim($row['nombre']))])

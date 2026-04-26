@@ -25,12 +25,12 @@ class VehicleImport extends BaseImport
     public function getExampleRow(): array
     {
         return [
-            'make'   => 'TOYOTA',
-            'model'  => 'YARIS',
-            'year'   => '2000-2005',
-            'code'   => 'P10',
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2000-2005',
+            'code' => 'P10',
             'engine' => '1NZFE',
-            'vin'    => 'MR2BT9F3101124478',
+            'vin' => 'MR2BT9F3101124478',
         ];
     }
 
@@ -42,17 +42,17 @@ class VehicleImport extends BaseImport
     protected function mapHeader(string $header): string
     {
         return match ($header) {
-            'make', 'marca', 'marca_auto', 'vehicle_make'           => 'make',
-            'model', 'modelo', 'vehicle_model'                      => 'model',
-            'year', 'año', 'ano', 'year_range', 'years'             => 'year',
-            'code', 'codigo', 'código', 'chassis', 'chassis_code'  => 'code',
-            'engine', 'motor', 'engine_code'                        => 'engine',
-            'vin', 'numero_vin', 'vin_number'                       => 'vin',
+            'make', 'marca', 'marca_auto', 'vehicle_make' => 'make',
+            'model', 'modelo', 'vehicle_model' => 'model',
+            'year', 'año', 'ano', 'year_range', 'years' => 'year',
+            'code', 'codigo', 'código', 'chassis', 'chassis_code' => 'code',
+            'engine', 'motor', 'engine_code' => 'engine',
+            'vin', 'numero_vin', 'vin_number' => 'vin',
             // Legacy headers from old format
-            'marca_auto'  => 'make',
-            'modelo'      => 'model',
-            'ano_desde'   => 'year',
-            default       => $header,
+            'marca_auto' => 'make',
+            'modelo' => 'model',
+            'ano_desde' => 'year',
+            default => $header,
         };
     }
 
@@ -84,7 +84,7 @@ class VehicleImport extends BaseImport
     public function processRow(array $row): mixed
     {
         // 1. Resolve or create Make
-        $makeId = $this->resolveOrCreate(VehicleMake::class, 'name', $row['make']);
+        $makeId = $this->resolveIdOrCreateByName(VehicleMake::class, 'name', $row['make']);
 
         // 2. Parse year range
         [$yearFrom, $yearTo] = $this->parseYearRange($row['year']);
@@ -98,10 +98,10 @@ class VehicleImport extends BaseImport
 
         if (! $model) {
             $model = VehicleModel::create([
-                'make_id'   => $makeId,
-                'name'      => $modelName,
+                'make_id' => $makeId,
+                'name' => $modelName,
                 'year_from' => $yearFrom,
-                'year_to'   => $yearTo ?? $yearFrom,
+                'year_to' => $yearTo ?? $yearFrom,
             ]);
         }
 
@@ -115,11 +115,11 @@ class VehicleImport extends BaseImport
 
             if (! $chassis) {
                 $chassis = VehicleChassis::create([
-                    'code'      => strtoupper(trim($chassisCode)),
-                    'name'      => strtoupper(trim($chassisCode)),
-                    'model_id'  => $model->id,
+                    'code' => strtoupper(trim($chassisCode)),
+                    'name' => strtoupper(trim($chassisCode)),
+                    'model_id' => $model->id,
                     'year_from' => $yearFrom,
-                    'year_to'   => $yearTo ?? $yearFrom,
+                    'year_to' => $yearTo ?? $yearFrom,
                 ]);
             }
 
@@ -138,10 +138,10 @@ class VehicleImport extends BaseImport
 
             if (! $engine) {
                 $engine = VehicleEngine::create([
-                    'model_id'    => $model->id,
+                    'model_id' => $model->id,
                     'engine_code' => strtoupper(trim($engineCode)),
-                    'fuel_type'   => 'N/A',
-                    'aspiration'  => 'N/A',
+                    'fuel_type' => 'N/A',
+                    'aspiration' => 'N/A',
                 ]);
             }
         }
@@ -151,7 +151,7 @@ class VehicleImport extends BaseImport
         if ($vinStr) {
             VehicleVin::firstOrCreate(
                 [
-                    'vin'      => strtoupper(trim($vinStr)),
+                    'vin' => strtoupper(trim($vinStr)),
                     'model_id' => $model->id,
                 ],
                 [
@@ -183,6 +183,7 @@ class VehicleImport extends BaseImport
         // Single year: "2005"
         if (preg_match('/^(\d{4})$/', $yearStr, $matches)) {
             $y = (int) $matches[1];
+
             return [$y, $y];
         }
 

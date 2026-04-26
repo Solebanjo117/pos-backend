@@ -20,7 +20,7 @@ class ProductVariantResource extends JsonResource
             'sku' => $this->sku,
             'upc' => $this->upc,
             'is_default' => $this->is_default,
-            
+
             'brand' => [
                 'id' => $this->brand?->id,
                 'name' => $this->brand?->name,
@@ -29,7 +29,7 @@ class ProductVariantResource extends JsonResource
             ],
 
             'status' => $this->status,
-            
+
             'pricing' => $this->when(
                 $this->relationLoaded('pricing') && $this->pricing,
                 function () {
@@ -53,27 +53,17 @@ class ProductVariantResource extends JsonResource
                     ];
                 }
             ),
-            
-            'product' => $this->when($this->relationLoaded('product') && $this->product, fn() => [
+
+            'product' => $this->when($this->relationLoaded('product') && $this->product, fn () => [
                 'id' => $this->product->id,
                 'sku_base' => $this->product->sku_base,
                 'name' => $this->product->name,
                 'status' => $this->product->status,
             ]),
-            
-            'attributes' => $this->when(
-                $this->relationLoaded('attributes'),
-                fn() => $this->attributes->map(fn($attr) => [
-                    'id' => $attr->id,
-                    'name' => $attr->name,
-                    'value' => $attr->value,
-                    'unit' => $attr->unit,
-                ])
-            ),
-            
+
             'inventory' => $this->when(
                 $this->relationLoaded('inventory'),
-                fn() => $this->inventory->map(fn($inv) => [
+                fn () => $this->inventory->map(fn ($inv) => [
                     'warehouse' => [
                         'id' => $inv->warehouse?->id,
                         'name' => $inv->warehouse?->name,
@@ -84,12 +74,12 @@ class ProductVariantResource extends JsonResource
                     'reorder_point' => $inv->reorder_point,
                 ])
             ),
-            
+
             'total_stock' => $this->when(
                 $this->relationLoaded('inventory'),
-                fn() => $this->inventory->sum('quantity_available')
+                fn () => $this->inventory->sum('quantity_available')
             ),
-            
+
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
         ];

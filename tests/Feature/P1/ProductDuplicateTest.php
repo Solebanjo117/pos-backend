@@ -41,8 +41,8 @@ beforeEach(function () {
 
 function createSourceProductForDuplication(Warehouse $warehouse): array
 {
-    $brandA = Brand::create(['name' => 'Brand Dup A ' . uniqid(), 'status' => 'active']);
-    $brandB = Brand::create(['name' => 'Brand Dup B ' . uniqid(), 'status' => 'active']);
+    $brandA = Brand::create(['name' => 'Brand Dup A '.uniqid(), 'status' => 'active']);
+    $brandB = Brand::create(['name' => 'Brand Dup B '.uniqid(), 'status' => 'active']);
 
     $line = ProductLine::create([
         'brand_id' => $brandA->id,
@@ -52,21 +52,21 @@ function createSourceProductForDuplication(Warehouse $warehouse): array
 
     $category = Category::create([
         'name' => 'Categoria Dup',
-        'slug' => 'categoria-dup-' . uniqid(),
+        'slug' => 'categoria-dup-'.uniqid(),
         'priority' => 1,
     ]);
 
     $supplierA = Supplier::create([
-        'name' => 'Supplier Dup A ' . uniqid(),
+        'name' => 'Supplier Dup A '.uniqid(),
         'status' => 'active',
     ]);
 
     $supplierB = Supplier::create([
-        'name' => 'Supplier Dup B ' . uniqid(),
+        'name' => 'Supplier Dup B '.uniqid(),
         'status' => 'active',
     ]);
 
-    $make = VehicleMake::create(['name' => 'Make Dup ' . uniqid()]);
+    $make = VehicleMake::create(['name' => 'Make Dup '.uniqid()]);
     $model = VehicleModel::create([
         'make_id' => $make->id,
         'name' => 'Model Dup',
@@ -282,7 +282,6 @@ it('duplicates product preserving core setup and excluding inventory, vins and a
         'media',
         'variants.suppliers',
         'variants.pricing',
-        'variants.attributes',
         'vins',
         'inventory',
         'alternatives',

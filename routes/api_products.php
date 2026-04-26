@@ -16,6 +16,7 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     Route::post('/{product}/duplicate', [ProductController::class, 'duplicate']);
     Route::get('/{product}', [ProductController::class, 'show']);
     Route::put('/{product}', [ProductController::class, 'update']);
+    Route::post('/{product}/preview-name', [ProductController::class, 'previewName']);
     Route::post('/{product}/regenerate-name', [ProductController::class, 'regenerateName']);
     Route::delete('/{product}', [ProductController::class, 'destroy']);
     Route::post('/{id}/restore', [ProductController::class, 'restore']);

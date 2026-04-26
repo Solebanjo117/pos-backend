@@ -236,6 +236,34 @@ abstract class BaseImport
         return $instance->id;
     }
 
+    protected function resolveIdOrCreateByName(string $modelClass, string $nameColumn, mixed $value, array $extraData = []): int
+    {
+        $isIntegerId = is_int($value) || (is_string($value) && preg_match('/^\d+$/', trim($value)));
+
+        if ($isIntegerId) {
+            $existing = $modelClass::query()->find((int) $value);
+            if ($existing) {
+                return $existing->id;
+            }
+
+            throw new \RuntimeException('El registro seleccionado no existe.');
+        }
+
+        return $this->resolveOrCreate($modelClass, $nameColumn, (string) $value, $extraData);
+    }
+
+    protected function splitDelimitedValues(mixed $value): array
+    {
+        if (is_array($value)) {
+            return array_values(array_filter($value, fn ($item) => trim((string) $item) !== ''));
+        }
+
+        return array_values(array_filter(
+            array_map('trim', explode(',', (string) $value)),
+            fn ($item) => $item !== ''
+        ));
+    }
+
     protected function parseBoolean(mixed $value): ?bool
     {
         if ($value === null || $value === '') {

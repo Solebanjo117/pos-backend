@@ -53,7 +53,7 @@ it('persists product-level attributes when creating a product without default va
     ]);
 });
 
-it('updates only product-level attributes without deleting variant-level attributes', function () {
+it('updates product-level attributes without deleting legacy variant-scoped rows', function () {
     $product = Product::create([
         'sku_base' => 'ATTR-BASE-001',
         'name' => 'Bomba de prueba',
@@ -121,5 +121,108 @@ it('updates only product-level attributes without deleting variant-level attribu
         'variant_id' => $variant->id,
         'name' => 'Lado',
         'value' => 'Derecho',
+    ]);
+});
+
+it('keeps created product attributes at product level only', function () {
+    $brand = Brand::create([
+        'name' => 'Marca Producto Atributos',
+        'status' => 'active',
+    ]);
+
+    $response = $this->postJson('/api/v1/products', [
+        'name' => 'Alternador con atributo base',
+        'status' => 'active',
+        'brand_id' => $brand->id,
+        'sku' => 'ATTR-BASE-VAR-001',
+        'attributes' => [
+            [
+                'name' => 'Amperaje',
+                'value' => '140',
+                'unit' => 'A',
+            ],
+        ],
+    ]);
+
+    $response->assertStatus(201);
+
+    $productId = $response->json('data.id');
+    $variantId = ProductVariant::where('product_id', $productId)->value('id');
+
+    expect($variantId)->not->toBeNull();
+
+    $this->assertDatabaseHas('product_attributes', [
+        'product_id' => $productId,
+        'variant_id' => null,
+        'name' => 'Amperaje',
+        'value' => '140',
+        'unit' => 'A',
+    ]);
+
+    $this->assertDatabaseMissing('product_attributes', [
+        'product_id' => $productId,
+        'variant_id' => $variantId,
+        'name' => 'Amperaje',
+    ]);
+});
+
+it('rejects variant-scoped attribute writes', function () {
+    $product = Product::create([
+        'sku_base' => 'ATTR-SCOPE-001',
+        'name' => 'Producto alcance atributos',
+        'status' => 'active',
+    ]);
+
+    $brand = Brand::create([
+        'name' => 'Marca Alcance Atributos',
+        'status' => 'active',
+    ]);
+
+    $variant = ProductVariant::create([
+        'product_id' => $product->id,
+        'brand_id' => $brand->id,
+        'sku' => 'ATTR-SCOPE-VAR-001',
+        'status' => 'active',
+        'is_default' => true,
+    ]);
+
+    $this->postJson('/api/v1/product-attributes', [
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'name' => 'Lado',
+        'value' => 'Derecho',
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors('variant_id');
+
+    $this->getJson("/api/v1/products/{$product->id}/attributes?variant_id={$variant->id}")
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('variant_id');
+
+    $this->postJson("/api/v1/products/{$product->id}/variants", [
+        'brand_id' => $brand->id,
+        'sku' => 'ATTR-SCOPE-VAR-002',
+        'attributes' => [
+            [
+                'name' => 'Lado',
+                'value' => 'Izquierdo',
+            ],
+        ],
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors('attributes');
+
+    $this->putJson("/api/v1/products/{$product->id}/variants/{$variant->id}", [
+        'attributes' => [
+            [
+                'name' => 'Lado',
+                'value' => 'Derecho',
+            ],
+        ],
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors('attributes');
+
+    $this->assertDatabaseMissing('product_attributes', [
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'name' => 'Lado',
     ]);
 });

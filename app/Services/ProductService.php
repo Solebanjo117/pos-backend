@@ -7,7 +7,9 @@ use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductVariant;
 use App\Models\ProductVehicleCompatibility;
-use Illuminate\Database\Eloquent\Collection;
+use App\Models\VehicleChassis;
+use App\Models\VehicleEngine;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class ProductService
@@ -38,6 +40,173 @@ class ProductService
             ->all();
     }
 
+    private function attributeNameKey(string $name): string
+    {
+        return mb_strtolower(trim($name));
+    }
+
+    private function engineCategoryKeywords(): array
+    {
+        return [
+            'motor',
+            'piston',
+            'piston ring',
+            'anillo',
+            'biela',
+            'cigueñal',
+            'cigüeñal',
+            'culata',
+            'valvula',
+            'válvula',
+            'arbol de levas',
+            'árbol de levas',
+            'empaque',
+            'junta de culata',
+            'bomba de aceite',
+            'cadena',
+            'correa',
+            'timing',
+            'engine',
+        ];
+    }
+
+    private function categorySetContainsEnginePart(?int $categoryId, array $extraCategoryIds = []): bool
+    {
+        foreach ($this->categoriesForProductName($categoryId, $extraCategoryIds) as $category) {
+            $categoryName = mb_strtolower($category->name);
+
+            foreach ($this->engineCategoryKeywords() as $keyword) {
+                if (str_contains($categoryName, $keyword)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function normalizeExtraCategoryIds(mixed $categoryIds, ?int $primaryCategoryId): array
+    {
+        if (! is_array($categoryIds)) {
+            return [];
+        }
+
+        $primaryId = $primaryCategoryId ? (int) $primaryCategoryId : null;
+
+        return collect($categoryIds)
+            ->filter(fn ($categoryId) => $categoryId !== null && $categoryId !== '')
+            ->map(fn ($categoryId) => (int) $categoryId)
+            ->filter(fn (int $categoryId) => $categoryId > 0 && $categoryId !== $primaryId)
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function categoriesForProductName(?int $categoryId, array $extraCategoryIds = []): Collection
+    {
+        $categoryIds = collect([$categoryId, ...$extraCategoryIds])
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($categoryIds->isEmpty()) {
+            return new Collection;
+        }
+
+        return Category::query()
+            ->whereIn('id', $categoryIds->all())
+            ->orderBy('name')
+            ->get();
+    }
+
+    private function categoriesForDefaultAttributes(?int $categoryId, array $extraCategoryIds = []): Collection
+    {
+        $categories = new Collection;
+
+        if ($categoryId) {
+            $primaryCategory = Category::find($categoryId);
+            if ($primaryCategory) {
+                $categories->push($primaryCategory);
+            }
+        }
+
+        $extras = Category::query()
+            ->whereIn('id', $this->normalizeExtraCategoryIds($extraCategoryIds, $categoryId))
+            ->orderBy('name')
+            ->get();
+
+        return $categories->concat($extras);
+    }
+
+    private function defaultAttributesForCategories(?int $categoryId, array $extraCategoryIds = [], iterable $existingAttributes = []): array
+    {
+        $existingByName = collect($existingAttributes)
+            ->mapWithKeys(function ($attribute) {
+                $name = is_array($attribute) ? ($attribute['name'] ?? '') : ($attribute->name ?? '');
+                $key = $this->attributeNameKey((string) $name);
+
+                if ($key === '') {
+                    return [];
+                }
+
+                return [
+                    $key => [
+                        'value' => is_array($attribute) ? ($attribute['value'] ?? '') : ($attribute->value ?? ''),
+                        'unit' => is_array($attribute) ? ($attribute['unit'] ?? null) : ($attribute->unit ?? null),
+                    ],
+                ];
+            });
+
+        $seenNames = [];
+        $defaults = [];
+
+        foreach ($this->categoriesForDefaultAttributes($categoryId, $extraCategoryIds) as $category) {
+            foreach (($category->default_attributes ?? []) as $attribute) {
+                $name = trim((string) ($attribute['name'] ?? ''));
+                $key = $this->attributeNameKey($name);
+
+                if ($key === '' || isset($seenNames[$key])) {
+                    continue;
+                }
+
+                $existing = $existingByName->get($key, []);
+                $defaults[] = [
+                    'name' => $name,
+                    'value' => $existing['value'] ?? ($attribute['default_value'] ?? $attribute['value'] ?? ''),
+                    'unit' => $attribute['unit'] ?? ($existing['unit'] ?? null),
+                ];
+                $seenNames[$key] = true;
+            }
+        }
+
+        return $defaults;
+    }
+
+    private function categoryDefaultAttributesWithCustomValues(Product $product, ?int $categoryId, array $extraCategoryIds = []): array
+    {
+        $existingAttributes = $product->attributes()
+            ->whereNull('variant_id')
+            ->get(['name', 'value', 'unit']);
+
+        $defaults = $this->defaultAttributesForCategories($categoryId, $extraCategoryIds, $existingAttributes);
+        $defaultKeys = collect($defaults)
+            ->map(fn ($attribute) => $this->attributeNameKey($attribute['name']))
+            ->all();
+
+        $customAttributes = $existingAttributes
+            ->reject(fn ($attribute) => in_array($this->attributeNameKey($attribute->name), $defaultKeys, true))
+            ->map(fn ($attribute) => [
+                'name' => $attribute->name,
+                'value' => $attribute->value,
+                'unit' => $attribute->unit,
+            ])
+            ->values()
+            ->all();
+
+        return array_merge($defaults, $customAttributes);
+    }
+
     private function normalizeMoneyValue(mixed $value): ?float
     {
         if ($value === null || $value === '') {
@@ -49,6 +218,100 @@ class ProductService
         }
 
         return (float) $value;
+    }
+
+    private function syncOemReferences(Product $product, array $references): void
+    {
+        $normalized = collect($references)
+            ->map(function ($reference) {
+                $code = trim((string) ($reference['oem_code'] ?? ''));
+                $manufacturer = isset($reference['manufacturer'])
+                    ? trim((string) $reference['manufacturer'])
+                    : null;
+
+                return [
+                    'oem_code' => $code,
+                    'manufacturer' => $manufacturer !== '' ? $manufacturer : null,
+                ];
+            })
+            ->filter(fn (array $reference) => $reference['oem_code'] !== '')
+            ->unique(fn (array $reference) => mb_strtoupper($reference['oem_code']).'|'.mb_strtolower((string) $reference['manufacturer']))
+            ->values();
+
+        $product->oemReferences()->delete();
+
+        foreach ($normalized as $reference) {
+            $product->oemReferences()->create($reference);
+        }
+    }
+
+    private function syncAlternatives(Product $product, array $alternatives): void
+    {
+        $syncPayload = collect($alternatives)
+            ->mapWithKeys(function ($alternative) use ($product) {
+                $alternativeProductId = (int) ($alternative['alternative_product_id'] ?? $alternative['id'] ?? 0);
+
+                if ($alternativeProductId <= 0 || $alternativeProductId === (int) $product->id) {
+                    return [];
+                }
+
+                $relationshipType = $alternative['relationship_type'] ?? 'compatible';
+                if (! in_array($relationshipType, ['compatible', 'substitute', 'upgrade'], true)) {
+                    $relationshipType = 'compatible';
+                }
+
+                return [
+                    $alternativeProductId => [
+                        'relationship_type' => $relationshipType,
+                    ],
+                ];
+            })
+            ->all();
+
+        $product->alternatives()->sync($syncPayload);
+    }
+
+    private function syncVehicleCompatibility(Product $product, array $compatibility): void
+    {
+        $product->vehicleCompatibility()->delete();
+
+        $engineIds = collect($compatibility['engines'] ?? [])
+            ->pluck('engine_id')
+            ->filter()
+            ->map(fn ($engineId) => (int) $engineId)
+            ->unique()
+            ->values();
+
+        foreach ($engineIds as $engineId) {
+            $product->vehicleCompatibility()->create([
+                'engine_id' => $engineId,
+            ]);
+        }
+
+        $chassisIds = collect($compatibility['chassis'] ?? [])
+            ->pluck('chassis_id')
+            ->filter()
+            ->map(fn ($chassisId) => (int) $chassisId)
+            ->unique()
+            ->values();
+
+        foreach ($chassisIds as $chassisId) {
+            $product->vehicleCompatibility()->create([
+                'chassis_id' => $chassisId,
+            ]);
+        }
+
+        if ((bool) ($compatibility['allEngines'] ?? $compatibility['all_engines'] ?? false)) {
+            $product->vehicleCompatibility()->create([
+                'all_engines' => true,
+            ]);
+        }
+
+        if ((bool) ($compatibility['allChassis'] ?? $compatibility['all_chassis'] ?? false)) {
+            $product->vehicleCompatibility()->create([
+                'all_chassis' => true,
+            ]);
+        }
     }
 
     private function normalizePercentValue(mixed $value): ?int
@@ -117,10 +380,12 @@ class ProductService
         DB::beginTransaction();
 
         try {
+            $primaryCategoryId = $data['category_id'] ?? null;
+            $extraCategoryIds = $this->normalizeExtraCategoryIds($data['extra_category_ids'] ?? [], $primaryCategoryId);
             // sku_base is required — auto-generate if not provided or empty
             $skuBase = $data['sku_base'] ?? null;
             if (empty($skuBase)) {
-                $skuBase = $this->autoGenerateSku($data['category_id'] ?? null);
+                $skuBase = $this->autoGenerateSku($primaryCategoryId);
             }
 
             // Auto-generate name only when not provided.
@@ -131,7 +396,7 @@ class ProductService
 
             $nameWasAutoGenerated = empty($name);
             if ($nameWasAutoGenerated) {
-                $name = $this->autoGenerateName($data['category_id'] ?? null);
+                $name = $this->autoGenerateName($primaryCategoryId, $extraCategoryIds);
             }
 
             // Generate product system_id before creation
@@ -144,12 +409,14 @@ class ProductService
                 'alternate_code' => $data['alternate_code'] ?? null,
                 'pricing_formula' => $data['pricing_formula'] ?? null,
                 'product_line_id' => $data['product_line_id'] ?? null,
-                'category_id' => $data['category_id'] ?? null,
+                'category_id' => $primaryCategoryId,
                 'name' => $name,
                 'description' => $data['description'] ?? null,
                 'status' => $data['status'] ?? 'active',
                 'is_universal' => $data['is_universal'] ?? false,
             ]);
+
+            $product->extraCategories()->sync($extraCategoryIds);
 
             // Create default variant with brand (only if brand_id is provided)
             $variant = null;
@@ -186,28 +453,12 @@ class ProductService
                 ? $this->normalizeAttributes($data['attributes'])
                 : [];
 
-            if (empty($providedAttributes) && ! empty($data['category_id'])) {
-                $category = Category::find($data['category_id']);
-                if ($category && ! empty($category->default_attributes)) {
-                    $providedAttributes = collect($category->default_attributes)
-                        ->map(fn ($attr) => [
-                            'name' => $attr['name'] ?? '',
-                            'value' => $attr['default_value'] ?? $attr['value'] ?? '',
-                            'unit' => $attr['unit'] ?? null,
-                        ])
-                        ->filter(fn ($attr) => $attr['name'] !== '')
-                        ->values()
-                        ->all();
-                }
+            if (empty($providedAttributes)) {
+                $providedAttributes = $this->defaultAttributesForCategories($primaryCategoryId, $extraCategoryIds);
             }
 
             if (! empty($providedAttributes)) {
                 $this->assignAttributes($product, $providedAttributes);
-
-                // Keep default variant in sync for compatibility with legacy variant-level displays.
-                if ($variant) {
-                    $this->assignVariantAttributes($variant, $providedAttributes);
-                }
             }
 
             // Assign vehicle compatibility
@@ -240,7 +491,7 @@ class ProductService
 
             DB::commit();
 
-            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine']);
+            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -279,6 +530,10 @@ class ProductService
 
         try {
             $previousCategoryId = $product->category_id;
+            $previousExtraCategoryIds = $product->extraCategories()
+                ->pluck('categories.id')
+                ->map(fn ($categoryId) => (int) $categoryId)
+                ->all();
 
             // Update basic product info (only base product fields)
             $updatePayload = [];
@@ -304,28 +559,30 @@ class ProductService
                 $product->update($updatePayload);
             }
 
-            // When category changes, replace product-level attributes with new category defaults
-            if (array_key_exists('category_id', $data) && $data['category_id'] != $previousCategoryId && ! isset($data['attributes'])) {
-                $newCategoryId = $data['category_id'];
-                $newDefaults = [];
+            $currentCategoryId = array_key_exists('category_id', $data)
+                ? $data['category_id']
+                : $previousCategoryId;
 
-                if ($newCategoryId) {
-                    $newCategory = Category::find($newCategoryId);
-                    if ($newCategory && ! empty($newCategory->default_attributes)) {
-                        $newDefaults = collect($newCategory->default_attributes)
-                            ->map(fn ($attr) => [
-                                'name' => $attr['name'] ?? '',
-                                'value' => $attr['default_value'] ?? $attr['value'] ?? '',
-                                'unit' => $attr['unit'] ?? null,
-                            ])
-                            ->filter(fn ($attr) => $attr['name'] !== '')
-                            ->values()
-                            ->all();
-                    }
+            $categoryChanged = array_key_exists('category_id', $data)
+                && (int) ($data['category_id'] ?? 0) !== (int) ($previousCategoryId ?? 0);
+            $extraCategoriesChanged = array_key_exists('extra_category_ids', $data);
+
+            if ($extraCategoriesChanged) {
+                $currentExtraCategoryIds = $this->normalizeExtraCategoryIds($data['extra_category_ids'], $currentCategoryId);
+                $product->extraCategories()->sync($currentExtraCategoryIds);
+            } else {
+                $currentExtraCategoryIds = $this->normalizeExtraCategoryIds($previousExtraCategoryIds, $currentCategoryId);
+
+                if ($currentExtraCategoryIds !== $previousExtraCategoryIds) {
+                    $product->extraCategories()->sync($currentExtraCategoryIds);
                 }
+            }
 
-                if (! empty($newDefaults)) {
-                    $this->assignAttributes($product, $newDefaults);
+            if (($categoryChanged || $extraCategoriesChanged) && ! isset($data['attributes'])) {
+                $newAttributes = $this->categoryDefaultAttributesWithCustomValues($product, $currentCategoryId, $currentExtraCategoryIds);
+
+                if (! empty($newAttributes)) {
+                    $this->assignAttributes($product, $newAttributes);
                 } else {
                     $product->attributes()->whereNull('variant_id')->delete();
                 }
@@ -362,9 +619,21 @@ class ProductService
                 $this->assignAttributes($product, $this->normalizeAttributes($data['attributes']));
             }
 
+            if (array_key_exists('oem_references', $data)) {
+                $this->syncOemReferences($product, $data['oem_references'] ?? []);
+            }
+
+            if (array_key_exists('alternatives', $data)) {
+                $this->syncAlternatives($product, $data['alternatives'] ?? []);
+            }
+
+            if (array_key_exists('vehicle_compatibility', $data)) {
+                $this->syncVehicleCompatibility($product, $data['vehicle_compatibility'] ?? []);
+            }
+
             DB::commit();
 
-            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine']);
+            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -420,7 +689,7 @@ class ProductService
      */
     public function assignAttributes(Product $product, array $attributes): void
     {
-        // Remove only product-level attributes; keep variant-level overrides intact.
+        // Replace only product-level attributes.
         $product->attributes()->whereNull('variant_id')->delete();
 
         // Create new product-level attributes.
@@ -439,7 +708,7 @@ class ProductService
      */
     public function getProductDetail(int $productId, array $includes = [], ?int $warehouseId = null): ?Product
     {
-        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing', 'productLine', 'category', 'engine', 'media']);
+        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing', 'productLine', 'category', 'extraCategories', 'engine', 'media']);
 
         // Eager load inventory with optional warehouse filtering
         $query->with([
@@ -464,8 +733,7 @@ class ProductService
                     $query->with('variants.suppliers');
                     break;
                 case 'attributes':
-                    // Load product-level AND all variant-level attributes
-                    $query->with(['attributes', 'variants.attributes']);
+                    $query->with('attributes');
                     break;
                 case 'media':
                     $query->with('media');
@@ -591,37 +859,158 @@ class ProductService
 
     /**
      * Auto-generate product BASE name from Category only.
-     * Brand and attributes belong to variants, not the base product.
+     * Brand belongs to variants; attributes belong to the base product.
      */
-    private function autoGenerateName(?int $categoryId): string
+    private function autoGenerateName(?int $categoryId, array $extraCategoryIds = []): string
     {
-        if ($categoryId) {
-            $category = Category::find($categoryId);
-            if ($category) {
-                return $category->name;
-            }
+        $name = $this->categoriesForProductName($categoryId, $extraCategoryIds)
+            ->pluck('name')
+            ->filter()
+            ->implode(' ');
+
+        if ($name !== '') {
+            return $name;
         }
 
         return 'Producto sin nombre';
     }
 
-    /**
-     * Assign attributes to a variant.
-     */
-    public function assignVariantAttributes(ProductVariant $variant, array $attributes): void
+    private function formatVehicleLabel(?VehicleEngine $engine, ?VehicleChassis $chassis, bool $isEnginePart): ?string
     {
-        // Remove existing variant attributes
-        $variant->attributes()->delete();
+        $model = $engine?->model ?? $chassis?->model;
+        $make = $model?->make;
 
-        // Create new attributes with variant_id
-        foreach ($attributes as $attribute) {
-            $variant->attributes()->create([
-                'product_id' => $variant->product_id,
-                'name' => $attribute['name'],
-                'value' => $attribute['value'] ?? '',
-                'unit' => $attribute['unit'] ?? null,
-            ]);
+        if (! $make || ! $model) {
+            return null;
         }
+
+        $engineCode = $engine?->engine_code;
+        $yearFrom = $model->year_from ? substr((string) $model->year_from, -2) : null;
+        $yearTo = $model->year_to ? substr((string) $model->year_to, -2) : null;
+        $yearRange = ($yearFrom && $yearTo) ? " {$yearFrom}-{$yearTo}" : ($yearFrom ? " {$yearFrom}+" : '');
+
+        if ($isEnginePart && $engineCode) {
+            return "{$engineCode} {$make->name} {$model->name}{$yearRange}";
+        }
+
+        return "{$make->name} {$model->name}{$yearRange}";
+    }
+
+    private function compatibilityVehicleLabels(Product $product, bool $isEnginePart, ?array $draftCompatibility = null): Collection
+    {
+        if ($draftCompatibility !== null) {
+            $labels = collect();
+
+            $engineIds = collect($draftCompatibility['engines'] ?? [])
+                ->pluck('engine_id')
+                ->filter()
+                ->map(fn ($engineId) => (int) $engineId)
+                ->unique()
+                ->values();
+
+            if ($engineIds->isNotEmpty()) {
+                VehicleEngine::query()
+                    ->with('model.make')
+                    ->whereIn('id', $engineIds->all())
+                    ->get()
+                    ->each(function (VehicleEngine $engine) use ($labels, $isEnginePart) {
+                        $label = $this->formatVehicleLabel($engine, null, $isEnginePart);
+                        if ($label) {
+                            $labels->push($label);
+                        }
+                    });
+            }
+
+            $chassisIds = collect($draftCompatibility['chassis'] ?? [])
+                ->pluck('chassis_id')
+                ->filter()
+                ->map(fn ($chassisId) => (int) $chassisId)
+                ->unique()
+                ->values();
+
+            if ($chassisIds->isNotEmpty()) {
+                VehicleChassis::query()
+                    ->with('model.make')
+                    ->whereIn('id', $chassisIds->all())
+                    ->get()
+                    ->each(function (VehicleChassis $chassis) use ($labels, $isEnginePart) {
+                        $label = $this->formatVehicleLabel(null, $chassis, $isEnginePart);
+                        if ($label) {
+                            $labels->push($label);
+                        }
+                    });
+            }
+
+            return $labels;
+        }
+
+        return ProductVehicleCompatibility::query()
+            ->where('product_id', $product->id)
+            ->with(['engine.model.make', 'chassis.model.make'])
+            ->get()
+            ->map(fn (ProductVehicleCompatibility $compatibility) => $this->formatVehicleLabel(
+                $compatibility->engine,
+                $compatibility->chassis,
+                $isEnginePart,
+            ))
+            ->filter()
+            ->values();
+    }
+
+    private function vinVehicleLabels(Product $product, bool $isEnginePart): Collection
+    {
+        $productVins = $product->vins()->pluck('vin')->toArray();
+
+        if (empty($productVins)) {
+            return collect();
+        }
+
+        return \App\Models\VehicleVin::query()
+            ->whereIn('vin', $productVins)
+            ->with('engine.model.make')
+            ->get()
+            ->map(fn ($vehicleVin) => $this->formatVehicleLabel($vehicleVin->engine, null, $isEnginePart))
+            ->filter()
+            ->values();
+    }
+
+    private function buildPreviewProductName(Product $product, ?int $categoryId, array $extraCategoryIds = [], ?array $draftCompatibility = null): string
+    {
+        $baseName = $this->autoGenerateName($categoryId, $extraCategoryIds);
+        $isEnginePart = $this->categorySetContainsEnginePart($categoryId, $extraCategoryIds);
+        $vehicleLabels = $this->compatibilityVehicleLabels($product, $isEnginePart, $draftCompatibility)
+            ->concat($this->vinVehicleLabels($product, $isEnginePart))
+            ->unique()
+            ->values();
+
+        if ($vehicleLabels->isNotEmpty()) {
+            $displayed = $vehicleLabels->take(3)->implode(', ');
+            $suffix = $vehicleLabels->count() > 3 ? ' y mas' : '';
+
+            return $baseName.' - '.$displayed.$suffix;
+        }
+
+        return $baseName;
+    }
+
+    public function previewProductName(Product $product, array $data): string
+    {
+        $categoryId = array_key_exists('category_id', $data)
+            ? ($data['category_id'] ? (int) $data['category_id'] : null)
+            : $product->category_id;
+
+        $extraCategoryIds = array_key_exists('extra_category_ids', $data)
+            ? $this->normalizeExtraCategoryIds($data['extra_category_ids'] ?? [], $categoryId)
+            : $product->extraCategories()
+                ->pluck('categories.id')
+                ->map(fn ($extraCategoryId) => (int) $extraCategoryId)
+                ->all();
+
+        $draftCompatibility = array_key_exists('vehicle_compatibility', $data)
+            ? ($data['vehicle_compatibility'] ?? [])
+            : null;
+
+        return $this->buildPreviewProductName($product, $categoryId, $extraCategoryIds, $draftCompatibility);
     }
 
     /**
@@ -638,8 +1027,13 @@ class ProductService
      */
     public function updateProductNameWithVehicles(Product $product): Product
     {
+        $extraCategoryIds = $product->extraCategories()
+            ->pluck('categories.id')
+            ->map(fn ($categoryId) => (int) $categoryId)
+            ->all();
+
         // 1. Build the base name (Category ONLY)
-        $baseName = $this->autoGenerateName($product->category_id);
+        $baseName = $this->autoGenerateName($product->category_id, $extraCategoryIds);
 
         // 2. Determine if the category is engine-related
         $isEnginePart = false;
@@ -673,6 +1067,41 @@ class ProductService
                     if (str_contains($catName, $keyword)) {
                         $isEnginePart = true;
                         break;
+                    }
+                }
+            }
+        }
+
+        if (! $isEnginePart && ! empty($extraCategoryIds)) {
+            $engineKeywords = [
+                'motor',
+                'pistÃ³n',
+                'piston',
+                'biela',
+                'cigÃ¼eÃ±al',
+                'cigueÃ±al',
+                'culata',
+                'vÃ¡lvula',
+                'valvula',
+                'Ã¡rbol de levas',
+                'arbol de levas',
+                'empaque',
+                'junta de culata',
+                'bomba de aceite',
+                'cadena',
+                'correa',
+                'timing',
+                'engine',
+                'piston ring',
+                'anillo',
+            ];
+
+            foreach ($this->categoriesForProductName(null, $extraCategoryIds) as $category) {
+                $catName = mb_strtolower($category->name);
+                foreach ($engineKeywords as $keyword) {
+                    if (str_contains($catName, $keyword)) {
+                        $isEnginePart = true;
+                        break 2;
                     }
                 }
             }
@@ -752,7 +1181,7 @@ class ProductService
         // 5. Save
         $product->update(['name' => $baseName]);
 
-        return $product->fresh();
+        return $product->fresh(['category', 'extraCategories']);
     }
 
     /**
@@ -760,7 +1189,7 @@ class ProductService
      */
     public function searchProducts(array $filters = [], int $perPage = 15)
     {
-        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'productLine', 'category']);
+        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'productLine', 'category', 'extraCategories']);
 
         // Filter by status
         if (isset($filters['status'])) {
@@ -774,7 +1203,13 @@ class ProductService
 
         // Filter by category
         if (isset($filters['category_id'])) {
-            $query->where('category_id', $filters['category_id']);
+            $categoryIds = is_array($filters['category_id']) ? $filters['category_id'] : [$filters['category_id']];
+            $query->where(function ($categoryQuery) use ($categoryIds) {
+                $categoryQuery->whereIn('category_id', $categoryIds)
+                    ->orWhereHas('extraCategories', function ($extraQuery) use ($categoryIds) {
+                        $extraQuery->whereIn('categories.id', $categoryIds);
+                    });
+            });
         }
 
         // Filter by brand (through variants)
@@ -812,9 +1247,14 @@ class ProductService
             $source = Product::with([
                 'pricing',
                 'attributes',
+                'productSuppliers',
+                'variants.attributes',
+                'variants.pricing',
+                'variants.suppliers',
                 'vehicleCompatibility',
                 'oemReferences',
                 'media',
+                'extraCategories',
             ])->findOrFail($product->id);
 
             $duplicatedProduct = Product::create([
@@ -823,11 +1263,13 @@ class ProductService
                 'product_line_id' => $source->product_line_id,
                 'category_id' => $source->category_id,
                 'engine_id' => $source->engine_id,
-                'name' => $source->name,
+                'name' => $source->name.' (Copia)',
                 'description' => $source->description,
                 'status' => $source->status,
                 'is_universal' => $source->is_universal,
             ]);
+
+            $duplicatedProduct->extraCategories()->sync($source->extraCategories->pluck('id')->all());
 
             if ($source->pricing) {
                 $productSaleTaxRate = $source->pricing->sale_tax_rate ?? $source->pricing->tax_rate;
@@ -857,6 +1299,64 @@ class ProductService
                 $pricing->save();
             }
 
+            foreach ($source->variants as $sourceVariant) {
+                $duplicatedVariant = $this->createVariant($duplicatedProduct, [
+                    'brand_id' => $sourceVariant->brand_id,
+                    'sku' => $sourceVariant->sku,
+                    'upc' => $sourceVariant->upc,
+                    'status' => $sourceVariant->status,
+                    'is_default' => (bool) $sourceVariant->is_default,
+                ]);
+
+                if ($sourceVariant->pricing) {
+                    $variantSaleTaxRate = $sourceVariant->pricing->sale_tax_rate ?? $sourceVariant->pricing->tax_rate;
+                    $variantCostTaxRate = $sourceVariant->pricing->cost_tax_rate ?? $variantSaleTaxRate;
+
+                    $variantPricingData = [
+                        'product_id' => $duplicatedProduct->id,
+                        'variant_id' => $duplicatedVariant->id,
+                        'base_price' => $sourceVariant->pricing->base_price,
+                        'msrp' => $sourceVariant->pricing->msrp,
+                        'cost' => $sourceVariant->pricing->cost_total,
+                        'cost_base' => $sourceVariant->pricing->getRawOriginal('cost_base'),
+                        'cost_miscellaneous' => $sourceVariant->pricing->cost_miscellaneous,
+                        'margin_percentage' => $sourceVariant->pricing->margin_percentage,
+                        'tax_rate' => $variantSaleTaxRate,
+                        'sale_tax_rate' => $variantSaleTaxRate,
+                        'cost_tax_rate' => $variantCostTaxRate,
+                        'tax_type' => $sourceVariant->pricing->tax_type,
+                        'max_discount_percentage' => $sourceVariant->pricing->max_discount_percentage,
+                        'pricing_formula' => $sourceVariant->pricing->pricing_formula,
+                    ];
+
+                    $variantPricing = $duplicatedVariant->pricing()->create(
+                        $this->normalizePricingPayload($variantPricingData)
+                    );
+                    $variantPricing->calculateMargin();
+                    $variantPricing->save();
+                }
+
+                foreach ($sourceVariant->attributes as $attribute) {
+                    $duplicatedVariant->attributes()->create([
+                        'product_id' => $duplicatedProduct->id,
+                        'name' => $attribute->name,
+                        'value' => $attribute->value,
+                        'unit' => $attribute->unit,
+                    ]);
+                }
+
+                foreach ($sourceVariant->suppliers as $supplier) {
+                    $duplicatedVariant->suppliers()->syncWithoutDetaching([
+                        $supplier->id => [
+                            'supplier_cost' => $supplier->pivot->supplier_cost ?? 0,
+                            'lead_time_days' => $supplier->pivot->lead_time_days ?? null,
+                            'minimum_order_quantity' => $supplier->pivot->minimum_order_quantity ?? null,
+                            'is_preferred' => (bool) ($supplier->pivot->is_preferred ?? false),
+                        ],
+                    ]);
+                }
+            }
+
             // Duplicate product-level attributes (not variant-level)
             $productLevelAttributes = collect($source->attributes)
                 ->filter(fn (ProductAttribute $a) => $a->variant_id === null)
@@ -870,6 +1370,16 @@ class ProductService
                         'unit' => $attribute->unit,
                     ])->toArray()
                 );
+            }
+
+            foreach ($source->productSuppliers as $productSupplier) {
+                $duplicatedProduct->productSuppliers()->create([
+                    'supplier_id' => $productSupplier->supplier_id,
+                    'supplier_cost' => $productSupplier->supplier_cost,
+                    'lead_time_days' => $productSupplier->lead_time_days,
+                    'minimum_order_quantity' => $productSupplier->minimum_order_quantity,
+                    'is_preferred' => (bool) $productSupplier->is_preferred,
+                ]);
             }
 
             foreach ($source->vehicleCompatibility as $compatibility) {
@@ -908,6 +1418,10 @@ class ProductService
                 'pricing',
                 'productLine',
                 'category',
+                'extraCategories',
+                'productSuppliers',
+                'variants.attributes',
+                'variants.suppliers',
             ]);
         } catch (\Exception $e) {
             DB::rollBack();

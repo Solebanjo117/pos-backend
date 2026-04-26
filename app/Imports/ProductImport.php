@@ -25,9 +25,9 @@ class ProductImport extends BaseImport
     {
         return [
             'nombre' => 'Bujía Iridium',
-            'sku'    => 'SKU-001',
+            'sku' => 'SKU-001',
             'descripcion' => 'Bujía para motor gasolina',
-            'categoria'   => 'Encendido',
+            'categoria' => 'Encendido',
         ];
     }
 
@@ -50,9 +50,9 @@ class ProductImport extends BaseImport
     {
         return match ($header) {
             'nombre', 'name' => 'nombre',
-            'sku'            => 'sku',
+            'sku' => 'sku',
             'descripcion', 'description' => 'descripcion',
-            'categoria', 'category'      => 'categoria',
+            'categoria', 'category' => 'categoria',
             default => $header,
         };
     }
@@ -74,14 +74,14 @@ class ProductImport extends BaseImport
 
     public function processRow(array $row): mixed
     {
-        $categoryId = $this->resolveOrCreate(Category::class, 'name', $row['categoria']);
+        $categoryId = $this->resolveIdOrCreateByName(Category::class, 'name', $row['categoria']);
 
         $productData = [
-            'name'        => $row['nombre'],
-            'sku_base'    => $this->nullIfEmpty($row['sku'] ?? null),
+            'name' => $row['nombre'],
+            'sku_base' => $this->nullIfEmpty($row['sku'] ?? null),
             'description' => $this->nullIfEmpty($row['descripcion'] ?? null),
             'category_id' => $categoryId,
-            'status'      => 'active',
+            'status' => 'active',
         ];
 
         // Atributos enriquecidos desde la UI
@@ -117,31 +117,75 @@ class ProductImport extends BaseImport
                 }
 
                 $variant = $this->productService->createVariant($product, [
-                    'brand_id'   => $brandId,
-                    'sku'        => $this->nullIfEmpty($variantData['sku'] ?? null) ?? ($product->sku_base ?? ''),
-                    'status'     => 'active',
+                    'brand_id' => $brandId,
+                    'sku' => $this->nullIfEmpty($variantData['sku'] ?? null) ?? ($product->sku_base ?? ''),
+                    'status' => 'active',
                     'is_default' => false,
                 ]);
 
                 if (! empty($variantData['pricing']) && $variant) {
-                    $pricing = $variant->pricing()->create([
-                        'product_id'             => $product->id,
-                        'base_price'             => (float) ($variantData['pricing']['base_price'] ?? 0),
-                        'msrp'                   => (float) ($variantData['pricing']['msrp'] ?? 0),
-                        'cost'                   => (float) ($variantData['pricing']['cost'] ?? 0),
-                        'tax_rate'               => (int) ($variantData['pricing']['tax_rate'] ?? 7),
-                        'sale_tax_rate'          => (int) ($variantData['pricing']['sale_tax_rate'] ?? 7),
-                        'cost_tax_rate'          => (int) ($variantData['pricing']['cost_tax_rate'] ?? 7),
-                        'tax_type'               => $variantData['pricing']['tax_type'] ?? 'standard',
-                        'max_discount_percentage' => 0,
-                    ]);
+                    $pricing = $variant->pricing()->create($this->buildVariantPricingPayload(
+                        $product->id,
+                        $variant->id,
+                        $variantData['pricing']
+                    ));
                     $pricing->calculateMargin();
                     $pricing->save();
                 }
+
+                $initialInventory = $variantData['initial_inventory'] ?? [];
+                if (is_array($initialInventory) && ! empty($initialInventory)) {
+                    foreach ($initialInventory as $inventoryData) {
+                        if (empty($inventoryData['warehouse_id'])) {
+                            continue;
+                        }
+
+                        $variant->inventory()->create([
+                            'product_id' => $product->id,
+                            'warehouse_id' => (int) $inventoryData['warehouse_id'],
+                            'quantity_available' => (int) ($inventoryData['stock_available'] ?? 0),
+                            'reorder_point' => (int) ($inventoryData['reorder_point'] ?? 0),
+                            'reorder_quantity' => (int) ($inventoryData['reorder_quantity'] ?? 0),
+                        ]);
+                    }
+                }
+
             }
         }
 
         return $product;
+    }
+
+    private function buildVariantPricingPayload(int $productId, int $variantId, array $pricingData): array
+    {
+        $saleTaxRate = (int) ($pricingData['sale_tax_rate'] ?? $pricingData['tax_rate'] ?? 7);
+        $costTaxRate = (int) ($pricingData['cost_tax_rate'] ?? $saleTaxRate);
+        $costBase = $this->parseMoney($pricingData['cost_base'] ?? null);
+        $costMiscellaneous = $this->parseMoney($pricingData['cost_miscellaneous'] ?? null) ?? 0;
+        $legacyCost = $this->parseMoney($pricingData['cost'] ?? null);
+
+        $payload = [
+            'product_id' => $productId,
+            'variant_id' => $variantId,
+            'base_price' => (float) ($pricingData['base_price'] ?? 0),
+            'msrp' => (float) ($pricingData['msrp'] ?? 0),
+            'tax_rate' => $saleTaxRate,
+            'sale_tax_rate' => $saleTaxRate,
+            'cost_tax_rate' => $costTaxRate,
+            'tax_type' => $pricingData['tax_type'] ?? 'standard',
+            'max_discount_percentage' => (float) ($pricingData['max_discount_percentage'] ?? 0),
+            'pricing_formula' => $this->nullIfEmpty($pricingData['pricing_formula'] ?? null),
+        ];
+
+        if ($costBase !== null) {
+            $payload['cost_base'] = $costBase;
+            $payload['cost_miscellaneous'] = $costMiscellaneous;
+            $payload['cost'] = round($costBase * (1 + ($costTaxRate / 100)) + $costMiscellaneous, 2);
+        } else {
+            $payload['cost'] = $legacyCost ?? 0;
+        }
+
+        return $payload;
     }
 
     protected function getLabelColumn(): string

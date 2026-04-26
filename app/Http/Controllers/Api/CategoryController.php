@@ -154,7 +154,11 @@ class CategoryController extends Controller
             return;
         }
 
-        $productIds = Product::where('category_id', $category->id)->pluck('id');
+        $productIds = Product::where('category_id', $category->id)
+            ->orWhereHas('extraCategories', function ($query) use ($category) {
+                $query->where('categories.id', $category->id);
+            })
+            ->pluck('id');
 
         if ($productIds->isEmpty()) {
             return;
@@ -206,7 +210,12 @@ class CategoryController extends Controller
     public function destroy(Category $category): JsonResponse
     {
         // Check if category has products
-        if ($category->products()->count() > 0) {
+        $hasProducts = $category->products()->exists()
+            || Product::whereHas('extraCategories', function ($query) use ($category) {
+                $query->where('categories.id', $category->id);
+            })->exists();
+
+        if ($hasProducts) {
             return response()->json([
                 'message' => 'Cannot delete category with associated products',
             ], 422);

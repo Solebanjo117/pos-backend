@@ -88,12 +88,8 @@ class BrandImport extends BaseImport
 
         $suppliersRaw = $this->nullIfEmpty($row['proveedores'] ?? null);
         if ($suppliersRaw) {
-            $supplierNames = array_map('trim', explode(',', $suppliersRaw));
-            foreach ($supplierNames as $supplierName) {
-                if ($supplierName === '') {
-                    continue;
-                }
-                $supplierId = $this->resolveOrCreate(Supplier::class, 'name', $supplierName, ['status' => 'active']);
+            foreach ($this->splitDelimitedValues($suppliersRaw) as $supplierName) {
+                $supplierId = $this->resolveIdOrCreateByName(Supplier::class, 'name', $supplierName, ['status' => 'active']);
                 $brand->suppliers()->syncWithoutDetaching([$supplierId]);
             }
         }

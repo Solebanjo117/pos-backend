@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AssignAttributesRequest;
+use App\Http\Requests\RegenerateProductNameRequest;
 use App\Http\Requests\StoreProductRequest;
 use App\Http\Requests\UpdateProductRequest;
 use App\Http\Resources\ProductDetailResource;
@@ -31,11 +32,11 @@ class ProductController extends Controller
         // Archive filter: 'true' = only trashed, 'all' = withTrashed, default = active only
         $archived = $request->get('archived', 'false');
         if ($archived === 'true') {
-            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine', 'media']);
+            $query = Product::onlyTrashed()->with(['pricing', 'productLine', 'category', 'extraCategories', 'attributes', 'engine', 'media']);
         } elseif ($archived === 'all') {
-            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'attributes', 'engine', 'media']);
+            $query = Product::withTrashed()->with(['pricing', 'productLine', 'category', 'extraCategories', 'attributes', 'engine', 'media']);
         } else {
-            $query = Product::query()->with(['pricing', 'productLine', 'category', 'attributes', 'engine', 'media']);
+            $query = Product::query()->with(['pricing', 'productLine', 'category', 'extraCategories', 'attributes', 'engine', 'media']);
         }
 
         // Filters
@@ -61,9 +62,19 @@ class ProductController extends Controller
             $categoryIds = $request->get('category_id');
             // Support both single value and array
             if (is_array($categoryIds)) {
-                $query->whereIn('category_id', $categoryIds);
+                $query->where(function ($categoryQuery) use ($categoryIds) {
+                    $categoryQuery->whereIn('category_id', $categoryIds)
+                        ->orWhereHas('extraCategories', function ($extraQuery) use ($categoryIds) {
+                            $extraQuery->whereIn('categories.id', $categoryIds);
+                        });
+                });
             } else {
-                $query->where('category_id', $categoryIds);
+                $query->where(function ($categoryQuery) use ($categoryIds) {
+                    $categoryQuery->where('category_id', $categoryIds)
+                        ->orWhereHas('extraCategories', function ($extraQuery) use ($categoryIds) {
+                            $extraQuery->where('categories.id', $categoryIds);
+                        });
+                });
             }
         }
 
@@ -79,7 +90,6 @@ class ProductController extends Controller
             },
             'variants.brand',
             'variants.pricing',
-            'variants.attributes',
             'variants.inventory' => function ($q) use ($warehouseId) {
                 if ($warehouseId) {
                     $q->where('warehouse_id', $warehouseId);
@@ -370,13 +380,33 @@ class ProductController extends Controller
      * POST /api/v1/products/{product}/regenerate-name
      * Re-generate auto name from category + vehicle compatibility.
      */
-    public function regenerateName(Product $product): JsonResponse
+    public function regenerateName(RegenerateProductNameRequest $request, Product $product): JsonResponse
     {
+        $validated = $request->validated();
+
+        if ($request->hasAny(['category_id', 'extra_category_ids'])) {
+            $product = $this->productService->updateProduct($product, $validated);
+        }
+
         $updated = $this->productService->updateProductNameWithVehicles($product);
 
         return response()->json([
             'data' => new ProductResource($updated),
             'message' => 'Descripción regenerada correctamente',
+        ]);
+    }
+
+    /**
+     * POST /api/v1/products/{product}/preview-name
+     * Preview generated name without saving product metadata.
+     */
+    public function previewName(RegenerateProductNameRequest $request, Product $product): JsonResponse
+    {
+        return response()->json([
+            'data' => [
+                'name' => $this->productService->previewProductName($product, $request->validated()),
+            ],
+            'message' => 'Vista previa generada correctamente',
         ]);
     }
 

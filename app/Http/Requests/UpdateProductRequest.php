@@ -4,14 +4,13 @@ namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
 
-
 class UpdateProductRequest extends FormRequest
 {
     protected function prepareForValidation(): void
     {
         $pricing = $this->input('pricing');
 
-        if (!is_array($pricing)) {
+        if (! is_array($pricing)) {
             return;
         }
 
@@ -26,11 +25,11 @@ class UpdateProductRequest extends FormRequest
         if ($hasLegacyTaxRate) {
             $pricing['tax_rate'] = $legacyTaxRate;
 
-            if (!$hasSaleTaxRate) {
+            if (! $hasSaleTaxRate) {
                 $pricing['sale_tax_rate'] = $legacyTaxRate;
             }
 
-            if (!$hasCostTaxRate) {
+            if (! $hasCostTaxRate) {
                 $pricing['cost_tax_rate'] = $legacyTaxRate;
             }
         }
@@ -56,7 +55,7 @@ class UpdateProductRequest extends FormRequest
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 
@@ -69,7 +68,7 @@ class UpdateProductRequest extends FormRequest
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 
@@ -124,34 +123,51 @@ class UpdateProductRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'sku_base'       => 'nullable|string|max:50',
+            'sku_base' => 'nullable|string|max:50',
             'alternate_code' => 'nullable|string|max:100',
-            'pricing_formula'=> 'nullable|string|max:255',
-            'upc'            => 'nullable|string|max:255',
+            'pricing_formula' => 'nullable|string|max:255',
+            'upc' => 'nullable|string|max:255',
             'product_line_id' => 'nullable|exists:product_lines,id',
-            'category_id'    => 'nullable|exists:categories,id',
-            'engine_id'      => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
-            'name'           => 'sometimes|string|max:255',
-            'description'    => 'nullable|string',
-            'status'         => 'sometimes|in:active,discontinued,pending',
-            'is_universal'   => 'sometimes|boolean',
-            'attributes'     => 'sometimes|array',
-            'attributes.*.name'  => 'required_with:attributes|string|max:100',
+            'category_id' => 'nullable|exists:categories,id',
+            'extra_category_ids' => 'sometimes|array',
+            'extra_category_ids.*' => 'integer|distinct|exists:categories,id',
+            'engine_id' => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
+            'name' => 'sometimes|string|max:255',
+            'description' => 'nullable|string',
+            'status' => 'sometimes|in:active,discontinued,pending',
+            'is_universal' => 'sometimes|boolean',
+            'attributes' => 'sometimes|array',
+            'attributes.*.name' => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
-            'attributes.*.unit'  => 'nullable|string|max:50',
-            
+            'attributes.*.unit' => 'nullable|string|max:50',
+            'oem_references' => 'sometimes|array',
+            'oem_references.*.oem_code' => 'required_with:oem_references|string|max:50',
+            'oem_references.*.manufacturer' => 'nullable|string|max:100',
+            'alternatives' => 'sometimes|array',
+            'alternatives.*.id' => 'nullable|integer|exists:products,id',
+            'alternatives.*.alternative_product_id' => 'nullable|integer|exists:products,id',
+            'alternatives.*.relationship_type' => 'nullable|in:compatible,substitute,upgrade',
+            'vehicle_compatibility' => 'sometimes|array',
+            'vehicle_compatibility.engines' => 'sometimes|array',
+            'vehicle_compatibility.engines.*.engine_id' => 'required_with:vehicle_compatibility.engines|integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.chassis' => 'sometimes|array',
+            'vehicle_compatibility.chassis.*.chassis_id' => 'required_with:vehicle_compatibility.chassis|integer|exists:vehicle_chassis,id',
+            'vehicle_compatibility.allEngines' => 'sometimes|boolean',
+            'vehicle_compatibility.allChassis' => 'sometimes|boolean',
+            'vehicle_compatibility.isUniversal' => 'sometimes|boolean',
+
             // Pricing (all optional for update)
-            'pricing'                           => 'sometimes|array',
-            'pricing.base_price'                => 'sometimes|numeric|min:0',
-            'pricing.msrp'                      => 'nullable|numeric|min:0',
-            'pricing.cost'                      => 'nullable|numeric|min:0',
-            'pricing.cost_base'                 => 'sometimes|nullable|numeric|min:0',
-            'pricing.cost_miscellaneous'        => 'sometimes|nullable|numeric|min:0',
-            'pricing.tax_rate'                  => 'sometimes|nullable|integer|between:0,100',
-            'pricing.cost_tax_rate'             => 'sometimes|nullable|integer|between:0,100',
-            'pricing.sale_tax_rate'             => 'sometimes|nullable|integer|between:0,100',
-            'pricing.tax_type'                  => 'sometimes|in:standard,exempt,custom',
-            'pricing.max_discount_percentage'   => 'nullable|numeric|between:0,100',
+            'pricing' => 'sometimes|array',
+            'pricing.base_price' => 'sometimes|numeric|min:0',
+            'pricing.msrp' => 'nullable|numeric|min:0',
+            'pricing.cost' => 'nullable|numeric|min:0',
+            'pricing.cost_base' => 'sometimes|nullable|numeric|min:0',
+            'pricing.cost_miscellaneous' => 'sometimes|nullable|numeric|min:0',
+            'pricing.tax_rate' => 'sometimes|nullable|integer|between:0,100',
+            'pricing.cost_tax_rate' => 'sometimes|nullable|integer|between:0,100',
+            'pricing.sale_tax_rate' => 'sometimes|nullable|integer|between:0,100',
+            'pricing.tax_type' => 'sometimes|in:standard,exempt,custom',
+            'pricing.max_discount_percentage' => 'nullable|numeric|between:0,100',
         ];
     }
 
@@ -162,6 +178,7 @@ class UpdateProductRequest extends FormRequest
     {
         return [
             'sku_base.unique' => 'El SKU ya está en uso por otro producto',
+            'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
             'status.in' => 'El estado debe ser: active, discontinued o pending',
         ];
     }

@@ -61,6 +61,16 @@ class ProductDetailResource extends JsonResource
                 'name' => $this->category?->name,
             ]),
 
+            'extra_category_ids' => $this->relationLoaded('extraCategories')
+                ? $this->extraCategories->pluck('id')->values()
+                : [],
+            'extra_categories' => $this->relationLoaded('extraCategories')
+                ? $this->extraCategories->map(fn ($category) => [
+                    'id' => $category->id,
+                    'name' => $category->name,
+                ])->values()
+                : [],
+
             // Default variant info (for edit forms and backwards compatibility)
             'default_variant' => $this->when($defaultVariant, function () use ($defaultVariant) {
                 return [
@@ -89,14 +99,15 @@ class ProductDetailResource extends JsonResource
 
             'attributes' => $this->when(
                 $this->relationLoaded('attributes'),
-                fn () => $this->attributes->map(fn ($attr) => [
-                    'name' => $attr->definition?->name,
-                    'value' => $attr->definition?->data_type === 'string'
-                        ? $attr->text_value
-                        : $attr->numeric_value,
-                    'unit' => $attr->definition?->unit,
-                    'data_type' => $attr->definition?->data_type,
-                ])
+                fn () => $this->attributes
+                    ->whereNull('variant_id')
+                    ->map(fn ($attr) => [
+                        'id' => $attr->id,
+                        'name' => $attr->name,
+                        'value' => $attr->value,
+                        'unit' => $attr->unit,
+                    ])
+                    ->values()
             ),
 
             // Total stock across all variants
@@ -141,6 +152,7 @@ class ProductDetailResource extends JsonResource
             'oem_references' => $this->when(
                 $this->relationLoaded('oemReferences'),
                 fn () => $this->oemReferences->map(fn ($ref) => [
+                    'id' => $ref->id,
                     'oem_code' => $ref->oem_code,
                     'manufacturer' => $ref->manufacturer,
                 ])
@@ -150,7 +162,7 @@ class ProductDetailResource extends JsonResource
                 $this->relationLoaded('alternatives'),
                 fn () => $this->alternatives->map(fn ($alt) => [
                     'id' => $alt->id,
-                    'sku' => $alt->sku,
+                    'sku' => $alt->sku_base,
                     'name' => $alt->name,
                     'relationship_type' => $alt->pivot->relationship_type,
                 ])
@@ -175,6 +187,8 @@ class ProductDetailResource extends JsonResource
                 $this->relationLoaded('vehicleCompatibility'),
                 fn () => $this->vehicleCompatibility->map(fn ($comp) => [
                     'id' => $comp->id,
+                    'engine_id' => $comp->engine_id,
+                    'chassis_id' => $comp->chassis_id,
                     'make' => $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
                     'model' => $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
                     'year_range' => $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
