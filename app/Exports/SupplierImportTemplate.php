@@ -22,14 +22,15 @@ class SupplierImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
             'dias_entrega',
             'notas',
             'estado',
+            'marcas',
         ];
     }
 
     public function array(): array
     {
         return [
-            ['Distribuidora Nacional', 'Juan Pérez', 'juan@distri.com', '+507 123-4567', 'Calle 50', 'Colón', 'Panamá', 'Net 30', 7, 'Proveedor confiable', 'active'],
-            ['Auto Parts International', 'María López', 'maria@autoparts.com', '+507 987-6543', 'Vía España', 'Panamá', 'Panamá', 'Net 15', 3, '', 'active'],
+            ['Distribuidora Nacional', 'Juan Perez', 'juan@distri.com', '+507 123-4567', 'Calle 50', 'Colon', 'Panama', 'Net 30', 7, 'Proveedor confiable', 'activo', 'Bosch, ACDelco'],
+            ['Auto Parts International', 'Maria Lopez', 'maria@autoparts.com', '+507 987-6543', 'Via Espana', 'Panama', 'Panama', 'Net 15', 3, '', 'active', ''],
         ];
     }
 }

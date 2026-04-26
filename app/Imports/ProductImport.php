@@ -4,8 +4,8 @@ namespace App\Imports;
 
 use App\Models\Brand;
 use App\Models\Category;
+use App\Models\Product;
 use App\Services\ProductService;
-use Illuminate\Http\UploadedFile;
 
 class ProductImport extends BaseImport
 {
@@ -16,18 +16,22 @@ class ProductImport extends BaseImport
         return [
             ['key' => 'nombre', 'label' => 'Nombre', 'type' => 'text', 'required' => true],
             ['key' => 'sku', 'label' => 'SKU', 'type' => 'text'],
-            ['key' => 'descripcion', 'label' => 'Descripción', 'type' => 'text'],
-            ['key' => 'categoria', 'label' => 'Categoría', 'type' => 'searchable', 'required' => true, 'endpoint' => '/categories/all'],
+            ['key' => 'descripcion', 'label' => 'Descripcion', 'type' => 'text'],
+            ['key' => 'categoria', 'label' => 'Categoria', 'type' => 'searchable', 'required' => true, 'endpoint' => '/categories/all'],
+            ['key' => 'categorias_extra', 'label' => 'Categorias Extra', 'type' => 'text'],
+            ['key' => 'atributos', 'label' => 'Atributos', 'type' => 'text'],
         ];
     }
 
     public function getExampleRow(): array
     {
         return [
-            'nombre' => 'Bujía Iridium',
+            'nombre' => 'Bujia Iridium',
             'sku' => 'SKU-001',
-            'descripcion' => 'Bujía para motor gasolina',
+            'descripcion' => 'Bujia para motor gasolina',
             'categoria' => 'Encendido',
+            'categorias_extra' => 'Motor, Servicio',
+            'atributos' => 'color:rojo,largo:15cm',
         ];
     }
 
@@ -36,23 +40,15 @@ class ProductImport extends BaseImport
         return 'producto';
     }
 
-    public function preview(UploadedFile $file, int $maxRows = 200): array
-    {
-        return parent::preview($file, $maxRows);
-    }
-
-    public function execute(array $rows): void
-    {
-        parent::execute($rows);
-    }
-
     protected function mapHeader(string $header): string
     {
         return match ($header) {
             'nombre', 'name' => 'nombre',
-            'sku' => 'sku',
+            'sku', 'sku_base' => 'sku',
             'descripcion', 'description' => 'descripcion',
             'categoria', 'category' => 'categoria',
+            'categorias_extra', 'extra_categories', 'extra_category_ids' => 'categorias_extra',
+            'atributos', 'attributes' => 'atributos',
             default => $header,
         };
     }
@@ -67,6 +63,12 @@ class ProductImport extends BaseImport
 
         if (trim((string) ($row['categoria'] ?? '')) === '') {
             $errors[] = 'El campo categoria es obligatorio.';
+        }
+
+        try {
+            $this->parseProductAttributes($row['atributos'] ?? null);
+        } catch (\RuntimeException $e) {
+            $errors[] = $e->getMessage();
         }
 
         return $errors;
@@ -84,76 +86,97 @@ class ProductImport extends BaseImport
             'status' => 'active',
         ];
 
-        // Atributos enriquecidos desde la UI
-        $attributes = $row['__attributes'] ?? [];
-        if (is_array($attributes) && ! empty($attributes)) {
-            $productData['attributes'] = array_values(array_filter(
-                $attributes,
-                fn ($a) => ! empty($a['name']) && ! empty($a['value'])
-            ));
+        $extraCategoryIds = $this->resolveExtraCategoryIds($row['categorias_extra'] ?? null, $categoryId);
+        if (! empty($extraCategoryIds)) {
+            $productData['extra_category_ids'] = $extraCategoryIds;
         }
 
-        // Compatibilidad vehicular enriquecida desde la UI
-        $compatibility = $row['__compatibility'] ?? [];
-        if (is_array($compatibility) && ! empty($compatibility)) {
-            $productData['vehicle_compatibility'] = array_column($compatibility, 'engine_id');
+        $attributes = $this->resolveAttributes($row);
+        if (! empty($attributes)) {
+            $productData['attributes'] = $attributes;
         }
 
         $product = $this->productService->createProduct($productData);
 
-        // Variantes enriquecidas desde la UI (draft variants del VariantManager)
         $variants = $row['__variants'] ?? [];
         if (is_array($variants) && ! empty($variants)) {
             foreach ($variants as $variantData) {
-                $brandId = null;
-                if (! empty($variantData['brand_id'])) {
-                    $brandId = (int) $variantData['brand_id'];
-                } elseif (! empty($variantData['brand']['name'])) {
-                    $brandId = $this->resolveOrCreate(Brand::class, 'name', $variantData['brand']['name'], ['status' => 'active']);
-                }
-
-                if (! $brandId) {
-                    continue;
-                }
-
-                $variant = $this->productService->createVariant($product, [
-                    'brand_id' => $brandId,
-                    'sku' => $this->nullIfEmpty($variantData['sku'] ?? null) ?? ($product->sku_base ?? ''),
-                    'status' => 'active',
-                    'is_default' => false,
-                ]);
-
-                if (! empty($variantData['pricing']) && $variant) {
-                    $pricing = $variant->pricing()->create($this->buildVariantPricingPayload(
-                        $product->id,
-                        $variant->id,
-                        $variantData['pricing']
-                    ));
-                    $pricing->calculateMargin();
-                    $pricing->save();
-                }
-
-                $initialInventory = $variantData['initial_inventory'] ?? [];
-                if (is_array($initialInventory) && ! empty($initialInventory)) {
-                    foreach ($initialInventory as $inventoryData) {
-                        if (empty($inventoryData['warehouse_id'])) {
-                            continue;
-                        }
-
-                        $variant->inventory()->create([
-                            'product_id' => $product->id,
-                            'warehouse_id' => (int) $inventoryData['warehouse_id'],
-                            'quantity_available' => (int) ($inventoryData['stock_available'] ?? 0),
-                            'reorder_point' => (int) ($inventoryData['reorder_point'] ?? 0),
-                            'reorder_quantity' => (int) ($inventoryData['reorder_quantity'] ?? 0),
-                        ]);
-                    }
-                }
-
+                $this->createEnrichedVariant($product, $variantData);
             }
         }
 
         return $product;
+    }
+
+    private function resolveExtraCategoryIds(mixed $value, int $primaryCategoryId): array
+    {
+        return collect($this->splitDelimitedValues($value))
+            ->map(fn ($categoryName) => $this->resolveIdOrCreateByName(Category::class, 'name', $categoryName))
+            ->reject(fn (int $categoryId) => $categoryId === $primaryCategoryId)
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function resolveAttributes(array $row): array
+    {
+        $uiAttributes = $row['__attributes'] ?? [];
+        if (is_array($uiAttributes) && ! empty($uiAttributes)) {
+            return array_values(array_filter(
+                $uiAttributes,
+                fn ($attribute) => ! empty($attribute['name']) && ! empty($attribute['value'])
+            ));
+        }
+
+        return $this->parseProductAttributes($row['atributos'] ?? null);
+    }
+
+    private function createEnrichedVariant(Product $product, array $variantData): void
+    {
+        $brandId = null;
+        if (! empty($variantData['brand_id'])) {
+            $brandId = (int) $variantData['brand_id'];
+        } elseif (! empty($variantData['brand']['name'])) {
+            $brandId = $this->resolveOrCreate(Brand::class, 'name', $variantData['brand']['name'], ['status' => 'active']);
+        }
+
+        if (! $brandId) {
+            return;
+        }
+
+        $variant = $this->productService->createVariant($product, [
+            'brand_id' => $brandId,
+            'sku' => $this->nullIfEmpty($variantData['sku'] ?? null) ?? ($product->sku_base ?? ''),
+            'status' => 'active',
+            'is_default' => false,
+        ]);
+
+        if (! empty($variantData['pricing']) && $variant) {
+            $pricing = $variant->pricing()->create($this->buildVariantPricingPayload(
+                $product->id,
+                $variant->id,
+                $variantData['pricing']
+            ));
+            $pricing->calculateMargin();
+            $pricing->save();
+        }
+
+        $initialInventory = $variantData['initial_inventory'] ?? [];
+        if (is_array($initialInventory) && ! empty($initialInventory)) {
+            foreach ($initialInventory as $inventoryData) {
+                if (empty($inventoryData['warehouse_id'])) {
+                    continue;
+                }
+
+                $variant->inventory()->create([
+                    'product_id' => $product->id,
+                    'warehouse_id' => (int) $inventoryData['warehouse_id'],
+                    'quantity_available' => (int) ($inventoryData['stock_available'] ?? 0),
+                    'reorder_point' => (int) ($inventoryData['reorder_point'] ?? 0),
+                    'reorder_quantity' => (int) ($inventoryData['reorder_quantity'] ?? 0),
+                ]);
+            }
+        }
     }
 
     private function buildVariantPricingPayload(int $productId, int $variantId, array $pricingData): array

@@ -4,9 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\VehicleImportTemplate;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\ExecuteImportRequest;
+use App\Http\Requests\PreviewImportRequest;
 use App\Imports\VehicleImport;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Maatwebsite\Excel\Facades\Excel;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
@@ -17,12 +18,8 @@ class VehicleImportController extends Controller
         return Excel::download(new VehicleImportTemplate, 'plantilla_vehiculos.xlsx');
     }
 
-    public function preview(Request $request): JsonResponse
+    public function preview(PreviewImportRequest $request): JsonResponse
     {
-        $request->validate([
-            'file' => 'required|file|mimes:xlsx,xls,csv|max:10240',
-        ]);
-
         $import = new VehicleImport;
         $rows = $import->preview($request->file('file'));
 
@@ -35,13 +32,8 @@ class VehicleImportController extends Controller
         ]);
     }
 
-    public function execute(Request $request): JsonResponse
+    public function execute(ExecuteImportRequest $request): JsonResponse
     {
-        $request->validate([
-            'rows' => 'required|array',
-            'rows.*.__row' => 'required|integer',
-        ]);
-
         $import = new VehicleImport;
         $import->execute($request->input('rows', []));
 

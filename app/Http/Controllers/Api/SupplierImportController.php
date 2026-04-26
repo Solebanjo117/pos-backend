@@ -4,9 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\SupplierImportTemplate;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\ExecuteImportRequest;
+use App\Http\Requests\PreviewImportRequest;
 use App\Imports\SupplierImport;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Maatwebsite\Excel\Facades\Excel;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
@@ -17,12 +18,8 @@ class SupplierImportController extends Controller
         return Excel::download(new SupplierImportTemplate, 'plantilla_proveedores.xlsx');
     }
 
-    public function preview(Request $request): JsonResponse
+    public function preview(PreviewImportRequest $request): JsonResponse
     {
-        $request->validate([
-            'file' => 'required|file|mimes:xlsx,xls,csv|max:10240',
-        ]);
-
         $import = new SupplierImport;
         $rows = $import->preview($request->file('file'));
 
@@ -35,13 +32,8 @@ class SupplierImportController extends Controller
         ]);
     }
 
-    public function execute(Request $request): JsonResponse
+    public function execute(ExecuteImportRequest $request): JsonResponse
     {
-        $request->validate([
-            'rows' => 'required|array',
-            'rows.*.__row' => 'required|integer',
-        ]);
-
         $import = new SupplierImport;
         $import->execute($request->input('rows', []));
 

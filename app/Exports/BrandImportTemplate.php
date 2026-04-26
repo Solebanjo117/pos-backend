@@ -12,7 +12,6 @@ class BrandImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
     {
         return [
             'nombre',
-            'prefijo',
             'descripcion',
             'website',
             'estado',
@@ -23,8 +22,8 @@ class BrandImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
     public function array(): array
     {
         return [
-            ['Bosch', 'BOS', 'Fabricante alemán de autopartes', 'https://www.bosch.com', 'active', 'Proveedor General'],
-            ['ACDelco', 'ACD', 'Repuestos GM originales', '', 'active', 'Proveedor General, Distribuidora Nacional'],
+            ['Bosch', 'Fabricante aleman de autopartes', 'https://www.bosch.com', 'activo', 'Proveedor General'],
+            ['ACDelco', 'Repuestos GM originales', '', 'active', 'Proveedor General, Distribuidora Nacional'],
         ];
     }
 }

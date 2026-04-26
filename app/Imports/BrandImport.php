@@ -55,9 +55,9 @@ class BrandImport extends BaseImport
             $errors[] = 'El campo nombre es obligatorio.';
         }
 
-        $status = trim((string) ($row['estado'] ?? ''));
+        $status = $this->normalizeStatus($row['estado'] ?? null, '');
         if ($status !== '' && ! in_array($status, ['active', 'inactive'])) {
-            $errors[] = 'El estado debe ser "active" o "inactive".';
+            $errors[] = 'El estado debe ser "active/activo" o "inactive/inactivo".';
         }
 
         return $errors;
@@ -66,7 +66,7 @@ class BrandImport extends BaseImport
     public function processRow(array $row): mixed
     {
         $name = trim($row['nombre']);
-        $status = $this->nullIfEmpty($row['estado'] ?? null) ?? 'active';
+        $status = $this->normalizeStatus($row['estado'] ?? null);
 
         $existing = Brand::query()
             ->whereRaw('LOWER(name) = ?', [mb_strtolower($name)])

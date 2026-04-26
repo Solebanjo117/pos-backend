@@ -2,6 +2,7 @@
 
 namespace App\Imports;
 
+use App\Models\Brand;
 use App\Models\Supplier;
 
 class SupplierImport extends BaseImport
@@ -12,14 +13,15 @@ class SupplierImport extends BaseImport
             ['key' => 'nombre', 'label' => 'Nombre', 'type' => 'text', 'required' => true],
             ['key' => 'contacto', 'label' => 'Contacto', 'type' => 'text'],
             ['key' => 'email', 'label' => 'Email', 'type' => 'text'],
-            ['key' => 'telefono', 'label' => 'Teléfono', 'type' => 'text'],
-            ['key' => 'direccion', 'label' => 'Dirección', 'type' => 'text'],
+            ['key' => 'telefono', 'label' => 'Telefono', 'type' => 'text'],
+            ['key' => 'direccion', 'label' => 'Direccion', 'type' => 'text'],
             ['key' => 'ciudad', 'label' => 'Ciudad', 'type' => 'text'],
-            ['key' => 'pais', 'label' => 'País', 'type' => 'text'],
+            ['key' => 'pais', 'label' => 'Pais', 'type' => 'text'],
             ['key' => 'condiciones_pago', 'label' => 'Condiciones de Pago', 'type' => 'text'],
-            ['key' => 'dias_entrega', 'label' => 'Días de Entrega', 'type' => 'number'],
+            ['key' => 'dias_entrega', 'label' => 'Dias de Entrega', 'type' => 'number'],
             ['key' => 'notas', 'label' => 'Notas', 'type' => 'text'],
             ['key' => 'estado', 'label' => 'Estado', 'type' => 'text'],
+            ['key' => 'marcas', 'label' => 'Marcas', 'type' => 'text'],
         ];
     }
 
@@ -27,16 +29,17 @@ class SupplierImport extends BaseImport
     {
         return [
             'nombre' => 'Distribuidora Nacional',
-            'contacto' => 'Juan Pérez',
+            'contacto' => 'Juan Perez',
             'email' => 'juan@distri.com',
             'telefono' => '+507 123-4567',
             'direccion' => 'Calle 50, Zona Libre',
-            'ciudad' => 'Colón',
-            'pais' => 'Panamá',
+            'ciudad' => 'Colon',
+            'pais' => 'Panama',
             'condiciones_pago' => 'Net 30',
             'dias_entrega' => 7,
             'notas' => 'Proveedor confiable',
-            'estado' => 'active',
+            'estado' => 'activo',
+            'marcas' => 'Bosch, ACDelco',
         ];
     }
 
@@ -59,6 +62,7 @@ class SupplierImport extends BaseImport
             'dias_entrega', 'lead_time_days' => 'dias_entrega',
             'notas', 'notes' => 'notas',
             'estado', 'status' => 'estado',
+            'marcas', 'brands' => 'marcas',
             default => $header,
         };
     }
@@ -74,12 +78,12 @@ class SupplierImport extends BaseImport
 
         $email = trim((string) ($row['email'] ?? ''));
         if ($email !== '' && ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $errors[] = 'El email no es válido.';
+            $errors[] = 'El email no es valido.';
         }
 
-        $status = trim((string) ($row['estado'] ?? ''));
-        if ($status !== '' && ! in_array($status, ['active', 'inactive'])) {
-            $errors[] = 'El estado debe ser "active" o "inactive".';
+        $status = $this->normalizeStatus($row['estado'] ?? null, '');
+        if ($status !== '' && ! in_array($status, ['active', 'inactive'], true)) {
+            $errors[] = 'El estado debe ser "active/activo" o "inactive/inactivo".';
         }
 
         return $errors;
@@ -88,7 +92,7 @@ class SupplierImport extends BaseImport
     public function processRow(array $row): mixed
     {
         $name = trim($row['nombre']);
-        $status = $this->nullIfEmpty($row['estado'] ?? null) ?? 'active';
+        $status = $this->normalizeStatus($row['estado'] ?? null);
 
         $existing = Supplier::query()
             ->whereRaw('LOWER(name) = ?', [mb_strtolower($name)])
@@ -103,18 +107,27 @@ class SupplierImport extends BaseImport
             'city' => $this->nullIfEmpty($row['ciudad'] ?? null),
             'country' => $this->nullIfEmpty($row['pais'] ?? null),
             'payment_terms' => $this->nullIfEmpty($row['condiciones_pago'] ?? null),
-            'lead_time_days' => $row['dias_entrega'] ?? null,
+            'lead_time_days' => $this->parseInteger($row['dias_entrega'] ?? null),
             'notes' => $this->nullIfEmpty($row['notas'] ?? null),
             'status' => $status,
         ];
 
         if ($existing) {
             $existing->update(array_filter($data, fn ($v) => $v !== null));
-
-            return $existing;
+            $supplier = $existing;
+        } else {
+            $supplier = Supplier::create(array_filter($data, fn ($v) => $v !== null));
         }
 
-        return Supplier::create(array_filter($data, fn ($v) => $v !== null));
+        $brandsRaw = $this->nullIfEmpty($row['marcas'] ?? null);
+        if ($brandsRaw) {
+            foreach ($this->splitDelimitedValues($brandsRaw) as $brandName) {
+                $brandId = $this->resolveIdOrCreateByName(Brand::class, 'name', $brandName, ['status' => 'active']);
+                $supplier->brands()->syncWithoutDetaching([$brandId]);
+            }
+        }
+
+        return $supplier;
     }
 
     protected function getLabelColumn(): string

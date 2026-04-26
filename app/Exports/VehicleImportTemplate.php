@@ -10,15 +10,15 @@ class VehicleImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
 {
     public function headings(): array
     {
-        return ['MAKE', 'MODEL', 'YEAR', 'CODE', 'ENGINE', 'VIN'];
+        return ['MAKE', 'MODEL', 'YEAR', 'GENERATION', 'CODE', 'ENGINE', 'DISPLACEMENT', 'FUEL_TYPE', 'ASPIRATION', 'VIN'];
     }
 
     public function array(): array
     {
         return [
-            ['TOYOTA', 'YARIS',   '2000-2005', 'P10',  '1NZFE',  'MR2BT9F3101124478'],
-            ['TOYOTA', 'COROLLA', '2018-2023', 'E210', '2ZRFE',  ''],
-            ['HONDA',  'CIVIC',   '2016-2021', 'FC5',  'L15B7',  ''],
+            ['TOYOTA', 'YARIS', '2000-2005', 'P10', 'P10', '1NZFE', '1.5L', 'Gasoline', 'Naturally Aspirated', 'MR2BT9F3101124478'],
+            ['TOYOTA', 'COROLLA', '2018-2023', 'E210', 'E210', '2ZRFE', '1.8L', 'Gasoline', '', ''],
+            ['HONDA', 'CIVIC', '2016-2021', 'FC', 'FC5', 'L15B7', '1.5L', 'Gasoline', 'Turbo', ''],
         ];
     }
 }
