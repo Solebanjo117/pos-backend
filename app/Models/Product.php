@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class Product extends Model
 {
@@ -523,6 +524,173 @@ class Product extends Model
     public function scopeDiscontinued($query)
     {
         return $query->where('status', 'discontinued');
+    }
+
+    /**
+     * Scope to get vendible products (active and not archived).
+     */
+    public function scopeVendible($query)
+    {
+        return $query->where('status', 'active');
+    }
+
+    /**
+     * Check if the product is vendible (active and not archived).
+     */
+    public function isVendible(): bool
+    {
+        return $this->status === 'active' && ! $this->trashed();
+    }
+
+    /**
+     * Get inherited images from categories (primary + extra) by reference.
+     * Returns array of ['url', 'source', 'source_category_id', 'category_name'].
+     */
+    public function getInheritedImagesAttribute(): array
+    {
+        $inherited = [];
+        $seenUrls = [];
+        $productImageUrl = $this->resolveImageUrl($this->image_url);
+
+        $categories = collect();
+
+        if ($this->category_id) {
+            if ($this->relationLoaded('category')) {
+                if ($this->category) {
+                    $categories->push($this->category);
+                }
+            } else {
+                $primaryCategory = $this->category()->with('media')->first(['id', 'name', 'image_url']);
+                if ($primaryCategory) {
+                    $categories->push($primaryCategory);
+                }
+            }
+        }
+
+        if ($this->relationLoaded('extraCategories')) {
+            $categories = $categories->concat($this->extraCategories);
+        } else {
+            $categories = $categories->concat($this->extraCategories()->with('media')->get());
+        }
+
+        foreach ($categories as $cat) {
+            $categoryMedia = $cat->relationLoaded('media')
+                ? $cat->media
+                : $cat->media()->where('media_type', 'image')->orderBy('display_order')->get();
+
+            foreach ($categoryMedia as $media) {
+                $categoryImageUrl = $media->url;
+
+                if (empty($categoryImageUrl) || in_array($categoryImageUrl, $seenUrls, true)) {
+                    continue;
+                }
+
+                if ($productImageUrl && $categoryImageUrl === $productImageUrl) {
+                    continue;
+                }
+
+                $seenUrls[] = $categoryImageUrl;
+                $inherited[] = [
+                    'url' => $categoryImageUrl,
+                    'source' => 'category',
+                    'source_category_id' => $cat->id,
+                    'category_name' => $cat->name,
+                    'id' => null,
+                    'category_media_id' => $media->id,
+                    'display_order' => $media->display_order,
+                ];
+            }
+
+            $categoryImageUrl = $cat->image_url;
+
+            if (empty($categoryImageUrl) || in_array($categoryImageUrl, $seenUrls, true)) {
+                continue;
+            }
+
+            if ($productImageUrl && $categoryImageUrl === $productImageUrl) {
+                continue;
+            }
+
+            $seenUrls[] = $categoryImageUrl;
+            $inherited[] = [
+                'url' => $categoryImageUrl,
+                'source' => 'category',
+                'source_category_id' => $cat->id,
+                'category_name' => $cat->name,
+                'id' => null,
+                'display_order' => count($inherited),
+            ];
+        }
+
+        return $inherited;
+    }
+
+    /**
+     * Get all images for the product: own image_url, media, and inherited category images.
+     */
+    public function getAllImagesAttribute(): array
+    {
+        $all = [];
+        $mediaImages = [];
+
+        $productImageUrl = $this->resolveImageUrl($this->image_url);
+        if ($this->relationLoaded('media')) {
+            foreach ($this->media->where('media_type', 'image') as $m) {
+                $mediaImages[] = [
+                    'id' => $m->id,
+                    'url' => $m->url,
+                    'source' => 'media',
+                    'original_filename' => $m->original_filename,
+                    'display_order' => $m->display_order,
+                ];
+            }
+        }
+
+        $mediaImageUrls = collect($mediaImages)->pluck('url')->all();
+        if ($productImageUrl && ! in_array($productImageUrl, $mediaImageUrls, true)) {
+            $all[] = [
+                'id' => null,
+                'url' => $productImageUrl,
+                'source' => 'product',
+                'original_filename' => 'Imagen principal',
+                'display_order' => -1,
+            ];
+        }
+
+        $seenUrls = collect($all)->pluck('url')->all();
+
+        foreach ($mediaImages as $mediaImage) {
+            if (in_array($mediaImage['url'], $seenUrls, true)) {
+                continue;
+            }
+
+            $seenUrls[] = $mediaImage['url'];
+            $all[] = $mediaImage;
+        }
+
+        foreach ($this->inherited_images as $img) {
+            if (in_array($img['url'], $seenUrls, true)) {
+                continue;
+            }
+
+            $seenUrls[] = $img['url'];
+            $all[] = $img;
+        }
+
+        return $all;
+    }
+
+    private function resolveImageUrl(?string $imagePath): ?string
+    {
+        if ($imagePath === null || $imagePath === '') {
+            return null;
+        }
+
+        if (Str::startsWith($imagePath, ['http://', 'https://'])) {
+            return $imagePath;
+        }
+
+        return asset('storage/'.ltrim($imagePath, '/'));
     }
 
     /**

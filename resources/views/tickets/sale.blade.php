@@ -123,7 +123,7 @@
         </tr>
         @if($order->tax_amount > 0)
         <tr>
-            <td>IVA:</td>
+            <td>ITBMS:</td>
             <td class="right">${{ number_format($order->tax_amount, 2) }}</td>
         </tr>
         @endif

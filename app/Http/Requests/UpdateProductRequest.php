@@ -140,6 +140,8 @@ class UpdateProductRequest extends FormRequest
             'attributes.*.name' => 'required_with:attributes|string|max:100',
             'attributes.*.value' => 'required_with:attributes|string|max:255',
             'attributes.*.unit' => 'nullable|string|max:50',
+            'attributes.*.source' => 'nullable|string|in:custom,category',
+            'attributes.*.source_category_id' => 'nullable|integer|exists:categories,id',
             'oem_references' => 'sometimes|array',
             'oem_references.*.oem_code' => 'required_with:oem_references|string|max:50',
             'oem_references.*.manufacturer' => 'nullable|string|max:100',

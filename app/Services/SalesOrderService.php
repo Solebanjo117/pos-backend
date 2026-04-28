@@ -2,11 +2,12 @@
 
 namespace App\Services;
 
+use App\Models\Product;
+use App\Models\ProductInventory;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
-use App\Models\ProductInventory;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\DB;
 
 class SalesOrderService
 {
@@ -46,10 +47,10 @@ class SalesOrderService
             $search = $filters['search'];
             $query->where(function ($q) use ($search) {
                 $q->where('order_number', 'ilike', "%{$search}%")
-                  ->orWhereHas('customer', function ($q) use ($search) {
-                      $q->where('name', 'ilike', "%{$search}%")
-                        ->orWhere('code', 'ilike', "%{$search}%");
-                  });
+                    ->orWhereHas('customer', function ($q) use ($search) {
+                        $q->where('name', 'ilike', "%{$search}%")
+                            ->orWhere('code', 'ilike', "%{$search}%");
+                    });
             });
         }
 
@@ -59,6 +60,7 @@ class SalesOrderService
         $query->orderBy($sortBy, $sortDirection);
 
         $perPage = $filters['per_page'] ?? 15;
+
         return $query->paginate($perPage);
     }
 
@@ -78,27 +80,27 @@ class SalesOrderService
     {
         return DB::transaction(function () use ($data) {
             $userId = $data['user_id'] ?? \Illuminate\Support\Facades\Auth::id();
-            
-            if (!$userId) {
+
+            if (! $userId) {
                 throw new \Exception('No se pudo determinar el usuario. Por favor, inicie sesión nuevamente.');
             }
-            
+
             // Determine warehouse context for the order
             $warehouseId = $data['warehouse_id'] ?? null;
-            if (!$warehouseId && isset($data['items']) && count($data['items']) > 0) {
+            if (! $warehouseId && isset($data['items']) && count($data['items']) > 0) {
                 $warehouseId = $data['items'][0]['warehouse_id'] ?? null;
             }
 
             // Check for active pos session for this user and warehouse
             $sessionQuery = \App\Models\PosSession::where('user_id', $userId)
                 ->where('status', 'open');
-            
+
             if ($warehouseId) {
                 $sessionQuery->where('warehouse_id', $warehouseId);
             }
-            
+
             $activeSession = $sessionQuery->first();
-            
+
             // Determine requested status to apply after adding items
             $requestedStatus = $data['status'] ?? 'draft';
 
@@ -126,9 +128,8 @@ class SalesOrderService
 
             $order->refresh();
 
-            // ── Reserve stock for draft/pending orders ──
+            // ── Reserve stock for draft/pending orders (only what is available) ──
             if (in_array($requestedStatus, ['draft', 'pending'])) {
-                // R28: Validate stock availability before reserving
                 foreach ($order->items as $item) {
                     if ($item->is_custom_line) {
                         continue;
@@ -142,31 +143,28 @@ class SalesOrderService
                     }
                     $inventory = $query->first();
 
-                    // R28: Check stock availability
-                    $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
-                    if (!$allowNegative && (!$inventory || $inventory->quantity_available < $item->quantity)) {
+                    $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
+                    $requested = (int) $item->quantity;
+                    $reserveAmount = min($requested, $available);
+
+                    if ($requested > $available) {
                         $productName = $item->product->name ?? 'producto';
-                        $available = $inventory ? $inventory->quantity_available : 0;
-                        throw new \Exception("Stock insuficiente para {$productName}. Disponible: {$available}, Solicitado: {$item->quantity}");
+                        $order->stockWarnings[] = [
+                            'type' => 'stock_shortage',
+                            'product_id' => $item->product_id,
+                            'variant_id' => $item->variant_id,
+                            'warehouse_id' => $item->warehouse_id,
+                            'product_name' => $productName,
+                            'requested_quantity' => $requested,
+                            'available_quantity' => $available,
+                            'missing_quantity' => $requested - $available,
+                            'message' => "{$productName}: solicitado {$requested}, disponible {$available}, faltante ".($requested - $available),
+                        ];
                     }
-                }
 
-                // If validation passed, reserve stock
-                foreach ($order->items as $item) {
-                    if ($item->is_custom_line) {
-                        continue;
-                    }
-
-                    $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                    if ($item->variant_id) {
-                        $query->where('variant_id', $item->variant_id);
-                    } else {
-                        $query->where('product_id', $item->product_id)->whereNull('variant_id');
-                    }
-                    $inventory = $query->first();
-                    if ($inventory) {
-                        $inventory->quantity_available -= $item->quantity;
-                        $inventory->quantity_reserved  += $item->quantity;
+                    if ($inventory && $reserveAmount > 0) {
+                        $inventory->quantity_available -= $reserveAmount;
+                        $inventory->quantity_reserved += $reserveAmount;
                         $inventory->save();
                     }
                 }
@@ -175,9 +173,9 @@ class SalesOrderService
             // Handle payments from POS (multiple or single)
             if (isset($data['payments']) && is_array($data['payments'])) {
                 foreach ($data['payments'] as $payment) {
-                    if (isset($payment['amount']) && (float)$payment['amount'] > 0) {
+                    if (isset($payment['amount']) && (float) $payment['amount'] > 0) {
                         $order->addPayment(
-                            amount: (float)$payment['amount'],
+                            amount: (float) $payment['amount'],
                             method: $payment['method'] ?? 'cash',
                             notes: $payment['notes'] ?? 'Pago POS',
                             isCheckout: true
@@ -186,9 +184,9 @@ class SalesOrderService
                 }
             } elseif (isset($data['initial_payment']) && isset($data['payment_method'])) {
                 // Legacy support for single payment
-                if ((float)$data['initial_payment'] > 0) {
+                if ((float) $data['initial_payment'] > 0) {
                     $order->addPayment(
-                        amount: (float)$data['initial_payment'],
+                        amount: (float) $data['initial_payment'],
                         method: $data['payment_method'],
                         notes: 'Pago inicial POS',
                         isCheckout: true
@@ -208,13 +206,13 @@ class SalesOrderService
 
             // Auto-confirm if status is not draft
             if (in_array($requestedStatus, ['confirmed', 'processing', 'completed'])) {
-                $order->confirm(); 
+                $order->confirm();
             } else {
                 $order->update(['status' => $requestedStatus]);
             }
 
             // ── Convert Sales Quote if applicable ──
-            if (!empty($data['source_quote_id'])) {
+            if (! empty($data['source_quote_id'])) {
                 $quote = \App\Models\SalesQuote::find($data['source_quote_id']);
                 if ($quote) {
                     $quote->markCollected();
@@ -235,8 +233,8 @@ class SalesOrderService
     {
         $order = $this->getById($id);
 
-        if (!$order->canBeEdited()) {
-            throw new \Exception('No se puede editar una orden en estado ' . $order->status);
+        if (! $order->canBeEdited()) {
+            throw new \Exception('No se puede editar una orden en estado '.$order->status);
         }
 
         return DB::transaction(function () use ($order, $data) {
@@ -253,7 +251,7 @@ class SalesOrderService
             if (isset($data['items'])) {
                 // Remove all existing items
                 $order->items()->delete();
-                
+
                 // Add new items
                 foreach ($data['items'] as $itemData) {
                     $this->addItem($order->id, $itemData);
@@ -261,6 +259,7 @@ class SalesOrderService
             }
 
             $order->refresh();
+
             return $order;
         });
     }
@@ -272,7 +271,7 @@ class SalesOrderService
     {
         $order = $this->getById($id);
 
-        if (!in_array($order->status, ['draft', 'cancelled'])) {
+        if (! in_array($order->status, ['draft', 'cancelled'])) {
             throw new \Exception('Solo se pueden eliminar órdenes en estado borrador o canceladas');
         }
 
@@ -289,115 +288,121 @@ class SalesOrderService
 
             $isConfirmed = in_array($order->status, ['confirmed', 'processing', 'completed']);
 
-            if (!$order->canBeEdited() && !$isConfirmed) {
-                throw new \Exception('No se pueden agregar items a una orden en estado ' . $order->status);
+            if (! $order->canBeEdited() && ! $isConfirmed) {
+                throw new \Exception('No se pueden agregar items a una orden en estado '.$order->status);
             }
 
-        $isCustomLine = (bool) ($itemData['is_custom_line'] ?? false);
-        $customDescription = $isCustomLine ? trim((string) ($itemData['custom_description'] ?? '')) : null;
+            $isCustomLine = (bool) ($itemData['is_custom_line'] ?? false);
+            $customDescription = $isCustomLine ? trim((string) ($itemData['custom_description'] ?? '')) : null;
 
-        if ($isCustomLine && $customDescription === '') {
-            throw new \Exception('La descripcion es obligatoria para articulos miscelaneos.');
-        }
+            if ($isCustomLine && $customDescription === '') {
+                throw new \Exception('La descripcion es obligatoria para articulos miscelaneos.');
+            }
 
-        // Resolve unit cost from preferred supplier when this is a catalog line
-        $unitCost = 0;
-        $variantId = $isCustomLine ? null : ($itemData['variant_id'] ?? null);
-        if (!$isCustomLine && $variantId) {
-            $supplierPivot = \Illuminate\Support\Facades\DB::table('product_suppliers')
-                ->where('variant_id', $variantId)
-                ->orderByDesc('is_preferred')
-                ->first();
-            $unitCost = $supplierPivot->supplier_cost ?? 0;
-        }
-
-        $item = SalesOrderItem::create([
-            'sales_order_id' => $orderId,
-            'product_id' => $isCustomLine ? null : ($itemData['product_id'] ?? null),
-            'variant_id' => $variantId,
-            'warehouse_id' => $itemData['warehouse_id'],
-            'seller_id' => $itemData['seller_id'] ?? null,
-            'quantity' => $itemData['quantity'],
-            'unit_price' => $itemData['unit_price'],
-            'unit_cost' => $unitCost,
-            'discount_percent' => $itemData['discount_percent'] ?? 0,
-            'discount_amount' => $itemData['discount_amount'] ?? 0,
-            'tax_percent' => $itemData['tax_percent'] ?? 0,
-            'is_custom_line' => $isCustomLine,
-            'custom_description' => $customDescription,
-        ]);
-
-        if ($isConfirmed) {
-            if (!$isCustomLine) {
-                $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
-                $query = \App\Models\ProductInventory::where('warehouse_id', $item->warehouse_id);
-                if ($item->variant_id) {
-                    $query->where('variant_id', $item->variant_id);
-                } else {
-                    $query->where('product_id', $item->product_id);
-                }
-                $inventory = $query->first();
-
-                if (!$allowNegative && (!$inventory || $inventory->quantity_available < $item->quantity)) {
-                    throw new \Exception("Stock insuficiente para agregar " . ($item->product->name ?? 'producto') . " a esta orden.");
-                }
-
-                // Create inventory movement
-                \App\Models\InventoryMovement::create([
-                    'product_id' => $item->product_id,
-                    'variant_id' => $item->variant_id,
-                    'warehouse_id' => $item->warehouse_id,
-                    'movement_type' => 'out',
-                    'quantity' => $item->quantity,
-                    'reference_type' => 'sale',
-                    'reference_id' => $order->id,
-                    'notes' => "Agregado post-venta a Orden {$order->order_number}",
-                    'user_id' => \Illuminate\Support\Facades\Auth::id(),
-                    'date' => now(),
-                ]);
-
-                if ($inventory) {
-                    $inventory->quantity_available -= $item->quantity;
-                    $inventory->save();
+            // Validate product is vendible (active status, not archived)
+            if (! $isCustomLine && ! empty($itemData['product_id'])) {
+                $product = Product::find($itemData['product_id']);
+                if ($product && ! $product->isVendible()) {
+                    throw new \Exception("El producto \"{$product->name}\" no está disponible para la venta (Estado: {$product->status}).");
                 }
             }
 
-            // Re-evaluate payment status immediately
-            $order->refresh();
-            $paid = $order->amount_paid;
-            if ($paid < $order->total && $paid > 0) {
-                $order->payment_status = 'partial';
-            } elseif ($paid <= 0) {
-                $order->payment_status = 'pending';
+            // Resolve unit cost from preferred supplier when this is a catalog line
+            $unitCost = 0;
+            $variantId = $isCustomLine ? null : ($itemData['variant_id'] ?? null);
+            if (! $isCustomLine && $variantId) {
+                $supplierPivot = \Illuminate\Support\Facades\DB::table('product_suppliers')
+                    ->where('variant_id', $variantId)
+                    ->orderByDesc('is_preferred')
+                    ->first();
+                $unitCost = $supplierPivot->supplier_cost ?? 0;
             }
-            $order->save();
 
-            // Adding lines to a confirmed order increases customer's debt.
-            $diffAmount = $item->total;
-            if ($order->customer_id) {
-                $customer = \App\Models\Customer::find($order->customer_id);
-                if ($customer) {
-                    $balanceBefore = (float) $customer->current_balance;
-                    $customer->current_balance = $balanceBefore + $diffAmount;
-                    $customer->save();
+            $item = SalesOrderItem::create([
+                'sales_order_id' => $orderId,
+                'product_id' => $isCustomLine ? null : ($itemData['product_id'] ?? null),
+                'variant_id' => $variantId,
+                'warehouse_id' => $itemData['warehouse_id'],
+                'seller_id' => $itemData['seller_id'] ?? null,
+                'quantity' => $itemData['quantity'],
+                'unit_price' => $itemData['unit_price'],
+                'unit_cost' => $unitCost,
+                'discount_percent' => $itemData['discount_percent'] ?? 0,
+                'discount_amount' => $itemData['discount_amount'] ?? 0,
+                'tax_percent' => $itemData['tax_percent'] ?? 0,
+                'is_custom_line' => $isCustomLine,
+                'custom_description' => $customDescription,
+            ]);
 
-                    \App\Models\CustomerTransaction::create([
-                        'customer_id'      => $customer->id,
-                        'type'             => 'sale',
-                        'reference_type'   => 'sales_order',
-                        'reference_id'     => $order->id,
-                        'amount'           => $diffAmount,
-                        'balance_before'   => $balanceBefore,
-                        'balance_after'    => $customer->current_balance,
-                        'description'      => "Cargo por producto agregado a venta {$order->order_number}",
-                        'transaction_date' => now(),
-                        'created_by'       => \Illuminate\Support\Facades\Auth::id(),
-                    ]);
+            if ($isConfirmed) {
+                if (! $isCustomLine) {
+                    $query = \App\Models\ProductInventory::where('warehouse_id', $item->warehouse_id);
+                    if ($item->variant_id) {
+                        $query->where('variant_id', $item->variant_id);
+                    } else {
+                        $query->where('product_id', $item->product_id);
+                    }
+                    $inventory = $query->first();
+
+                    $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
+                    $requested = (int) $item->quantity;
+                    $quantityToDeduct = min($requested, $available);
+
+                    if ($quantityToDeduct > 0) {
+                        \App\Models\InventoryMovement::create([
+                            'product_id' => $item->product_id,
+                            'variant_id' => $item->variant_id,
+                            'warehouse_id' => $item->warehouse_id,
+                            'movement_type' => 'out',
+                            'quantity' => $quantityToDeduct,
+                            'reference_type' => 'sale',
+                            'reference_id' => $order->id,
+                            'notes' => "Agregado post-venta a Orden {$order->order_number}",
+                            'user_id' => \Illuminate\Support\Facades\Auth::id(),
+                            'date' => now(),
+                        ]);
+
+                        $inventory->quantity_available = max(0, $inventory->quantity_available - $quantityToDeduct);
+                        $inventory->save();
+                    }
+                }
+
+                // Re-evaluate payment status immediately
+                $order->refresh();
+                $paid = $order->amount_paid;
+                if ($paid < $order->total && $paid > 0) {
+                    $order->payment_status = 'partial';
+                } elseif ($paid <= 0) {
+                    $order->payment_status = 'pending';
+                }
+                $order->save();
+
+                // Adding lines to a confirmed order increases customer's debt.
+                $diffAmount = $item->total;
+                if ($order->customer_id) {
+                    $customer = \App\Models\Customer::find($order->customer_id);
+                    if ($customer) {
+                        $balanceBefore = (float) $customer->current_balance;
+                        $customer->current_balance = $balanceBefore + $diffAmount;
+                        $customer->save();
+
+                        \App\Models\CustomerTransaction::create([
+                            'customer_id' => $customer->id,
+                            'type' => 'sale',
+                            'reference_type' => 'sales_order',
+                            'reference_id' => $order->id,
+                            'amount' => $diffAmount,
+                            'balance_before' => $balanceBefore,
+                            'balance_after' => $customer->current_balance,
+                            'description' => "Cargo por producto agregado a venta {$order->order_number}",
+                            'transaction_date' => now(),
+                            'created_by' => \Illuminate\Support\Facades\Auth::id(),
+                        ]);
+                    }
                 }
             }
-        }
 
-        return $item;
+            return $item;
         });
     }
 
@@ -409,8 +414,8 @@ class SalesOrderService
         $item = SalesOrderItem::findOrFail($itemId);
         $order = $item->salesOrder;
 
-        if (!$order->canBeEdited()) {
-            throw new \Exception('No se pueden editar items de una orden en estado ' . $order->status);
+        if (! $order->canBeEdited()) {
+            throw new \Exception('No se pueden editar items de una orden en estado '.$order->status);
         }
 
         $item->update([
@@ -433,8 +438,8 @@ class SalesOrderService
         $item = SalesOrderItem::findOrFail($itemId);
         $order = $item->salesOrder;
 
-        if (!$order->canBeEdited()) {
-            throw new \Exception('No se pueden quitar items de una orden en estado ' . $order->status);
+        if (! $order->canBeEdited()) {
+            throw new \Exception('No se pueden quitar items de una orden en estado '.$order->status);
         }
 
         return $item->delete();
@@ -447,13 +452,14 @@ class SalesOrderService
     {
         $order = $this->getById($id);
 
-        // Check stock availability first
-        $this->checkStockAvailability($id);
-
-        // Confirm (this will create inventory movements)
         $order->confirm();
 
-        return $order->fresh();
+        $warnings = $order->stockWarnings;
+
+        $fresh = $order->fresh();
+        $fresh->stockWarnings = $warnings;
+
+        return $fresh;
     }
 
     /**
@@ -464,7 +470,10 @@ class SalesOrderService
         $order = $this->getById($id);
         $order->complete();
 
-        return $order->fresh();
+        $fresh = $order->fresh();
+        $fresh->stockWarnings = [];
+
+        return $fresh;
     }
 
     /**
@@ -475,7 +484,10 @@ class SalesOrderService
         $order = $this->getById($id);
         $order->cancel();
 
-        return $order->fresh();
+        $fresh = $order->fresh();
+        $fresh->stockWarnings = [];
+
+        return $fresh;
     }
 
     /**
@@ -484,7 +496,7 @@ class SalesOrderService
     public function checkStockAvailability(int $id): array
     {
         $order = $this->getById($id);
-        $issues = [];
+        $warnings = [];
 
         foreach ($order->items as $item) {
             if ($item->is_custom_line) {
@@ -493,7 +505,6 @@ class SalesOrderService
 
             $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
 
-            // Filter by variant_id if present, otherwise by product_id
             if ($item->variant_id) {
                 $query->where('variant_id', $item->variant_id);
             } else {
@@ -501,24 +512,24 @@ class SalesOrderService
             }
 
             $inventory = $query->first();
-            $available = $inventory ? $inventory->quantity_available : 0;
+            $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
 
             if ($available < $item->quantity) {
-                $issues[] = [
-                    'product' => $item->product->name ?? $item->custom_description,
-                    'warehouse' => $item->warehouse->name,
-                    'required' => $item->quantity,
-                    'available' => $available,
-                    'missing' => $item->quantity - $available,
+                $warnings[] = [
+                    'type' => 'stock_shortage',
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'warehouse_id' => $item->warehouse_id,
+                    'product_name' => $item->product->name ?? $item->custom_description,
+                    'requested_quantity' => $item->quantity,
+                    'available_quantity' => $available,
+                    'missing_quantity' => $item->quantity - $available,
+                    'message' => ($item->product->name ?? $item->custom_description).": solicitado {$item->quantity}, disponible {$available}",
                 ];
             }
         }
 
-        if (!empty($issues)) {
-            throw new \Exception('Stock insuficiente: ' . json_encode($issues));
-        }
-
-        return [];
+        return $warnings;
     }
 
     /**

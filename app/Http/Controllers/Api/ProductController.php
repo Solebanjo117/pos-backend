@@ -645,19 +645,23 @@ class ProductController extends Controller
     /**
      * Get all images for a product.
      */
-    public function getImages(int $id): JsonResponse
+    public function getImages(Product $product): JsonResponse
     {
-        $product = Product::findOrFail($id);
+        $product->loadMissing(['media', 'category.media', 'extraCategories.media']);
 
-        $images = $product->media()
-            ->where('media_type', 'image')
-            ->orderBy('display_order')
-            ->get()
-            ->map(fn ($media) => [
-                'id' => $media->id,
-                'url' => $media->url,
-                'original_filename' => $media->original_filename,
-                'display_order' => $media->display_order,
+        $images = collect($product->all_images)
+            ->values()
+            ->map(fn (array $image, int $index) => [
+                'id' => $image['id'] ?? null,
+                'url' => $image['url'],
+                'original_filename' => $image['original_filename']
+                    ?? $image['category_name']
+                    ?? 'Imagen',
+                'display_order' => $image['display_order'] ?? $index,
+                'source' => $image['source'] ?? 'media',
+                'source_category_id' => $image['source_category_id'] ?? null,
+                'category_name' => $image['category_name'] ?? null,
+                'category_media_id' => $image['category_media_id'] ?? null,
             ]);
 
         return response()->json(['data' => $images]);

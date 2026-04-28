@@ -4,15 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\PosCheckoutRequest;
+use App\Models\Inventory;
 use App\Models\PaymentMethod;
 use App\Services\SalesOrderService;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
-use App\Models\ProductVariant;
-use App\Models\Inventory;
 
 class SalesOrderController extends Controller
 {
@@ -93,125 +92,123 @@ class SalesOrderController extends Controller
 
             // Get all active payment method codes dynamically
             $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
-            
+
             $validated = $request->validate([
-                'user_id'           => 'nullable|integer|min:1',
-                'customer_id'       => 'nullable|exists:customers,id',
-                'date'              => 'nullable|date',
-                'status'            => 'nullable|in:draft,pending,confirmed',
-                'source_quote_id'   => 'nullable|exists:sales_quotes,id',
-                'discount_amount'   => 'nullable|numeric|min:0',
-                'shipping_cost'     => 'nullable|numeric|min:0',
-                'payment_method'    => 'nullable|in:cash,card,transfer,credit,multiple',
-                'payment_status'    => 'nullable|in:pending,partial,paid,refunded',
-                'initial_payment'   => 'nullable|numeric|min:0',
-                'notes'             => 'nullable|string|max:5000',
-                'internal_notes'    => 'nullable|string|max:5000',
-                'audit_logs'        => 'nullable|array',
-                'payments'          => 'nullable|array',
+                'user_id' => 'nullable|integer|min:1',
+                'customer_id' => 'nullable|exists:customers,id',
+                'date' => 'nullable|date',
+                'status' => 'nullable|in:draft,pending,confirmed',
+                'source_quote_id' => 'nullable|exists:sales_quotes,id',
+                'discount_amount' => 'nullable|numeric|min:0',
+                'shipping_cost' => 'nullable|numeric|min:0',
+                'payment_method' => 'nullable|in:cash,card,transfer,credit,multiple',
+                'payment_status' => 'nullable|in:pending,partial,paid,refunded',
+                'initial_payment' => 'nullable|numeric|min:0',
+                'notes' => 'nullable|string|max:5000',
+                'internal_notes' => 'nullable|string|max:5000',
+                'audit_logs' => 'nullable|array',
+                'payments' => 'nullable|array',
                 'payments.*.amount' => 'required_with:payments|numeric|min:0.01',
                 'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
-                'payments.*.notes'  => 'nullable|string',
-                'items'             => 'nullable|array',
-                'items.*.product_id'       => 'nullable|exists:products,id',
-                'items.*.variant_id'       => 'nullable|exists:product_variants,id',
-                'items.*.warehouse_id'     => 'required|exists:warehouses,id',
-                'items.*.quantity'         => 'required|integer|min:1',
-                'items.*.unit_price'       => 'required|numeric|min:0',
+                'payments.*.notes' => 'nullable|string',
+                'items' => 'nullable|array',
+                'items.*.product_id' => 'nullable|exists:products,id',
+                'items.*.variant_id' => 'nullable|exists:product_variants,id',
+                'items.*.warehouse_id' => 'required|exists:warehouses,id',
+                'items.*.quantity' => 'required|integer|min:1',
+                'items.*.unit_price' => 'required|numeric|min:0',
                 'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
-                'items.*.discount_amount'  => 'nullable|numeric|min:0',
-                'items.*.tax_percent'      => 'nullable|integer|min:0|max:100',
-                'items.*.seller_id'        => 'nullable|exists:users,id',
-                'items.*.is_custom_line'   => 'nullable|boolean',
+                'items.*.discount_amount' => 'nullable|numeric|min:0',
+                'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
+                'items.*.seller_id' => 'nullable|exists:users,id',
+                'items.*.is_custom_line' => 'nullable|boolean',
                 'items.*.custom_description' => 'nullable|string|max:255',
             ]);
 
-            if (!empty($validated['items'])) {
+            if (! empty($validated['items'])) {
                 $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
             }
 
             // Map specific payment types to generic database types
             $paymentTypeMap = [
-                'visa'            => 'card',
-                'mastercard'      => 'card',
-                'amex'            => 'card',
-                'clave'           => 'card',
-                'yappy'           => 'transfer',
-                'transferencia'   => 'transfer',
-                'notaCredito'     => 'credit',
-                'creditoCliente'  => 'credit',
+                'visa' => 'card',
+                'mastercard' => 'card',
+                'amex' => 'card',
+                'clave' => 'card',
+                'yappy' => 'transfer',
+                'transferencia' => 'transfer',
+                'notaCredito' => 'credit',
+                'creditoCliente' => 'credit',
             ];
 
-            if (!empty($validated['payments'])) {
+            if (! empty($validated['payments'])) {
                 foreach ($validated['payments'] as &$payment) {
                     $originalMethod = $payment['method'];
                     if (isset($paymentTypeMap[$originalMethod])) {
                         $payment['method'] = $paymentTypeMap[$originalMethod];
                         // Preserve the specific type in notes for reports
-                        $payment['notes'] = ($payment['notes'] ?? 'Pago POS') . " [{$originalMethod}]";
+                        $payment['notes'] = ($payment['notes'] ?? 'Pago POS')." [{$originalMethod}]";
                     }
                 }
                 unset($payment); // break reference
             }
 
-            // ── Defensive stock check before creating the order ──
+            // ── Defensive stock check — collect warnings only, do NOT block ──
+            $stockWarnings = [];
             if (! empty($validated['items'])) {
-                $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
+                foreach ($validated['items'] as $item) {
+                    if (! empty($item['is_custom_line'])) {
+                        continue;
+                    }
 
-                if (! $allowNegative) {
-                    $stockErrors = [];
-                    foreach ($validated['items'] as $item) {
-                        if (!empty($item['is_custom_line'])) {
-                            continue;
-                        }
+                    $query = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id']);
 
-                        // Look up stock in product_inventory using the correct columns
-                        $query = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id']);
+                    if (! empty($item['variant_id'])) {
+                        $query->where('variant_id', $item['variant_id']);
+                    } else {
+                        $query->where('product_id', $item['product_id'])
+                            ->whereNull('variant_id');
+                    }
 
+                    $available = (int) ($query->value('quantity_available') ?? 0);
+
+                    if ($item['quantity'] > $available) {
                         if (! empty($item['variant_id'])) {
-                            $query->where('variant_id', $item['variant_id']);
+                            $variant = \App\Models\ProductVariant::find($item['variant_id']);
+                            $label = $variant?->sku ?? "Variante #{$item['variant_id']}";
                         } else {
-                            $query->where('product_id', $item['product_id'])
-                                  ->whereNull('variant_id');
+                            $product = \App\Models\Product::find($item['product_id']);
+                            $label = $product?->name ?? "Producto #{$item['product_id']}";
                         }
-
-                        $available = (int) ($query->value('quantity_available') ?? 0);
-
-                        if ($item['quantity'] > $available) {
-                            if (! empty($item['variant_id'])) {
-                                $variant = \App\Models\ProductVariant::find($item['variant_id']);
-                                $label = $variant?->sku ?? "Variante #{$item['variant_id']}";
-                            } else {
-                                $product = \App\Models\Product::find($item['product_id']);
-                                $label = $product?->name ?? "Producto #{$item['product_id']}";
-                            }
-                            $stockErrors[] = "{$label}: solicitado {$item['quantity']}, disponible {$available}";
-                        }
+                        $stockWarnings[] = [
+                            'type' => 'stock_shortage',
+                            'product_id' => $item['product_id'] ?? null,
+                            'variant_id' => $item['variant_id'] ?? null,
+                            'warehouse_id' => $item['warehouse_id'],
+                            'product_name' => $label,
+                            'requested_quantity' => $item['quantity'],
+                            'available_quantity' => $available,
+                            'missing_quantity' => $item['quantity'] - $available,
+                            'message' => "{$label}: solicitado {$item['quantity']}, disponible {$available}, faltante ".($item['quantity'] - $available),
+                        ];
                     }
-
-                    if (! empty($stockErrors)) {
-                        return response()->json([
-                            'message' => 'Stock insuficiente para uno o más productos.',
-                            'errors'  => $stockErrors,
-                        ], 422);
-                    }
-                } // end if (! $allowNegative)
-            } // end if (! empty($validated['items']))
+                }
+            } // end stock warning collection
 
             // ── Enforce price override permission (R05) ──
             // Only admin and manager roles can override unit_price
             $userRole = $request->user()->role ?? '';
             $canOverridePrice = in_array($userRole, ['admin', 'manager']);
 
-            if (!$canOverridePrice && !empty($validated['items'])) {
+            if (! $canOverridePrice && ! empty($validated['items'])) {
                 foreach ($validated['items'] as &$item) {
-                    if (!empty($item['is_custom_line'])) {
+                    if (! empty($item['is_custom_line'])) {
                         continue;
                     }
 
                     // Get system price for this product/variant
                     $pricingQuery = \App\Models\ProductPricing::query();
-                    if (!empty($item['variant_id'])) {
+                    if (! empty($item['variant_id'])) {
                         $pricingQuery->where('variant_id', $item['variant_id']);
                     } else {
                         $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
@@ -231,7 +228,7 @@ class SalesOrderController extends Controller
                 foreach ($validated['payments'] as $p) {
                     if (($p['method'] ?? '') === 'credit') {
                         $hasCredit = true;
-                        $creditAmount += (float)$p['amount'];
+                        $creditAmount += (float) $p['amount'];
                     }
                 }
             } elseif (($validated['payment_method'] ?? null) === 'credit') {
@@ -265,7 +262,7 @@ class SalesOrderController extends Controller
 
                     if ($requiredCredit > $creditAvailable) {
                         return response()->json([
-                            'message' => "El crédito requerido (\$" . number_format($requiredCredit, 2) . ") excede el crédito disponible del cliente (\$" . number_format($creditAvailable, 2) . "). Límite: \$" . number_format($customer->credit_limit, 2) . ", Saldo actual: \$" . number_format($customer->current_balance, 2) . ".",
+                            'message' => 'El crédito requerido ($'.number_format($requiredCredit, 2).') excede el crédito disponible del cliente ($'.number_format($creditAvailable, 2).'). Límite: $'.number_format($customer->credit_limit, 2).', Saldo actual: $'.number_format($customer->current_balance, 2).'.',
                         ], 422);
                     }
                 }
@@ -276,24 +273,32 @@ class SalesOrderController extends Controller
                 return $this->salesOrderService->create($validated);
             });
 
-            return response()->json([
+            $response = [
+                'success' => true,
                 'message' => 'Orden creada exitosamente',
-                'data'    => $order,
-            ], 201);
+                'data' => $order,
+            ];
+
+            $allWarnings = array_merge($stockWarnings, $order->stockWarnings);
+            if (! empty($allWarnings)) {
+                $response['warnings'] = $allWarnings;
+            }
+
+            return response()->json($response, 201);
         } catch (\Illuminate\Validation\ValidationException $e) {
             return response()->json([
                 'message' => 'Error de validación',
-                'errors'  => $e->errors(),
+                'errors' => $e->errors(),
             ], 422);
         } catch (\Illuminate\Database\QueryException $e) {
             return response()->json([
                 'message' => 'Error de base de datos',
-                'error'   => $e->getMessage(),
+                'error' => $e->getMessage(),
             ], 422);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error al crear orden',
-                'error'   => $e->getMessage(),
+                'error' => $e->getMessage(),
             ], 500);
         }
     }
@@ -324,12 +329,12 @@ class SalesOrderController extends Controller
                 'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
                 'items.*.discount_amount' => 'nullable|numeric|min:0',
                 'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
-                'items.*.seller_id'  => 'nullable|exists:users,id',
+                'items.*.seller_id' => 'nullable|exists:users,id',
                 'items.*.is_custom_line' => 'nullable|boolean',
                 'items.*.custom_description' => 'nullable|string|max:255',
             ]);
 
-            if (!empty($validated['items'])) {
+            if (! empty($validated['items'])) {
                 $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
             }
 
@@ -337,14 +342,14 @@ class SalesOrderController extends Controller
             $userRole = $request->user()->role ?? '';
             $canOverridePrice = in_array($userRole, ['admin', 'manager']);
 
-            if (!$canOverridePrice && !empty($validated['items'])) {
+            if (! $canOverridePrice && ! empty($validated['items'])) {
                 foreach ($validated['items'] as &$item) {
-                    if (!empty($item['is_custom_line'])) {
+                    if (! empty($item['is_custom_line'])) {
                         continue;
                     }
 
                     $pricingQuery = \App\Models\ProductPricing::query();
-                    if (!empty($item['variant_id'])) {
+                    if (! empty($item['variant_id'])) {
                         $pricingQuery->where('variant_id', $item['variant_id']);
                     } else {
                         $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
@@ -400,10 +405,17 @@ class SalesOrderController extends Controller
         try {
             $order = $this->salesOrderService->confirmOrder($id);
 
-            return response()->json([
+            $response = [
+                'success' => true,
                 'message' => 'Orden confirmada exitosamente',
                 'data' => $order,
-            ]);
+            ];
+
+            if (! empty($order->stockWarnings)) {
+                $response['warnings'] = $order->stockWarnings;
+            }
+
+            return response()->json($response);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error al confirmar orden',
@@ -594,9 +606,9 @@ class SalesOrderController extends Controller
 
             $order = \App\Models\SalesOrder::findOrFail($id);
 
-            DB::transaction(function() use ($validated, $order) {
+            DB::transaction(function () use ($validated, $order) {
                 foreach ($validated['items'] as $item) {
-                    if (!empty($item['is_custom_line'])) {
+                    if (! empty($item['is_custom_line'])) {
                         $subtotal = $item['qty'] * $item['price'];
                         $discount = $subtotal * (($item['discount_percent'] ?? 0) / 100);
                         $tax = ($subtotal - $discount) * (($item['tax_percent'] ?? 0) / 100);
@@ -623,31 +635,33 @@ class SalesOrderController extends Controller
                     }
 
                     $query = $order->items()->where('product_id', $item['product_id']);
-                    if (!empty($item['variant_id'])) {
+                    if (! empty($item['variant_id'])) {
                         $query->where('variant_id', $item['variant_id']);
                     } else {
                         $query->whereNull('variant_id');
                     }
-                    
+
                     $existing = $query->first();
 
                     $diffQty = $item['qty'];
-                    
+
                     if ($existing) {
                         $diffQty = $item['qty'] - $existing->quantity;
                         if ($diffQty > 0) {
                             $existing->update(['quantity' => $item['qty']]);
-                            // Deduct diff from inventory
                             $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
                                 ->where('product_id', $item['product_id'])
-                                ->when(!empty($item['variant_id']), function($q) use ($item) {
+                                ->when(! empty($item['variant_id']), function ($q) use ($item) {
                                     $q->where('variant_id', $item['variant_id']);
-                                }, function($q) {
+                                }, function ($q) {
                                     $q->whereNull('variant_id');
                                 })->first();
-                                
+
                             if ($inventory) {
-                                $inventory->decrement('quantity_available', $diffQty);
+                                $deduct = min($diffQty, max(0, $inventory->quantity_available));
+                                if ($deduct > 0) {
+                                    $inventory->decrement('quantity_available', $deduct);
+                                }
                             }
                         }
                     } else {
@@ -655,14 +669,14 @@ class SalesOrderController extends Controller
                         $subtotal = $item['qty'] * $item['price'];
                         $discount = $subtotal * (($item['discount_percent'] ?? 0) / 100);
                         $tax = ($subtotal - $discount) * (($item['tax_percent'] ?? 0) / 100);
-                        
+
                         $pricing = \App\Models\ProductPricing::where('product_id', $item['product_id'])
-                            ->when(!empty($item['variant_id']), function($q) use ($item) {
+                            ->when(! empty($item['variant_id']), function ($q) use ($item) {
                                 $q->where('variant_id', $item['variant_id']);
-                            }, function($q) {
+                            }, function ($q) {
                                 $q->whereNull('variant_id');
                             })->first();
-                            
+
                         $order->items()->create([
                             'product_id' => $item['product_id'],
                             'variant_id' => $item['variant_id'],
@@ -679,17 +693,20 @@ class SalesOrderController extends Controller
                             'total' => $subtotal - $discount + $tax,
                         ]);
 
-                        // Deduct all from inventory
+                        // Deduct available inventory only (never below 0)
                         $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
                             ->where('product_id', $item['product_id'])
-                            ->when(!empty($item['variant_id']), function($q) use ($item) {
+                            ->when(! empty($item['variant_id']), function ($q) use ($item) {
                                 $q->where('variant_id', $item['variant_id']);
-                            }, function($q) {
+                            }, function ($q) {
                                 $q->whereNull('variant_id');
                             })->first();
-                            
+
                         if ($inventory) {
-                            $inventory->decrement('quantity_available', $item['qty']);
+                            $deduct = min($item['qty'], max(0, $inventory->quantity_available));
+                            if ($deduct > 0) {
+                                $inventory->decrement('quantity_available', $deduct);
+                            }
                         }
                     }
                 }
@@ -704,22 +721,22 @@ class SalesOrderController extends Controller
                     $itemSubtotal = $dbItem->quantity * $dbItem->unit_price;
                     $itemDiscount = $itemSubtotal * ($dbItem->discount_percent / 100);
                     $itemTax = ($itemSubtotal - $itemDiscount) * ($dbItem->tax_percent / 100);
-                    
+
                     $orderSubtotal += $itemSubtotal;
                     $orderDiscount += $itemDiscount;
                     $orderTax += $itemTax;
                     $orderTotal += ($itemSubtotal - $itemDiscount + $itemTax);
-                    
+
                     $dbItem->update([
                         'subtotal' => $itemSubtotal,
                         'discount_amount' => $itemDiscount,
                         'tax_amount' => $itemTax,
-                        'total' => $itemSubtotal - $itemDiscount + $itemTax
+                        'total' => $itemSubtotal - $itemDiscount + $itemTax,
                     ]);
                 }
 
                 $finalTotal = $orderTotal + $order->shipping_cost - $order->discount_amount;
-                
+
                 /** @var \App\Models\User|null $user */
                 $user = auth()->user();
 
@@ -728,18 +745,18 @@ class SalesOrderController extends Controller
                     'action' => 'order_modified',
                     'metadata' => [
                         'items_count' => count($validated['items'] ?? []),
-                        'total_diff'  => $finalTotal - $order->total,
-                        'user_id'     => $user?->id,
-                        'user_name'   => $user?->name ?? 'Sistema'
+                        'total_diff' => $finalTotal - $order->total,
+                        'user_id' => $user?->id,
+                        'user_name' => $user?->name ?? 'Sistema',
                     ],
-                    'timestamp' => now()->toISOString()
+                    'timestamp' => now()->toISOString(),
                 ];
-                
+
                 $order->update([
                     'total' => $finalTotal,
                     'tax_amount' => $orderTax,
                     'subtotal' => $orderSubtotal,
-                    'audit_logs' => $logs
+                    'audit_logs' => $logs,
                 ]);
 
                 // 2. Crear cargo en cuenta del cliente por la diferencia
@@ -748,16 +765,16 @@ class SalesOrderController extends Controller
                     $customer = \App\Models\Customer::find($order->customer_id);
                     if ($customer) {
                         \App\Models\CustomerTransaction::create([
-                            'customer_id'      => $customer->id,
-                            'type'             => 'sale',
-                            'amount'           => $diffTotal,
-                            'balance_before'   => $customer->current_balance,
-                            'balance_after'    => $customer->current_balance + $diffTotal,
-                            'description'      => 'Cargo por Modificación de Venta ' . $order->order_number,
-                            'reference_type'   => 'sales_order_modification',
-                            'reference_id'     => $order->id,
+                            'customer_id' => $customer->id,
+                            'type' => 'sale',
+                            'amount' => $diffTotal,
+                            'balance_before' => $customer->current_balance,
+                            'balance_after' => $customer->current_balance + $diffTotal,
+                            'description' => 'Cargo por Modificación de Venta '.$order->order_number,
+                            'reference_type' => 'sales_order_modification',
+                            'reference_id' => $order->id,
                             'transaction_date' => now(),
-                            'created_by'       => $user?->id,
+                            'created_by' => $user?->id,
                         ]);
                         $customer->current_balance += $diffTotal;
                         $customer->save();
@@ -765,10 +782,10 @@ class SalesOrderController extends Controller
                 }
 
                 // 3. Register payments (with isCheckout = false to properly offset the debt charge above)
-                if (!empty($validated['payment'])) {
+                if (! empty($validated['payment'])) {
                     foreach ($validated['payment'] as $payment) {
                         $order->addPayment(
-                            amount: (float)$payment['amount'],
+                            amount: (float) $payment['amount'],
                             method: $payment['method'],
                             notes: $payment['notes'] ?? 'Cobro por diferencia (Modificación de Orden)',
                             isCheckout: false
@@ -777,7 +794,7 @@ class SalesOrderController extends Controller
                     $totalPaid = $order->payments()->sum('amount');
                     if ($totalPaid >= $order->total) {
                         $order->update(['payment_status' => 'paid']);
-                    } else if ($totalPaid > 0) {
+                    } elseif ($totalPaid > 0) {
                         $order->update(['payment_status' => 'partial']);
                     }
                 }
@@ -797,23 +814,34 @@ class SalesOrderController extends Controller
 
     private function normalizeTaxPercentPayload(Request $request): void
     {
-        if ($request->has('tax_percent') && is_numeric($request->input('tax_percent'))) {
-            $request->merge([
-                'tax_percent' => (int) round((float) $request->input('tax_percent')),
-            ]);
+        $defaultTaxRate = (int) \App\Models\Setting::get('store_tax_rate', 7);
+
+        if ($request->has('tax_percent')) {
+            $raw = $request->input('tax_percent');
+            if (is_numeric($raw)) {
+                $request->merge(['tax_percent' => (int) round((float) $raw)]);
+            } elseif ($raw === null || $raw === '') {
+                $request->merge(['tax_percent' => $defaultTaxRate]);
+            }
+        } else {
+            $request->merge(['tax_percent' => $defaultTaxRate]);
         }
 
         $items = $request->input('items');
-        if (!is_array($items)) {
+        if (! is_array($items)) {
             return;
         }
 
         foreach ($items as $index => $item) {
-            if (!is_array($item) || !array_key_exists('tax_percent', $item) || !is_numeric($item['tax_percent'])) {
+            if (! is_array($item)) {
                 continue;
             }
 
-            $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+            if (! array_key_exists('tax_percent', $item) || $item['tax_percent'] === null || $item['tax_percent'] === '') {
+                $items[$index]['tax_percent'] = $defaultTaxRate;
+            } elseif (is_numeric($item['tax_percent'])) {
+                $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+            }
         }
 
         $request->merge(['items' => $items]);
@@ -835,6 +863,7 @@ class SalesOrderController extends Controller
                 $description = trim((string) ($item['custom_description'] ?? ''));
                 if ($description === '') {
                     $errors["items.{$index}.custom_description"] = 'La descripcion es obligatoria para articulos miscelaneos.';
+
                     continue;
                 }
 
@@ -842,11 +871,13 @@ class SalesOrderController extends Controller
                 $items[$index]['custom_description'] = $description;
                 $items[$index]['product_id'] = null;
                 $items[$index]['variant_id'] = null;
+
                 continue;
             }
 
             if (empty($item['product_id'])) {
                 $errors["items.{$index}.product_id"] = 'El producto es obligatorio para lineas de catalogo.';
+
                 continue;
             }
 
@@ -854,7 +885,7 @@ class SalesOrderController extends Controller
             $items[$index]['custom_description'] = null;
         }
 
-        if (!empty($errors)) {
+        if (! empty($errors)) {
             throw ValidationException::withMessages($errors);
         }
 
@@ -866,11 +897,11 @@ class SalesOrderController extends Controller
      */
     public function pendingAtWarehouse(Request $request): JsonResponse
     {
-        $warehouseId = $request->header('X-Warehouse-Id') 
+        $warehouseId = $request->header('X-Warehouse-Id')
             ?? $request->user()?->current_warehouse_id;
 
         $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product'])
-            ->when($warehouseId, fn($q) => $q->whereHas('items', function($iq) use ($warehouseId) {
+            ->when($warehouseId, fn ($q) => $q->whereHas('items', function ($iq) use ($warehouseId) {
                 $iq->where('warehouse_id', $warehouseId);
             }))
             ->whereNotNull('sent_to_warehouse_at')
@@ -893,7 +924,7 @@ class SalesOrderController extends Controller
             ?? $request->user()?->current_warehouse_id;
 
         $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product'])
-            ->when($warehouseId, fn($q) => $q->whereHas('items', function ($iq) use ($warehouseId) {
+            ->when($warehouseId, fn ($q) => $q->whereHas('items', function ($iq) use ($warehouseId) {
                 $iq->where('warehouse_id', $warehouseId);
             }))
             ->whereNotNull('prepared_at')
@@ -913,9 +944,10 @@ class SalesOrderController extends Controller
     public function sendToWarehouse(int $id): JsonResponse
     {
         $order = \App\Models\SalesOrder::findOrFail($id);
-        if (!$order->sendToWarehouse()) {
+        if (! $order->sendToWarehouse()) {
             return response()->json(['message' => 'La orden ya está en cola de bodega'], 422);
         }
+
         return response()->json(['message' => 'Enviada a bodega', 'data' => $order->fresh()]);
     }
 
@@ -925,9 +957,10 @@ class SalesOrderController extends Controller
     public function markPrepared(Request $request, int $id): JsonResponse
     {
         $order = \App\Models\SalesOrder::findOrFail($id);
-        if (!$order->markAsPrepared($request->user()->id)) {
+        if (! $order->markAsPrepared($request->user()->id)) {
             return response()->json(['message' => 'La orden ya fue preparada'], 422);
         }
+
         return response()->json(['message' => 'Marcada como preparada', 'data' => $order->fresh()]);
     }
 }

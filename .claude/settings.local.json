@@ -12,7 +12,8 @@
       "Bash(cat resources/js/routes/sales-orders/*.ts)",
       "Bash(grep -E \"\\\\.php$\")",
       "Bash(grep -E \"\\\\.\\(php|rb\\)$\")",
-      "Bash([ -f \"C:\\\\Users\\\\JUANANTONIOCASTILLAO\\\\Herd\\\\pos-frontend/resources/js/components/Products/$file\" ])"
+      "Bash([ -f \"C:\\\\Users\\\\JUANANTONIOCASTILLAO\\\\Herd\\\\pos-frontend/resources/js/components/Products/$file\" ])",
+      "mcp__laravel-boost__database-schema"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -4,12 +4,16 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Category;
+use App\Models\CategoryMedia;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Services\PricingFormulaService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class CategoryController extends Controller
 {
@@ -49,7 +53,7 @@ class CategoryController extends Controller
     public function all(): JsonResponse
     {
         $categories = Category::orderBy('name')
-            ->select('id', 'name', 'parent_id')
+            ->select('id', 'name', 'parent_id', 'image_url')
             ->get();
 
         return response()->json(['data' => $categories]);
@@ -71,6 +75,7 @@ class CategoryController extends Controller
             'default_attributes.*.name' => 'required_with:default_attributes|string|max:100',
             'default_attributes.*.required' => 'nullable|boolean',
             'icon' => 'nullable|string|max:50',
+            'image_url' => 'nullable|url|max:500',
             'priority' => 'nullable|integer',
             'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
             'pricing_formula' => 'nullable|string|max:500',
@@ -110,6 +115,7 @@ class CategoryController extends Controller
             'default_attributes.*.name' => 'required_with:default_attributes|string|max:100',
             'default_attributes.*.required' => 'nullable|boolean',
             'icon' => 'nullable|string|max:50',
+            'image_url' => 'nullable|url|max:500',
             'priority' => 'nullable|integer',
             'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
             'pricing_formula' => 'nullable|string|max:500',
@@ -221,9 +227,208 @@ class CategoryController extends Controller
             ], 422);
         }
 
+        $this->deleteAllCategoryMedia($category);
+        $this->deleteStoredCategoryImage($category->getRawOriginal('image_url'));
         $category->delete();
 
         return response()->json(['message' => 'Category deleted successfully']);
+    }
+
+    /**
+     * Get category image.
+     */
+    public function getImages(Category $category): JsonResponse
+    {
+        $images = $category->media()
+            ->where('media_type', 'image')
+            ->orderBy('display_order')
+            ->get()
+            ->map(fn (CategoryMedia $media) => [
+                'id' => $media->id,
+                'url' => $media->url,
+                'file_path' => $media->file_path,
+                'original_filename' => $media->original_filename,
+                'display_order' => $media->display_order,
+            ])
+            ->values()
+            ->all();
+
+        $rawImagePath = $category->getRawOriginal('image_url');
+        if (! empty($rawImagePath) && is_string($rawImagePath)) {
+            $legacyExists = collect($images)->contains(fn (array $image) => $image['file_path'] === $rawImagePath);
+            if (! $legacyExists) {
+                $images[] = [
+                    'id' => null,
+                    'url' => $category->image_url,
+                    'file_path' => $rawImagePath,
+                    'original_filename' => basename($rawImagePath),
+                    'display_order' => count($images),
+                ];
+            }
+        }
+
+        return response()->json([
+            'data' => $images,
+        ]);
+    }
+
+    /**
+     * Upload category image.
+     */
+    public function uploadImage(Request $request, Category $category): JsonResponse
+    {
+        $request->validate([
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,webp|max:5120',
+            'images' => 'nullable|array',
+            'images.*' => 'image|mimes:jpeg,png,jpg,webp|max:5120',
+        ]);
+
+        $files = $this->resolveUploadFiles($request);
+        if (empty($files)) {
+            return response()->json([
+                'message' => 'Debes enviar al menos una imagen',
+            ], 422);
+        }
+
+        $uploaded = $this->addCategoryImages($category, $files);
+        $category->refresh();
+
+        return response()->json([
+            'message' => count($uploaded).' imagen(es) de categoría subidas correctamente',
+            'data' => $uploaded,
+        ]);
+    }
+
+    /**
+     * Delete category image.
+     */
+    public function deleteImage(Category $category, ?int $media = null): JsonResponse
+    {
+        if ($media === null) {
+            $this->deleteAllCategoryMedia($category);
+            $this->deleteStoredCategoryImage($category->getRawOriginal('image_url'));
+            $category->update(['image_url' => null]);
+
+            return response()->json([
+                'message' => 'Imágenes de categoría eliminadas correctamente',
+            ]);
+        }
+
+        $categoryMedia = $category->media()
+            ->where('media_type', 'image')
+            ->where('id', $media)
+            ->first();
+
+        if (! $categoryMedia) {
+            return response()->json([
+                'message' => 'Imagen no encontrada',
+            ], 404);
+        }
+
+        $wasThumb = $category->getRawOriginal('image_url') === $categoryMedia->file_path;
+        $this->deleteStoredCategoryImage($categoryMedia->file_path);
+        $categoryMedia->delete();
+
+        if ($wasThumb) {
+            $this->syncCategoryPrimaryImageFromMedia($category);
+        }
+
+        return response()->json([
+            'message' => 'Imagen de categoría eliminada correctamente',
+        ]);
+    }
+
+    /**
+     * @return array<int, UploadedFile>
+     */
+    private function resolveUploadFiles(Request $request): array
+    {
+        $files = $request->file('images');
+        if (is_array($files)) {
+            return array_values(array_filter($files, fn ($file) => $file instanceof UploadedFile));
+        }
+
+        $singleFile = $request->file('image') ?? $request->file('images');
+
+        return $singleFile instanceof UploadedFile ? [$singleFile] : [];
+    }
+
+    /**
+     * @param  array<int, UploadedFile>  $files
+     * @return array<int, array<string, mixed>>
+     */
+    private function addCategoryImages(Category $category, array $files): array
+    {
+        $maxOrder = $category->media()
+            ->where('media_type', 'image')
+            ->max('display_order') ?? -1;
+
+        $uploaded = [];
+
+        foreach ($files as $file) {
+            $path = $file->store('categories', 'public');
+            $maxOrder++;
+
+            $media = $category->media()->create([
+                'media_type' => 'image',
+                'category' => 'photo',
+                'file_path' => $path,
+                'original_filename' => $file->getClientOriginalName(),
+                'file_size' => $file->getSize(),
+                'display_order' => $maxOrder,
+            ]);
+
+            $uploaded[] = [
+                'id' => $media->id,
+                'url' => $media->url,
+                'file_path' => $media->file_path,
+                'original_filename' => $media->original_filename,
+                'display_order' => $media->display_order,
+            ];
+        }
+
+        if (! $category->getRawOriginal('image_url') && ! empty($uploaded)) {
+            $category->update(['image_url' => $uploaded[0]['file_path']]);
+        }
+
+        return $uploaded;
+    }
+
+    private function deleteAllCategoryMedia(Category $category): void
+    {
+        $categoryMedia = $category->media()
+            ->where('media_type', 'image')
+            ->get();
+
+        foreach ($categoryMedia as $media) {
+            $this->deleteStoredCategoryImage($media->file_path);
+            $media->delete();
+        }
+    }
+
+    private function syncCategoryPrimaryImageFromMedia(Category $category): void
+    {
+        $nextImage = $category->media()
+            ->where('media_type', 'image')
+            ->orderBy('display_order')
+            ->first();
+
+        $category->update(['image_url' => $nextImage?->file_path]);
+    }
+
+    private function deleteStoredCategoryImage(mixed $imagePath): void
+    {
+        if (! is_string($imagePath) || $imagePath === '') {
+            return;
+        }
+
+        if (Str::startsWith($imagePath, ['http://', 'https://'])) {
+            return;
+        }
+
+        if (Storage::disk('public')->exists($imagePath)) {
+            Storage::disk('public')->delete($imagePath);
+        }
     }
 
     private function normalizeIntegerPercentField(Request $request, string $field): void

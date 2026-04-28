@@ -37,6 +37,8 @@ class ProductAttributeController extends Controller
             'name' => 'required|string|max:255',
             'value' => 'required|string|max:255',
             'unit' => 'nullable|string|max:50',
+            'source' => 'nullable|string|in:custom,category',
+            'source_category_id' => 'nullable|integer|exists:categories,id',
         ]);
 
         unset($validated['variant_id']);
@@ -57,11 +59,18 @@ class ProductAttributeController extends Controller
     {
         $attribute = ProductAttribute::whereNull('variant_id')->findOrFail($id);
 
-        $validated = $request->validate([
+        $rules = [
             'name' => 'sometimes|string|max:255',
             'value' => 'sometimes|string|max:255',
             'unit' => 'nullable|string|max:50',
-        ]);
+        ];
+
+        // Prevent name change on inherited attributes
+        if ($attribute->source === 'category' && $request->has('name')) {
+            unset($rules['name']);
+        }
+
+        $validated = $request->validate($rules);
 
         $attribute->update($validated);
 
@@ -77,6 +86,14 @@ class ProductAttributeController extends Controller
     public function destroy(string $id): JsonResponse
     {
         $attribute = ProductAttribute::whereNull('variant_id')->findOrFail($id);
+
+        if ($attribute->source === 'category') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se puede eliminar un atributo heredado de categoría. Modifique la categoría para cambiar este atributo.',
+            ], 409);
+        }
+
         $attribute->delete();
 
         return response()->json([

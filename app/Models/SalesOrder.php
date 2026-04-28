@@ -8,11 +8,12 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Str;
 
 class SalesOrder extends Model
 {
     use HasFactory, SoftDeletes;
+
+    public array $stockWarnings = [];
 
     protected $fillable = [
         'order_number',
@@ -51,7 +52,7 @@ class SalesOrder extends Model
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'total_returned'];
 
     // ==================== RELATIONSHIPS ====================
-    
+
     public function customer(): BelongsTo
     {
         return $this->belongsTo(Customer::class);
@@ -88,7 +89,7 @@ class SalesOrder extends Model
     }
 
     // ==================== SCOPES ====================
-    
+
     public function scopeByStatus($query, $status)
     {
         return $query->where('status', $status);
@@ -120,10 +121,10 @@ class SalesOrder extends Model
     }
 
     // ==================== ACCESSORS ====================
-    
+
     public function getFormattedTotalAttribute(): string
     {
-        return '$' . number_format($this->total, 2);
+        return '$'.number_format($this->total, 2);
     }
 
     public function getAmountPaidAttribute(): float
@@ -131,6 +132,7 @@ class SalesOrder extends Model
         if ($this->relationLoaded('payments')) {
             return (float) $this->payments->where('method', '!==', 'credit')->sum('amount');
         }
+
         return (float) $this->payments()->where('method', '!=', 'credit')->sum('amount');
     }
 
@@ -151,12 +153,13 @@ class SalesOrder extends Model
         if ($this->relationLoaded('returns')) {
             return (float) $this->returns->where('status', 'approved')->sum('total_amount');
         }
+
         return (float) $this->returns()->where('status', 'approved')->sum('total_amount');
     }
 
     public function getStatusLabelAttribute(): string
     {
-        return match($this->status) {
+        return match ($this->status) {
             'draft' => 'Borrador',
             'pending' => 'Pendiente',
             'confirmed' => 'Confirmada',
@@ -168,7 +171,7 @@ class SalesOrder extends Model
     }
 
     // ==================== BUSINESS METHODS ====================
-    
+
     /**
      * Generate unique order number
      */
@@ -178,10 +181,10 @@ class SalesOrder extends Model
         $lastOrder = self::whereDate('created_at', now()->toDateString())
             ->orderBy('id', 'desc')
             ->first();
-        
+
         $sequence = $lastOrder ? (int) substr($lastOrder->order_number, -4) + 1 : 1;
-        
-        return 'ORD-' . $date . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
+
+        return 'ORD-'.$date.'-'.str_pad($sequence, 4, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -208,7 +211,7 @@ class SalesOrder extends Model
      */
     public function canBeCancelled(): bool
     {
-        return !in_array($this->status, ['completed', 'cancelled']);
+        return ! in_array($this->status, ['completed', 'cancelled']);
     }
 
     /**
@@ -224,57 +227,18 @@ class SalesOrder extends Model
      */
     public function confirm(): bool
     {
-        if (!$this->canBeConfirmed()) {
+        if (! $this->canBeConfirmed()) {
             return false;
         }
 
-        $allowNegative = Setting::get('allow_negative_inventory', false);
+        $this->stockWarnings = [];
 
-        // Check stock availability only if negative inventory is not allowed
-        if (!$allowNegative) {
-            foreach ($this->items as $item) {
-                if ($item->is_custom_line) {
-                    continue;
-                }
-
-                // Use variant_id if available, fall back to product_id
-                $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                
-                if ($item->variant_id) {
-                    $query->where('variant_id', $item->variant_id);
-                } else {
-                    $query->where('product_id', $item->product_id);
-                }
-                
-                $inventory = $query->first();
-
-                if (!$inventory || $inventory->quantity_available < $item->quantity) {
-                    $label = $item->product?->name ?? $item->custom_description ?? 'producto';
-                    throw new \Exception("Stock insuficiente para {$label}");
-                }
-            }
-        }
-
-        // Create inventory movements and deduct stock
+        // Create inventory movements and deduct stock (only what is available)
         foreach ($this->items as $item) {
             if ($item->is_custom_line) {
                 continue;
             }
 
-            InventoryMovement::create([
-                'product_id' => $item->product_id,
-                'variant_id' => $item->variant_id,
-                'warehouse_id' => $item->warehouse_id,
-                'movement_type' => 'out',
-                'quantity' => $item->quantity,
-                'reference_type' => 'sale',
-                'reference_id' => $this->id,
-                'notes' => "Venta - Orden {$this->order_number}",
-                'user_id' => Auth::id(),
-                'date' => now(),
-            ]);
-
-            // Update stock — check if stock was pre-reserved
             $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
             if ($item->variant_id) {
                 $query->where('variant_id', $item->variant_id);
@@ -283,14 +247,51 @@ class SalesOrder extends Model
             }
             $inventory = $query->first();
 
+            $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
+            $reserved = $inventory ? max(0, (int) $inventory->quantity_reserved) : 0;
+            $requested = (int) $item->quantity;
+            $quantityToDeduct = min($requested, max(0, $available + $reserved));
+
+            if ($requested > $quantityToDeduct) {
+                $label = $item->product?->name ?? $item->custom_description ?? 'producto';
+                $this->stockWarnings[] = [
+                    'type' => 'stock_shortage',
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'warehouse_id' => $item->warehouse_id,
+                    'product_name' => $label,
+                    'requested_quantity' => $requested,
+                    'available_quantity' => $available,
+                    'missing_quantity' => $requested - $quantityToDeduct,
+                    'message' => "{$label}: solicitado {$requested}, disponible {$available}, faltante ".($requested - $quantityToDeduct),
+                ];
+            }
+
+            if ($quantityToDeduct <= 0) {
+                continue;
+            }
+
+            InventoryMovement::create([
+                'product_id' => $item->product_id,
+                'variant_id' => $item->variant_id,
+                'warehouse_id' => $item->warehouse_id,
+                'movement_type' => 'out',
+                'quantity' => $quantityToDeduct,
+                'reference_type' => 'sale',
+                'reference_id' => $this->id,
+                'notes' => "Venta - Orden {$this->order_number}",
+                'user_id' => Auth::id(),
+                'date' => now(),
+            ]);
+
             if ($inventory) {
-                if ($inventory->quantity_reserved >= $item->quantity) {
-                    // Stock was pre-reserved (draft/pending → confirmed)
-                    $inventory->quantity_reserved -= $item->quantity;
-                } else {
-                    // Direct confirm (POS) — deduct from available
-                    $inventory->quantity_available -= $item->quantity;
+                $remaining = $quantityToDeduct;
+                if ($inventory->quantity_reserved > 0) {
+                    $fromReserved = min($remaining, $inventory->quantity_reserved);
+                    $inventory->quantity_reserved -= $fromReserved;
+                    $remaining -= $fromReserved;
                 }
+                $inventory->quantity_available = max(0, $inventory->quantity_available - $remaining);
                 $inventory->save();
             }
         }
@@ -315,16 +316,16 @@ class SalesOrder extends Model
                     $customer->save();
 
                     \App\Models\CustomerTransaction::create([
-                        'customer_id'      => $customer->id,
-                        'type'             => 'sale',
-                        'reference_type'   => 'sales_order',
-                        'reference_id'     => $this->id,
-                        'amount'           => $amountToBill,
-                        'balance_before'   => $balanceBefore,
-                        'balance_after'    => $customer->current_balance,
-                        'description'      => "Cargo por venta {$this->order_number}",
+                        'customer_id' => $customer->id,
+                        'type' => 'sale',
+                        'reference_type' => 'sales_order',
+                        'reference_id' => $this->id,
+                        'amount' => $amountToBill,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $customer->current_balance,
+                        'description' => "Cargo por venta {$this->order_number}",
                         'transaction_date' => now(),
-                        'created_by'       => Auth::id(),
+                        'created_by' => Auth::id(),
                     ]);
                 }
             }
@@ -376,10 +377,10 @@ class SalesOrder extends Model
     public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false): SalesOrderPayment
     {
         $payment = $this->payments()->create([
-            'amount'     => $amount,
-            'method'     => $method,
-            'notes'      => $notes,
-            'paid_at'    => $paidAt ?? now(),
+            'amount' => $amount,
+            'method' => $method,
+            'notes' => $notes,
+            'paid_at' => $paidAt ?? now(),
             'created_by' => Auth::id(),
         ]);
 
@@ -403,33 +404,33 @@ class SalesOrder extends Model
                 if ($method === 'store_credit') {
                     $customer->current_balance += $amount; // El saldo a favor se gasta asumiéndose negativo o a la par
                     $customer->save();
-                    
+
                     \App\Models\CustomerTransaction::create([
-                        'customer_id'      => $customer->id,
-                        'type'             => 'store_credit_used',
-                        'amount'           => $amount,
-                        'balance_before'   => $balanceBefore,
-                        'balance_after'    => $customer->current_balance,
-                        'reference_type'   => 'sales_order',
-                        'reference_id'     => $this->id,
-                        'description'      => "Saldo a favor aplicado a venta {$this->order_number}",
+                        'customer_id' => $customer->id,
+                        'type' => 'store_credit_used',
+                        'amount' => $amount,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $customer->current_balance,
+                        'reference_type' => 'sales_order',
+                        'reference_id' => $this->id,
+                        'description' => "Saldo a favor aplicado a venta {$this->order_number}",
                         'transaction_date' => now(),
                     ]);
-                } elseif ($method !== 'credit' && !$isCheckout) {
-                    // Si es cobro normal (efectivo/tarjeta/transferencia), solo baja el balance general 
+                } elseif ($method !== 'credit' && ! $isCheckout) {
+                    // Si es cobro normal (efectivo/tarjeta/transferencia), solo baja el balance general
                     // si NO es un pago efectuado el día del Checkout original
                     $customer->current_balance -= $amount;
                     $customer->save();
-                    
+
                     \App\Models\CustomerTransaction::create([
-                        'customer_id'      => $customer->id,
-                        'type'             => 'payment',
-                        'amount'           => $amount,
-                        'balance_before'   => $balanceBefore,
-                        'balance_after'    => $customer->current_balance,
-                        'reference_type'   => 'sales_order',
-                        'reference_id'     => $this->id,
-                        'description'      => "Abono a venta {$this->order_number}",
+                        'customer_id' => $customer->id,
+                        'type' => 'payment',
+                        'amount' => $amount,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $customer->current_balance,
+                        'reference_type' => 'sales_order',
+                        'reference_id' => $this->id,
+                        'description' => "Abono a venta {$this->order_number}",
                         'transaction_date' => now(),
                     ]);
                 }
@@ -450,23 +451,32 @@ class SalesOrder extends Model
      */
     public function cancel(): bool
     {
-        if (!$this->canBeCancelled()) {
+        if (! $this->canBeCancelled()) {
             return false;
         }
 
-        // If order was confirmed, revert inventory (restore to available)
+        // If order was confirmed, revert only the quantity actually deducted
         if ($this->status === 'confirmed' || $this->status === 'processing') {
-            foreach ($this->items as $item) {
-                if ($item->is_custom_line) {
+            $deductedMovements = InventoryMovement::query()
+                ->selectRaw('product_id, variant_id, warehouse_id, SUM(quantity) as quantity')
+                ->where('reference_type', 'sale')
+                ->where('reference_id', $this->id)
+                ->where('movement_type', 'out')
+                ->groupBy('product_id', 'variant_id', 'warehouse_id')
+                ->get();
+
+            foreach ($deductedMovements as $movement) {
+                $actualDeducted = (int) $movement->quantity;
+                if ($actualDeducted <= 0) {
                     continue;
                 }
 
                 InventoryMovement::create([
-                    'product_id' => $item->product_id,
-                    'variant_id' => $item->variant_id,
-                    'warehouse_id' => $item->warehouse_id,
+                    'product_id' => $movement->product_id,
+                    'variant_id' => $movement->variant_id,
+                    'warehouse_id' => $movement->warehouse_id,
                     'movement_type' => 'in',
-                    'quantity' => $item->quantity,
+                    'quantity' => $actualDeducted,
                     'reference_type' => 'sale_cancelled',
                     'reference_id' => $this->id,
                     'notes' => "Cancelación de orden {$this->order_number}",
@@ -474,15 +484,15 @@ class SalesOrder extends Model
                     'date' => now(),
                 ]);
 
-                $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                if ($item->variant_id) {
-                    $query->where('variant_id', $item->variant_id);
+                $query = ProductInventory::where('warehouse_id', $movement->warehouse_id);
+                if ($movement->variant_id) {
+                    $query->where('variant_id', $movement->variant_id);
                 } else {
-                    $query->where('product_id', $item->product_id);
+                    $query->where('product_id', $movement->product_id);
                 }
                 $inventory = $query->first();
                 if ($inventory) {
-                    $inventory->quantity_available += $item->quantity;
+                    $inventory->quantity_available += $actualDeducted;
                     $inventory->save();
                 }
             }
@@ -502,10 +512,15 @@ class SalesOrder extends Model
                     $query->where('product_id', $item->product_id);
                 }
                 $inventory = $query->first();
-                if ($inventory && $inventory->quantity_reserved >= $item->quantity) {
-                    $inventory->quantity_reserved  -= $item->quantity;
-                    $inventory->quantity_available += $item->quantity;
-                    $inventory->save();
+
+                if ($inventory) {
+                    // Only release what was actually reserved
+                    $reservedToRelease = min($item->quantity, max(0, $inventory->quantity_reserved));
+                    if ($reservedToRelease > 0) {
+                        $inventory->quantity_reserved -= $reservedToRelease;
+                        $inventory->quantity_available += $reservedToRelease;
+                        $inventory->save();
+                    }
                 }
             }
         }
@@ -523,16 +538,16 @@ class SalesOrder extends Model
                     $customer->save();
 
                     \App\Models\CustomerTransaction::create([
-                        'customer_id'      => $customer->id,
-                        'type'             => 'credit_note',
-                        'reference_type'   => 'sales_order_cancelled',
-                        'reference_id'     => $this->id,
-                        'amount'           => $payment->amount,
-                        'balance_before'   => $balanceBefore,
-                        'balance_after'    => $customer->current_balance,
-                        'description'      => "Reembolso por cancelación de orden {$this->order_number} ({$payment->formatted_method})",
+                        'customer_id' => $customer->id,
+                        'type' => 'credit_note',
+                        'reference_type' => 'sales_order_cancelled',
+                        'reference_id' => $this->id,
+                        'amount' => $payment->amount,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $customer->current_balance,
+                        'description' => "Reembolso por cancelación de orden {$this->order_number} ({$payment->formatted_method})",
                         'transaction_date' => now(),
-                        'created_by'       => Auth::id(),
+                        'created_by' => Auth::id(),
                     ]);
                 }
             }
@@ -552,9 +567,12 @@ class SalesOrder extends Model
      */
     public function sendToWarehouse(): bool
     {
-        if ($this->sent_to_warehouse_at !== null) return false;
-        
+        if ($this->sent_to_warehouse_at !== null) {
+            return false;
+        }
+
         $this->sent_to_warehouse_at = now();
+
         return $this->save();
     }
 
@@ -563,10 +581,13 @@ class SalesOrder extends Model
      */
     public function markAsPrepared(int $userId): bool
     {
-        if ($this->prepared_at !== null) return false;
-        
+        if ($this->prepared_at !== null) {
+            return false;
+        }
+
         $this->prepared_by = $userId;
         $this->prepared_at = now();
+
         return $this->save();
     }
 

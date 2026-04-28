@@ -24,6 +24,8 @@ class ProductService
                 $name = trim((string) ($attribute['name'] ?? ''));
                 $value = trim((string) ($attribute['value'] ?? ''));
                 $unitRaw = isset($attribute['unit']) ? trim((string) $attribute['unit']) : null;
+                $source = ($attribute['source'] ?? 'custom') === 'category' ? 'category' : 'custom';
+                $sourceCategoryId = $source === 'category' ? ($attribute['source_category_id'] ?? null) : null;
 
                 if ($name === '' || $value === '') {
                     return null;
@@ -33,6 +35,10 @@ class ProductService
                     'name' => $name,
                     'value' => $value,
                     'unit' => $unitRaw !== '' ? $unitRaw : null,
+                    'source' => $source,
+                    'source_category_id' => $sourceCategoryId !== null && $sourceCategoryId !== ''
+                        ? (int) $sourceCategoryId
+                        : null,
                 ];
             })
             ->filter()
@@ -175,6 +181,8 @@ class ProductService
                     'name' => $name,
                     'value' => $existing['value'] ?? ($attribute['default_value'] ?? $attribute['value'] ?? ''),
                     'unit' => $attribute['unit'] ?? ($existing['unit'] ?? null),
+                    'source' => 'category',
+                    'source_category_id' => $category->id,
                 ];
                 $seenNames[$key] = true;
             }
@@ -187,7 +195,7 @@ class ProductService
     {
         $existingAttributes = $product->attributes()
             ->whereNull('variant_id')
-            ->get(['name', 'value', 'unit']);
+            ->get(['name', 'value', 'unit', 'source', 'source_category_id']);
 
         $defaults = $this->defaultAttributesForCategories($categoryId, $extraCategoryIds, $existingAttributes);
         $defaultKeys = collect($defaults)
@@ -200,11 +208,36 @@ class ProductService
                 'name' => $attribute->name,
                 'value' => $attribute->value,
                 'unit' => $attribute->unit,
+                'source' => $attribute->source ?? 'custom',
+                'source_category_id' => $attribute->source_category_id,
             ])
             ->values()
             ->all();
 
         return array_merge($defaults, $customAttributes);
+    }
+
+    private function mergeMissingCategoryDefaultsIntoAttributes(array $attributes, ?int $categoryId, array $extraCategoryIds = []): array
+    {
+        $attributesByName = collect($attributes)
+            ->mapWithKeys(function (array $attribute) {
+                $key = $this->attributeNameKey((string) ($attribute['name'] ?? ''));
+
+                return $key !== '' ? [$key => true] : [];
+            });
+
+        $defaults = $this->defaultAttributesForCategories($categoryId, $extraCategoryIds, $attributes);
+
+        foreach ($defaults as $default) {
+            $key = $this->attributeNameKey($default['name']);
+
+            if (! $attributesByName->has($key)) {
+                $attributes[] = $default;
+                $attributesByName->put($key, true);
+            }
+        }
+
+        return $attributes;
     }
 
     private function normalizeMoneyValue(mixed $value): ?float
@@ -616,7 +649,22 @@ class ProductService
 
             // Update attributes if provided
             if (isset($data['attributes'])) {
-                $this->assignAttributes($product, $this->normalizeAttributes($data['attributes']));
+                $normalizedAttributes = $this->normalizeAttributes($data['attributes']);
+                $categorySetChanged = $categoryChanged || $extraCategoriesChanged;
+
+                if ($categorySetChanged) {
+                    $normalizedAttributes = $this->mergeMissingCategoryDefaultsIntoAttributes(
+                        $normalizedAttributes,
+                        $currentCategoryId,
+                        $currentExtraCategoryIds,
+                    );
+                }
+
+                $this->assignAttributes(
+                    $product,
+                    $normalizedAttributes,
+                    preserveUnmentionedInherited: ! $categorySetChanged,
+                );
             }
 
             if (array_key_exists('oem_references', $data)) {
@@ -687,8 +735,31 @@ class ProductService
     /**
      * Assign attributes to product.
      */
-    public function assignAttributes(Product $product, array $attributes): void
+    public function assignAttributes(Product $product, array $attributes, bool $preserveUnmentionedInherited = false): void
     {
+        if ($preserveUnmentionedInherited) {
+            $incomingKeys = collect($attributes)
+                ->map(fn (array $attribute) => $this->attributeNameKey((string) ($attribute['name'] ?? '')))
+                ->filter()
+                ->flip();
+
+            $preservedInheritedAttributes = $product->attributes()
+                ->whereNull('variant_id')
+                ->where('source', 'category')
+                ->get(['name', 'value', 'unit', 'source', 'source_category_id'])
+                ->reject(fn (ProductAttribute $attribute) => $incomingKeys->has($this->attributeNameKey($attribute->name)))
+                ->map(fn (ProductAttribute $attribute) => [
+                    'name' => $attribute->name,
+                    'value' => $attribute->value,
+                    'unit' => $attribute->unit,
+                    'source' => $attribute->source,
+                    'source_category_id' => $attribute->source_category_id,
+                ])
+                ->all();
+
+            $attributes = array_merge($attributes, $preservedInheritedAttributes);
+        }
+
         // Replace only product-level attributes.
         $product->attributes()->whereNull('variant_id')->delete();
 
@@ -699,6 +770,8 @@ class ProductService
                 'value' => $attribute['value'],
                 'unit' => $attribute['unit'] ?? null,
                 'variant_id' => null,
+                'source' => $attribute['source'] ?? 'custom',
+                'source_category_id' => $attribute['source_category_id'] ?? null,
             ]);
         }
     }
@@ -708,7 +781,18 @@ class ProductService
      */
     public function getProductDetail(int $productId, array $includes = [], ?int $warehouseId = null): ?Product
     {
-        $query = Product::with(['variants.brand', 'variants.pricing', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing', 'productLine', 'category', 'extraCategories', 'engine', 'media']);
+        $query = Product::with([
+            'variants.brand',
+            'variants.pricing',
+            'pricing',
+            'defaultVariant.brand',
+            'defaultVariant.pricing',
+            'productLine',
+            'category.media',
+            'extraCategories.media',
+            'engine',
+            'media',
+        ]);
 
         // Eager load inventory with optional warehouse filtering
         $query->with([
@@ -1368,6 +1452,8 @@ class ProductService
                         'name' => $attribute->name,
                         'value' => $attribute->value,
                         'unit' => $attribute->unit,
+                        'source' => $attribute->source ?? 'custom',
+                        'source_category_id' => $attribute->source_category_id,
                     ])->toArray()
                 );
             }

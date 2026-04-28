@@ -18,6 +18,8 @@ class ProductDetailResource extends JsonResource
         $pricing = $this->relationLoaded('pricing') ? $this->pricing : null;
         $saleTaxRate = (float) ($pricing?->sale_tax_rate ?? $pricing?->tax_rate ?? 0);
         $costTaxRate = (float) ($pricing?->cost_tax_rate ?? $pricing?->tax_rate ?? $saleTaxRate);
+        $effectiveImages = collect($this->all_images ?? []);
+        $effectiveImageUrl = $effectiveImages->first()['url'] ?? null;
 
         return [
             'id' => $this->id,
@@ -32,7 +34,7 @@ class ProductDetailResource extends JsonResource
             'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
             'product_line_id' => $this->product_line_id,
-            'image_url' => $this->image_url ? url('storage/'.$this->image_url) : null,
+            'image_url' => $this->image_url ? url('storage/'.$this->image_url) : $effectiveImageUrl,
 
             'pricing' => $this->when($this->relationLoaded('pricing') && $this->pricing, [
                 'base_price' => (float) $this->pricing?->base_price,
@@ -168,20 +170,24 @@ class ProductDetailResource extends JsonResource
                 ])
             ),
 
-            // Product images (photos from media)
-            'images' => $this->when(
-                $this->relationLoaded('media'),
-                fn () => $this->media
-                    ->where('media_type', 'image')
-                    ->sortBy('display_order')
-                    ->values()
-                    ->map(fn ($m) => [
-                        'id' => $m->id,
-                        'url' => $m->url,
-                        'original_filename' => $m->original_filename,
-                        'display_order' => $m->display_order,
-                    ])
-            ),
+            // Effective product gallery: own images plus inherited category images by reference.
+            'images' => $effectiveImages
+                ->values()
+                ->map(fn (array $image, int $index) => [
+                    'id' => $image['id'] ?? null,
+                    'url' => $image['url'],
+                    'original_filename' => $image['original_filename']
+                        ?? $image['category_name']
+                        ?? 'Imagen',
+                    'display_order' => $image['display_order'] ?? $index,
+                    'source' => $image['source'] ?? 'media',
+                    'source_category_id' => $image['source_category_id'] ?? null,
+                    'category_name' => $image['category_name'] ?? null,
+                    'category_media_id' => $image['category_media_id'] ?? null,
+                ]),
+
+            'inherited_images' => $this->inherited_images ?? [],
+            'all_images' => $this->all_images ?? [],
 
             'compatibility' => $this->when(
                 $this->relationLoaded('vehicleCompatibility'),

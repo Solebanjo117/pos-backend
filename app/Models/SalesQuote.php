@@ -7,7 +7,6 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use Illuminate\Support\Str;
 
 class SalesQuote extends Model
 {
@@ -35,13 +34,13 @@ class SalesQuote extends Model
     ];
 
     protected $casts = [
-        'date'                => 'date',
-        'valid_until'         => 'date',
-        'sent_to_cashier_at'  => 'datetime',
-        'subtotal'            => 'decimal:2',
-        'tax_amount'          => 'decimal:2',
-        'discount_amount'     => 'decimal:2',
-        'total'               => 'decimal:2',
+        'date' => 'date',
+        'valid_until' => 'date',
+        'sent_to_cashier_at' => 'datetime',
+        'subtotal' => 'decimal:2',
+        'tax_amount' => 'decimal:2',
+        'discount_amount' => 'decimal:2',
+        'total' => 'decimal:2',
     ];
 
     protected $appends = ['formatted_total', 'status_label'];
@@ -77,22 +76,22 @@ class SalesQuote extends Model
 
     public function getFormattedTotalAttribute(): string
     {
-        return '$' . number_format((float) $this->total, 2);
+        return '$'.number_format((float) $this->total, 2);
     }
 
     public function getStatusLabelAttribute(): string
     {
         return match ($this->status) {
-            'draft'            => 'Borrador',
-            'sent'             => 'Enviada',
-            'sent_to_deposit'  => 'En Depósito',
-            'sent_to_cashier'  => 'En Caja',
-            'accepted'         => 'Aceptada',
-            'collected'        => 'Cobrada',
-            'rejected'         => 'Rechazada',
-            'expired'          => 'Expirada',
-            'converted'        => 'Convertida a OV',
-            default            => ucfirst($this->status),
+            'draft' => 'Borrador',
+            'sent' => 'Enviada',
+            'sent_to_deposit' => 'En Depósito',
+            'sent_to_cashier' => 'En Caja',
+            'accepted' => 'Aceptada',
+            'collected' => 'Cobrada',
+            'rejected' => 'Rechazada',
+            'expired' => 'Expirada',
+            'converted' => 'Convertida a OV',
+            default => ucfirst($this->status),
         };
     }
 
@@ -111,8 +110,8 @@ class SalesQuote extends Model
     public function scopeExpirable($query)
     {
         return $query->whereIn('status', ['draft', 'sent', 'accepted'])
-                     ->whereNotNull('valid_until')
-                     ->where('valid_until', '<', now()->toDateString());
+            ->whereNotNull('valid_until')
+            ->where('valid_until', '<', now()->toDateString());
     }
 
     // ==================== RELATIONS ====================
@@ -126,17 +125,19 @@ class SalesQuote extends Model
 
     public function sendToDeposit(): bool
     {
-        if (!in_array($this->status, ['draft', 'sent'])) {
+        if (! in_array($this->status, ['draft', 'sent'])) {
             return false;
         }
+
         return $this->update(['status' => 'sent_to_deposit']);
     }
 
     public function sendToCashier(): bool
     {
-        if (!in_array($this->status, ['draft', 'sent', 'sent_to_deposit'])) {
+        if (! in_array($this->status, ['draft', 'sent', 'sent_to_deposit'])) {
             return false;
         }
+
         return $this->update([
             'status' => 'sent_to_cashier',
             'sent_to_cashier_at' => now(),
@@ -145,9 +146,10 @@ class SalesQuote extends Model
 
     public function markCollected(): bool
     {
-        if (!in_array($this->status, ['sent_to_cashier', 'accepted'])) {
+        if (! in_array($this->status, ['sent_to_cashier', 'accepted'])) {
             return false;
         }
+
         return $this->update(['status' => 'collected']);
     }
 
@@ -159,18 +161,18 @@ class SalesQuote extends Model
         $date = now()->format('Ymd');
 
         $lastQuote = static::withTrashed()
-            ->where('quote_number', 'like', $prefix . $date . '%')
+            ->where('quote_number', 'like', $prefix.$date.'%')
             ->orderByDesc('quote_number')
             ->first();
 
         if ($lastQuote) {
-            $lastNumber = (int) substr($lastQuote->quote_number, strlen($prefix . $date . '-'));
+            $lastNumber = (int) substr($lastQuote->quote_number, strlen($prefix.$date.'-'));
             $nextNumber = $lastNumber + 1;
         } else {
             $nextNumber = 1;
         }
 
-        return $prefix . $date . '-' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+        return $prefix.$date.'-'.str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
     public function calculateTotals(): void

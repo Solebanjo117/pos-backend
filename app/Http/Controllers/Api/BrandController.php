@@ -56,11 +56,11 @@ class BrandController extends Controller
      */
     public function show(int $id): JsonResponse
     {
-        $brand = Brand::with('suppliers:id,name')
+        $brand = Brand::with('suppliers:id,name,contact_name,phone')
             ->withCount(['productVariants', 'suppliers'])
             ->findOrFail($id);
 
-        return response()->json(['data' => $brand]);
+        return response()->json(['data' => $this->enrichBrandResponse($brand)]);
     }
 
     /**
@@ -71,7 +71,6 @@ class BrandController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255|unique:brands,name',
-            'prefix' => 'nullable|string|max:5|unique:brands,prefix',
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
@@ -89,12 +88,18 @@ class BrandController extends Controller
             $brand->suppliers()->sync($supplierIds);
         }
 
-        $brand->load('suppliers:id,name');
+        $brand->load('suppliers:id,name,contact_name,phone');
 
-        return response()->json([
+        $response = [
             'message' => 'Marca creada exitosamente',
-            'data' => $brand,
-        ], 201);
+            'data' => $this->enrichBrandResponse($brand),
+        ];
+
+        if (! $hasSupplierIds || empty($supplierIds)) {
+            $response['warning'] = 'No se asignaron proveedores a la marca.';
+        }
+
+        return response()->json($response, 201);
     }
 
     /**
@@ -107,7 +112,6 @@ class BrandController extends Controller
 
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255|unique:brands,name,'.$id,
-            'prefix' => 'nullable|string|max:5|unique:brands,prefix,'.$id,
             'logo_url' => 'nullable|url|max:500',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
@@ -127,7 +131,7 @@ class BrandController extends Controller
 
         return response()->json([
             'message' => 'Marca actualizada exitosamente',
-            'data' => $brand->fresh()->load('suppliers:id,name'),
+            'data' => $this->enrichBrandResponse($brand->fresh()->load('suppliers:id,name,contact_name,phone')),
         ]);
     }
 
@@ -169,7 +173,7 @@ class BrandController extends Controller
 
         return response()->json([
             'message' => 'Proveedor asociado a la marca exitosamente',
-            'data' => $brand->fresh()->load('suppliers:id,name'),
+            'data' => $this->enrichBrandResponse($brand->fresh()->load('suppliers:id,name,contact_name,phone')),
         ]);
     }
 
@@ -184,7 +188,23 @@ class BrandController extends Controller
 
         return response()->json([
             'message' => 'Proveedor desasociado de la marca exitosamente',
-            'data' => $brand->fresh()->load('suppliers:id,name'),
+            'data' => $this->enrichBrandResponse($brand->fresh()->load('suppliers:id,name,contact_name,phone')),
         ]);
+    }
+
+    /**
+     * Enrich brand response with supplier contact details.
+     */
+    private function enrichBrandResponse(Brand $brand): array
+    {
+        $data = $brand->toArray();
+        $data['suppliers'] = $brand->suppliers->map(fn ($s) => [
+            'id' => $s->id,
+            'name' => $s->name,
+            'contact_name' => $s->contact_name,
+            'phone' => $s->phone,
+        ])->values()->all();
+
+        return $data;
     }
 }

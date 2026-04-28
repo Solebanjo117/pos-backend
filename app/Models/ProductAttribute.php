@@ -16,11 +16,14 @@ class ProductAttribute extends Model
         'name',
         'value',
         'unit',
+        'source',
+        'source_category_id',
     ];
 
     protected $casts = [
         'product_id' => 'integer',
         'variant_id' => 'integer',
+        'source_category_id' => 'integer',
     ];
 
     public function product(): BelongsTo
@@ -31,5 +34,15 @@ class ProductAttribute extends Model
     public function variant(): BelongsTo
     {
         return $this->belongsTo(ProductVariant::class, 'variant_id');
+    }
+
+    public function sourceCategory(): BelongsTo
+    {
+        return $this->belongsTo(Category::class, 'source_category_id');
+    }
+
+    public function isInherited(): bool
+    {
+        return $this->source === 'category';
     }
 }

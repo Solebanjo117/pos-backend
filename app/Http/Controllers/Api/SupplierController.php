@@ -50,7 +50,7 @@ class SupplierController extends Controller
     public function show(int $id): JsonResponse
     {
         $supplier = Supplier::withCount('productSuppliers as products_count')
-            ->with('brands:id,name,prefix')
+            ->with('brands:id,name')
             ->findOrFail($id);
 
         // Load products with pricing
@@ -194,7 +194,7 @@ class SupplierController extends Controller
     public function brands(int $id): JsonResponse
     {
         $supplier = Supplier::findOrFail($id);
-        $brands = $supplier->brands()->orderBy('brands.name')->get(['brands.id', 'brands.name', 'brands.prefix']);
+        $brands = $supplier->brands()->orderBy('brands.name')->get(['brands.id', 'brands.name']);
 
         return response()->json(['data' => $brands]);
     }
@@ -215,7 +215,7 @@ class SupplierController extends Controller
 
         return response()->json([
             'message' => 'Marca asociada al proveedor exitosamente',
-            'data' => $supplier->fresh()->load('brands:id,name,prefix'),
+            'data' => $supplier->fresh()->load('brands:id,name'),
         ]);
     }
 
@@ -230,7 +230,7 @@ class SupplierController extends Controller
 
         return response()->json([
             'message' => 'Marca desasociada del proveedor exitosamente',
-            'data' => $supplier->fresh()->load('brands:id,name,prefix'),
+            'data' => $supplier->fresh()->load('brands:id,name'),
         ]);
     }
 }

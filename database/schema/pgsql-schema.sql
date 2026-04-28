@@ -223,7 +223,6 @@ CREATE TABLE public.brands (
     created_at timestamp(0) without time zone,
     updated_at timestamp(0) without time zone,
     website character varying(255),
-    prefix character varying(5),
     CONSTRAINT brands_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying])::text[])))
 );
 
@@ -317,6 +316,7 @@ CREATE TABLE public.categories (
     parent_id bigint,
     description text,
     icon character varying(50),
+    image_url character varying(500),
     priority integer DEFAULT 0 NOT NULL,
     created_at timestamp(0) without time zone,
     updated_at timestamp(0) without time zone,
@@ -3057,15 +3057,7 @@ ALTER TABLE ONLY public.brands
 
 
 --
--- Name: brands brands_prefix_unique; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.brands
-    ADD CONSTRAINT brands_prefix_unique UNIQUE (prefix);
-
-
---
--- Name: cache_locks cache_locks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: brands brands_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.cache_locks
@@ -5580,6 +5572,9 @@ COPY public.migrations (id, migration, batch) FROM stdin;
 144	2026_04_17_120000_fix_vehicle_vins_vin_length_to_40	23
 145	2026_04_17_130000_add_cost_breakdown_fields_to_product_pricing_table	24
 146	2026_04_25_000001_create_product_extra_categories_table	25
+147	2026_04_28_002050_add_source_to_product_attributes_table	26
+148	2026_04_28_015411_add_image_url_to_categories_table	27
+149	2026_04_28_015411_remove_prefix_from_brands_table	28
 \.
 
 
@@ -5587,7 +5582,7 @@ COPY public.migrations (id, migration, batch) FROM stdin;
 -- Name: migrations_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public.migrations_id_seq', 146, true);
+SELECT pg_catalog.setval('public.migrations_id_seq', 149, true);
 
 
 --

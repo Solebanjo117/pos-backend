@@ -24,7 +24,6 @@ class ProductVariantResource extends JsonResource
             'brand' => [
                 'id' => $this->brand?->id,
                 'name' => $this->brand?->name,
-                'prefix' => $this->brand?->prefix,
                 'logo_url' => $this->brand?->logo_url ?? null,
             ],
 

@@ -19,6 +19,7 @@ class Category extends Model
         'description',
         'default_attributes',
         'icon',
+        'image_url',
         'priority',
         'default_margin_percent',
         'pricing_formula',
@@ -84,6 +85,11 @@ class Category extends Model
         return $this->hasMany(Product::class);
     }
 
+    public function media(): HasMany
+    {
+        return $this->hasMany(CategoryMedia::class)->orderBy('display_order');
+    }
+
     /**
      * Check if this category is a root category (no parent).
      */
@@ -104,11 +110,25 @@ class Category extends Model
     {
         if ($value === null || $value === '') {
             $this->attributes['itbm_percent'] = null;
+
             return;
         }
 
         $this->attributes['itbm_percent'] = is_numeric($value)
             ? (int) round((float) $value)
             : $value;
+    }
+
+    public function getImageUrlAttribute(?string $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (Str::startsWith($value, ['http://', 'https://'])) {
+            return $value;
+        }
+
+        return asset('storage/'.ltrim($value, '/'));
     }
 }

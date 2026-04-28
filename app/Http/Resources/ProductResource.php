@@ -150,6 +150,18 @@ class ProductResource extends JsonResource
             return $firstMedia->file_path ? url('storage/'.$firstMedia->file_path) : null;
         }
 
+        // 3. Inherited category image by reference for product cards/search results
+        if ($this->relationLoaded('category') && $this->category?->image_url) {
+            return $this->category->image_url;
+        }
+
+        if ($this->relationLoaded('extraCategories')) {
+            $extraCategoryImage = $this->extraCategories
+                ->first(fn ($category) => filled($category->image_url));
+
+            return $extraCategoryImage?->image_url;
+        }
+
         return null;
     }
 }
