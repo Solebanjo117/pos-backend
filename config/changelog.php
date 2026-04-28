@@ -3,6 +3,42 @@
 return [
     'releases' => [
         [
+            'version' => '34.8.0',
+            'date' => '2026-04-28',
+            'title' => 'Cierre de abril - Catalogo, ventas y navegacion',
+            'category' => 'operations',
+            'changes' => [
+                'Se agrego soporte para imagenes de categorias y herencia visual en productos.',
+                'Se reforzo el flujo de productos con estados, archivado, restauracion y atributos heredados.',
+                'Se ajustaron ordenes y cotizaciones para preservar advertencias de stock y mejorar el contrato de respuesta.',
+                'Se agrego un flyout de submenu para usar el sidebar compactado sin perder acceso a las opciones internas.',
+            ],
+        ],
+        [
+            'version' => '34.7.0',
+            'date' => '2026-04-26',
+            'title' => 'Importadores mas claros',
+            'category' => 'imports',
+            'changes' => [
+                'Se simplificaron plantillas de importacion para productos, categorias, marcas, proveedores y vehiculos.',
+                'Se agregaron requests dedicados para preview y ejecucion de importaciones.',
+                'Se mejoro la validacion compartida del importador base para detectar errores antes de confirmar.',
+                'Se ajusto la experiencia del importador universal para mostrar mensajes mas utiles al usuario.',
+            ],
+        ],
+        [
+            'version' => '34.6.0',
+            'date' => '2026-04-25',
+            'title' => 'Productos con metadata diferida y categorias extra',
+            'category' => 'catalog',
+            'changes' => [
+                'Se agrego soporte para categorias extra en productos sin reemplazar la categoria principal.',
+                'Se incorporo guardado diferido de atributos, referencias OEM, alternativas y compatibilidad vehicular.',
+                'Se habilito regeneracion de nombre y descripcion de producto en modo borrador.',
+                'Se reforzaron pruebas de persistencia, duplicado e importacion de productos.',
+            ],
+        ],
+        [
             'version' => '34.5.0',
             'date' => '2026-04-10',
             'title' => 'Sprint 5 - Inventario y compras',
