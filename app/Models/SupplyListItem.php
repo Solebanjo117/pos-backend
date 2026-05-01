@@ -11,6 +11,8 @@ class SupplyListItem extends Model
         'product_id',
         'variant_id',
         'supplier_id',
+        'warehouse_id',
+        'supply_date',
         'added_by',
         'quantity_needed',
         'stock_added_qty',
@@ -22,10 +24,12 @@ class SupplyListItem extends Model
 
     protected $casts = [
         'quantity_needed' => 'decimal:2',
+        'supply_date' => 'date',
+        'warehouse_id' => 'integer',
         'stock_added_qty' => 'integer',
-        'unit_cost'       => 'decimal:2',
-        'tax_rate'        => 'integer',
-        'sale_price'      => 'decimal:2',
+        'unit_cost' => 'decimal:2',
+        'tax_rate' => 'integer',
+        'sale_price' => 'decimal:2',
     ];
 
     protected $appends = ['subtotal', 'tax_amount', 'total'];
@@ -45,6 +49,11 @@ class SupplyListItem extends Model
     public function supplier(): BelongsTo
     {
         return $this->belongsTo(Supplier::class);
+    }
+
+    public function warehouse(): BelongsTo
+    {
+        return $this->belongsTo(Warehouse::class);
     }
 
     public function addedBy(): BelongsTo
@@ -73,6 +82,7 @@ class SupplyListItem extends Model
     {
         if ($value === null || $value === '') {
             $this->attributes['tax_rate'] = null;
+
             return;
         }
 

@@ -5,8 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\PurchaseOrder;
 use App\Services\PurchaseOrderService;
-use Illuminate\Http\Request;
+use App\Services\SmartReorderService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class PurchaseOrderController extends Controller
 {
@@ -46,6 +47,26 @@ class PurchaseOrderController extends Controller
     }
 
     /**
+     * GET /api/v1/purchase-orders/supplier-candidates
+     * Candidate items for provider-based purchase order list mode.
+     */
+    public function supplierCandidates(Request $request, SmartReorderService $smartReorderService): JsonResponse
+    {
+        $validated = $request->validate([
+            'supplier_id' => 'required|exists:suppliers,id',
+            'warehouse_id' => 'required|exists:warehouses,id',
+            'source' => 'required|in:low_stock,daily',
+            'supply_date' => 'nullable|date',
+        ]);
+
+        $items = $this->purchaseOrderService->getSupplierCandidates($validated, $smartReorderService);
+
+        return response()->json([
+            'data' => $items,
+        ]);
+    }
+
+    /**
      * POST /api/v1/purchase-orders
      * Create new purchase order
      */
@@ -53,6 +74,7 @@ class PurchaseOrderController extends Controller
     {
         $validated = $request->validate([
             'supplier_id' => 'required|exists:suppliers,id',
+            'supplier_invoice_number' => 'nullable|string|max:100',
             'warehouse_id' => 'required|exists:warehouses,id',
             'order_date' => 'nullable|date',
             'expected_date' => 'nullable|date|after_or_equal:order_date',
@@ -60,11 +82,14 @@ class PurchaseOrderController extends Controller
             'shipping_cost' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string',
             'items' => 'required|array|min:1',
-            'items.*.variant_id'        => 'required|exists:product_variants,id',
-            'items.*.quantity_ordered'   => 'required|integer|min:1',
-            'items.*.units_per_package'  => 'nullable|integer|min:1',
-            'items.*.unit_cost'          => 'required|numeric|min:0',
-            'items.*.notes'              => 'nullable|string',
+            'items.*.product_id' => 'required_with:items|exists:products,id',
+            'items.*.variant_id' => 'nullable|exists:product_variants,id',
+            'items.*.quantity_ordered' => 'required|integer|min:1',
+            'items.*.units_per_package' => 'nullable|integer|min:1',
+            'items.*.unit_cost' => 'required|numeric|min:0',
+            'items.*.notes' => 'nullable|string',
+            'source_supply_list_item_ids' => 'nullable|array',
+            'source_supply_list_item_ids.*' => 'integer|exists:supply_list_items,id',
         ]);
 
         try {
@@ -89,6 +114,7 @@ class PurchaseOrderController extends Controller
     {
         $validated = $request->validate([
             'supplier_id' => 'sometimes|exists:suppliers,id',
+            'supplier_invoice_number' => 'nullable|string|max:100',
             'warehouse_id' => 'sometimes|exists:warehouses,id',
             'order_date' => 'nullable|date',
             'expected_date' => 'nullable|date',
@@ -96,11 +122,11 @@ class PurchaseOrderController extends Controller
             'shipping_cost' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string',
             'items' => 'sometimes|array|min:1',
-            'items.*.product_id'         => 'required_with:items|exists:products,id',
-            'items.*.quantity_ordered'    => 'required_with:items|integer|min:1',
-            'items.*.units_per_package'   => 'nullable|integer|min:1',
-            'items.*.unit_cost'           => 'required_with:items|numeric|min:0',
-            'items.*.notes'               => 'nullable|string',
+            'items.*.product_id' => 'required_with:items|exists:products,id',
+            'items.*.quantity_ordered' => 'required_with:items|integer|min:1',
+            'items.*.units_per_package' => 'nullable|integer|min:1',
+            'items.*.unit_cost' => 'required_with:items|numeric|min:0',
+            'items.*.notes' => 'nullable|string',
         ]);
 
         try {
@@ -129,6 +155,26 @@ class PurchaseOrderController extends Controller
             return response()->json([
                 'message' => 'Orden de compra eliminada exitosamente',
             ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * POST /api/v1/purchase-orders/{id}/duplicate
+     * Create a new draft purchase order from an existing order.
+     */
+    public function duplicate(int $id): JsonResponse
+    {
+        try {
+            $order = $this->purchaseOrderService->duplicate($id);
+
+            return response()->json([
+                'message' => 'Orden de compra duplicada exitosamente',
+                'data' => $order,
+            ], 201);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => $e->getMessage(),
@@ -260,7 +306,7 @@ class PurchaseOrderController extends Controller
 
         // Ensure each item has a supplier (from item or default)
         foreach ($validated['items'] as &$item) {
-            if (empty($item['supplier_id']) && !empty($validated['supplier_id'])) {
+            if (empty($item['supplier_id']) && ! empty($validated['supplier_id'])) {
                 $item['supplier_id'] = $validated['supplier_id'];
             }
         }
@@ -307,7 +353,7 @@ class PurchaseOrderController extends Controller
             );
 
             return response()->json([
-                'message' => 'Recepción procesada - ' . count($validated['items']) . ' item(s) agregados al stock',
+                'message' => 'Recepción procesada - '.count($validated['items']).' item(s) agregados al stock',
                 'data' => $order,
                 'items_added' => count($validated['items']),
             ], 201);
@@ -351,7 +397,7 @@ class PurchaseOrderController extends Controller
             ?? $request->user()?->current_warehouse_id;
 
         $orders = PurchaseOrder::with(['supplier', 'items.product'])
-            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
             ->whereIn('status', ['sent', 'partial'])
             ->orderByRaw('expected_date is null, expected_date asc')
             ->orderBy('created_at', 'asc')
@@ -382,24 +428,24 @@ class PurchaseOrderController extends Controller
     public function exportPdf(Request $request, int $id)
     {
         $mode = $request->query('mode', 'standard'); // 'standard' or 'worksheet'
-        
+
         try {
             $order = $this->purchaseOrderService->getById($id);
-            
+
             $pdfService = app(\App\Services\PdfExportService::class);
             $pdf = $pdfService->exportPurchaseOrder($order, $mode);
-            
-            $filename = $mode === 'worksheet' 
+
+            $filename = $mode === 'worksheet'
                 ? "hoja-pedido-{$order->po_number}.pdf"
                 : "orden-compra-{$order->po_number}.pdf";
-            
+
             return response($pdf, 200, [
                 'Content-Type' => 'application/pdf',
                 'Content-Disposition' => "inline; filename=\"{$filename}\"",
             ]);
         } catch (\Exception $e) {
             return response()->json([
-                'message' => 'Error generando PDF: ' . $e->getMessage(),
+                'message' => 'Error generando PDF: '.$e->getMessage(),
             ], 500);
         }
     }

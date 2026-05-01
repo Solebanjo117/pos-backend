@@ -2,15 +2,16 @@
 
 namespace App\Services;
 
-use App\Models\PurchaseOrder;
-use App\Models\PurchaseOrderItem;
-use App\Models\ProductInventory;
 use App\Models\InventoryMovement;
 use App\Models\ProductBatch;
-use App\Services\PricingFormulaService;
+use App\Models\ProductInventory;
+use App\Models\ProductVariant;
+use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
+use App\Models\SupplyListItem;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Pagination\LengthAwarePaginator;
 
 class PurchaseOrderService
 {
@@ -23,41 +24,42 @@ class PurchaseOrderService
             ->withCount('items')
             ->withSum('payments', 'amount'); // avoid N+1 for amount_paid
 
-        if (!empty($filters['search'])) {
+        if (! empty($filters['search'])) {
             $search = $filters['search'];
             $query->where(function ($q) use ($search) {
                 $q->where('po_number', 'ilike', "%{$search}%")
-                  ->orWhereHas('supplier', function ($sq) use ($search) {
-                      $sq->where('name', 'ilike', "%{$search}%");
-                  });
+                    ->orWhere('supplier_invoice_number', 'ilike', "%{$search}%")
+                    ->orWhereHas('supplier', function ($sq) use ($search) {
+                        $sq->where('name', 'ilike', "%{$search}%");
+                    });
             });
         }
 
-        if (!empty($filters['status'])) {
+        if (! empty($filters['status'])) {
             $query->byStatus($filters['status']);
         }
 
-        if (!empty($filters['supplier_id'])) {
+        if (! empty($filters['supplier_id'])) {
             $supplierId = $filters['supplier_id'];
             // Search by supplier in header OR in items (for daily global POs)
             $query->where(function ($q) use ($supplierId) {
                 $q->where('supplier_id', $supplierId)
-                  ->orWhereHas('items', function ($iq) use ($supplierId) {
-                      $iq->where('supplier_id', $supplierId);
-                  });
+                    ->orWhereHas('items', function ($iq) use ($supplierId) {
+                        $iq->where('supplier_id', $supplierId);
+                    });
             });
         }
 
-        if (!empty($filters['date_from']) && !empty($filters['date_to'])) {
+        if (! empty($filters['date_from']) && ! empty($filters['date_to'])) {
             $query->byDateRange($filters['date_from'], $filters['date_to']);
-        } elseif (!empty($filters['date_from'])) {
+        } elseif (! empty($filters['date_from'])) {
             $query->where('order_date', '>=', $filters['date_from']);
-        } elseif (!empty($filters['date_to'])) {
+        } elseif (! empty($filters['date_to'])) {
             $query->where('order_date', '<=', $filters['date_to']);
         }
 
         // Filter by payment status
-        if (!empty($filters['payment_status'])) {
+        if (! empty($filters['payment_status'])) {
             $query->where('payment_status', $filters['payment_status']);
         }
 
@@ -79,8 +81,8 @@ class PurchaseOrderService
             'user:id,name',
             'items.supplier:id,name', // Item-level supplier for daily POs
             'items.product:id,sku_base,name',
-            'items.product.defaultVariant.brand:id,name', // Fallback for products
-            'items.variant.brand:id,name', // Primary source
+            'items.variant:id,product_id,brand_id,sku',
+            'items.variant.brand:id,name',
             'items.product.pricing:id,product_id,cost,base_price',
         ])->findOrFail($id);
     }
@@ -93,6 +95,7 @@ class PurchaseOrderService
         return DB::transaction(function () use ($data) {
             $po = PurchaseOrder::create([
                 'supplier_id' => $data['supplier_id'],
+                'supplier_invoice_number' => $data['supplier_invoice_number'] ?? null,
                 'warehouse_id' => $data['warehouse_id'],
                 'user_id' => Auth::id(),
                 'status' => 'draft',
@@ -104,34 +107,159 @@ class PurchaseOrderService
             ]);
 
             // Add items
-            if (!empty($data['items'])) {
+            if (! empty($data['items'])) {
                 foreach ($data['items'] as $itemData) {
                     // Support both variant_id-based and legacy product_id-based items
                     $variantId = $itemData['variant_id'] ?? null;
                     $productId = $itemData['product_id'] ?? null;
-                    
+
                     // If variant_id is provided, get product_id from variant
                     if ($variantId) {
-                        $variant = \App\Models\ProductVariant::find($variantId);
+                        $variant = ProductVariant::find($variantId);
                         if ($variant) {
                             $productId = $variant->product_id;
                         }
                     }
-                    
+
                     $po->items()->create([
                         'product_id' => $productId,
                         'variant_id' => $variantId,
                         'quantity_ordered' => $itemData['quantity_ordered'],
+                        'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
                         'notes' => $itemData['notes'] ?? null,
                     ]);
                 }
             }
 
+            $this->consumeSourceSupplyListItems($data);
+
             $po->calculateTotals();
 
             return $po->fresh(['supplier', 'warehouse', 'items.product']);
         });
+    }
+
+    public function getSupplierCandidates(array $data, SmartReorderService $smartReorderService): array
+    {
+        if ($data['source'] === 'low_stock') {
+            return $this->getLowStockCandidates($data, $smartReorderService);
+        }
+
+        return $this->getDailySupplyListCandidates($data);
+    }
+
+    private function getLowStockCandidates(array $data, SmartReorderService $smartReorderService): array
+    {
+        $supplierGroups = $smartReorderService->getLowStockProducts((int) $data['warehouse_id']);
+        $supplierId = (int) $data['supplier_id'];
+
+        foreach ($supplierGroups as $group) {
+            if ((int) ($group['supplier']['id'] ?? 0) !== $supplierId) {
+                continue;
+            }
+
+            return collect($group['items'])
+                ->map(fn (array $item): array => [
+                    'id' => 'low_stock_'.$item['inventory_id'],
+                    'source' => 'low_stock',
+                    'source_supply_list_item_id' => null,
+                    'product_id' => $item['product_id'],
+                    'variant_id' => $item['variant_id'] ?? null,
+                    'product_name' => $item['product']['name'] ?? 'Producto',
+                    'sku' => $item['product']['sku'] ?? null,
+                    'current_stock' => $item['current_stock'] ?? null,
+                    'suggested_quantity' => max(1, (int) ($item['suggested_quantity'] ?? 1)),
+                    'unit_cost' => (float) ($item['unit_cost'] ?? 0),
+                    'notes' => 'Stock bajo: actual '.($item['current_stock'] ?? 0).' / minimo '.($item['reorder_point'] ?? 0),
+                ])
+                ->values()
+                ->all();
+        }
+
+        return [];
+    }
+
+    private function getDailySupplyListCandidates(array $data): array
+    {
+        $supplyDate = $data['supply_date'] ?? now()->toDateString();
+
+        return SupplyListItem::with([
+            'product:id,name,sku_base',
+            'variant:id,sku,brand_id',
+            'variant.brand:id,name',
+        ])
+            ->where('supplier_id', $data['supplier_id'])
+            ->where('warehouse_id', $data['warehouse_id'])
+            ->whereDate('supply_date', $supplyDate)
+            ->orderBy('created_at')
+            ->get()
+            ->map(fn (SupplyListItem $item): array => [
+                'id' => 'daily_'.$item->id,
+                'source' => 'daily',
+                'source_supply_list_item_id' => $item->id,
+                'product_id' => $item->product_id,
+                'variant_id' => $item->variant_id,
+                'product_name' => $item->product?->name ?? 'Producto',
+                'sku' => $item->variant?->sku ?? $item->product?->sku_base,
+                'current_stock' => $item->stock_added_qty,
+                'suggested_quantity' => max(1, (int) ceil((float) $item->quantity_needed)),
+                'unit_cost' => (float) ($item->unit_cost ?? 0),
+                'notes' => $item->notes ?: 'Desde OC diaria',
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function consumeSourceSupplyListItems(array $data): void
+    {
+        $sourceItemIds = collect($data['source_supply_list_item_ids'] ?? [])
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($sourceItemIds->isEmpty()) {
+            return;
+        }
+
+        $sourceItems = SupplyListItem::query()
+            ->whereIn('id', $sourceItemIds)
+            ->lockForUpdate()
+            ->get();
+
+        if ($sourceItems->count() !== $sourceItemIds->count()) {
+            throw new \Exception('Algunos items de OC diaria ya no estan disponibles.');
+        }
+
+        $hasInvalidScope = $sourceItems->contains(function (SupplyListItem $item) use ($data): bool {
+            return (int) $item->supplier_id !== (int) $data['supplier_id']
+                || (int) $item->warehouse_id !== (int) $data['warehouse_id'];
+        });
+
+        if ($hasInvalidScope) {
+            throw new \Exception('Solo se pueden consumir items de OC diaria del mismo proveedor y almacen.');
+        }
+
+        $orderItemKeys = collect($data['items'] ?? [])
+            ->map(function (array $item): string {
+                return ($item['variant_id'] ?? 'nv').'|'.$item['product_id'];
+            })
+            ->unique();
+
+        $hasMissingOrderItem = $sourceItems->contains(function (SupplyListItem $item) use ($orderItemKeys): bool {
+            $key = ($item->variant_id ?? 'nv').'|'.$item->product_id;
+
+            return ! $orderItemKeys->contains($key);
+        });
+
+        if ($hasMissingOrderItem) {
+            throw new \Exception('Los items de OC diaria deben estar incluidos en la orden antes de consumirlos.');
+        }
+
+        SupplyListItem::query()
+            ->whereIn('id', $sourceItemIds)
+            ->delete();
     }
 
     /**
@@ -142,33 +270,34 @@ class PurchaseOrderService
         return DB::transaction(function () use ($id, $data) {
             $po = PurchaseOrder::findOrFail($id);
 
-            if (!$po->canBeEdited()) {
+            if (! $po->canBeEdited()) {
                 throw new \Exception('Solo se pueden editar órdenes en borrador');
             }
 
             $po->update(array_filter([
                 'supplier_id' => $data['supplier_id'] ?? null,
+                'supplier_invoice_number' => $data['supplier_invoice_number'] ?? null,
                 'warehouse_id' => $data['warehouse_id'] ?? null,
                 'order_date' => $data['order_date'] ?? null,
                 'expected_date' => $data['expected_date'] ?? null,
                 'tax_amount' => $data['tax_amount'] ?? null,
                 'shipping_cost' => $data['shipping_cost'] ?? null,
                 'notes' => $data['notes'] ?? null,
-            ], fn($v) => $v !== null));
+            ], fn ($v) => $v !== null));
 
             // Replace items if provided
             if (isset($data['items'])) {
                 $existingItems = $po->items()
                     ->get(['product_id', 'variant_id', 'pre_stock_applied_qty'])
                     ->keyBy(function ($item) {
-                        return ($item->variant_id ?? 'nv') . '|' . $item->product_id;
+                        return ($item->variant_id ?? 'nv').'|'.$item->product_id;
                     });
 
                 $po->items()->delete();
                 foreach ($data['items'] as $itemData) {
                     $variantId = $itemData['variant_id'] ?? null;
                     $productId = $itemData['product_id'];
-                    $itemKey = ($variantId ?? 'nv') . '|' . $productId;
+                    $itemKey = ($variantId ?? 'nv').'|'.$productId;
                     $existingPreApplied = (int) ($existingItems[$itemKey]->pre_stock_applied_qty ?? 0);
                     $orderedQty = (int) ($itemData['quantity_ordered'] ?? 0);
 
@@ -177,6 +306,7 @@ class PurchaseOrderService
                         'variant_id' => $variantId,
                         'quantity_ordered' => $orderedQty,
                         'pre_stock_applied_qty' => min($existingPreApplied, max(0, $orderedQty)),
+                        'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
                         'notes' => $itemData['notes'] ?? null,
                     ]);
@@ -196,12 +326,55 @@ class PurchaseOrderService
     {
         $po = PurchaseOrder::findOrFail($id);
 
-        if (!$po->canBeEdited()) {
+        if (! $po->canBeEdited()) {
             throw new \Exception('Solo se pueden eliminar órdenes en borrador');
         }
 
         $po->items()->delete();
         $po->delete();
+    }
+
+    /**
+     * Duplicate a purchase order into a new editable draft.
+     */
+    public function duplicate(int $id): PurchaseOrder
+    {
+        return DB::transaction(function () use ($id) {
+            $source = PurchaseOrder::with('items')->findOrFail($id);
+
+            if ($source->supplier_id === null) {
+                throw new \Exception('La OC diaria no se duplica desde este flujo.');
+            }
+
+            $po = PurchaseOrder::create([
+                'supplier_id' => $source->supplier_id,
+                'supplier_invoice_number' => null,
+                'warehouse_id' => $source->warehouse_id,
+                'user_id' => Auth::id(),
+                'status' => 'draft',
+                'order_date' => now()->toDateString(),
+                'expected_date' => null,
+                'tax_amount' => 0,
+                'shipping_cost' => 0,
+                'notes' => $source->notes ? 'Duplicada de '.$source->po_number.': '.$source->notes : 'Duplicada de '.$source->po_number,
+            ]);
+
+            foreach ($source->items as $item) {
+                $po->items()->create([
+                    'supplier_id' => $item->supplier_id,
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'quantity_ordered' => $item->quantity_ordered,
+                    'units_per_package' => $item->units_per_package ?? 1,
+                    'unit_cost' => $item->unit_cost,
+                    'notes' => $item->notes,
+                ]);
+            }
+
+            $po->calculateTotals();
+
+            return $po->fresh(['supplier', 'warehouse', 'items.product', 'items.variant']);
+        });
     }
 
     /**
@@ -211,7 +384,7 @@ class PurchaseOrderService
     {
         $po = PurchaseOrder::findOrFail($id);
 
-        if (!$po->canBeSent()) {
+        if (! $po->canBeSent()) {
             throw new \Exception('Esta orden no puede ser enviada (debe estar en borrador y tener items)');
         }
 
@@ -230,12 +403,16 @@ class PurchaseOrderService
         return DB::transaction(function () use ($id, $receivedItems) {
             $po = PurchaseOrder::with('items.product', 'items.variant')->findOrFail($id);
 
-            if (!$po->canReceiveItems()) {
+            if (! $po->canReceiveItems()) {
                 throw new \Exception('Esta orden no puede recibir mercancía');
             }
 
             foreach ($receivedItems as $received) {
                 $item = PurchaseOrderItem::findOrFail($received['item_id']);
+
+                if ((int) $item->purchase_order_id !== (int) $po->id) {
+                    throw new \Exception('El artículo recibido no pertenece a esta orden de compra');
+                }
 
                 // Validate not receiving more than ordered
                 $preAppliedQty = max(0, (int) ($item->pre_stock_applied_qty ?? 0));
@@ -251,7 +428,7 @@ class PurchaseOrderService
                 $item->save();
 
                 // Determine if using variant or product (backwards compatibility)
-                $useVariant = !empty($item->variant_id);
+                $useVariant = ! empty($item->variant_id);
                 $productId = $item->product_id;
                 $variantId = $item->variant_id;
 
@@ -292,7 +469,7 @@ class PurchaseOrderService
                             'quantity_available' => 0,
                             'quantity_reserved' => 0,
                             'reorder_point' => 10,
-                            'reorder_quantity' => 50
+                            'reorder_quantity' => 50,
                         ]
                     );
                 } else {
@@ -310,7 +487,7 @@ class PurchaseOrderService
                 $inventory->save();
 
                 // Handle batch tracking if enabled
-                if ($item->product && $item->product->batch_tracking && !empty($received['batch_number'])) {
+                if ($item->product && $item->product->batch_tracking && ! empty($received['batch_number'])) {
                     $batchData = [
                         'product_id' => $productId,
                         'batch_number' => $received['batch_number'],
@@ -364,7 +541,7 @@ class PurchaseOrderService
             }
 
             // Update PO status based on reception
-            $po->refresh();
+            $po->refresh()->load('items');
             if ($po->isFullyReceived()) {
                 $po->status = 'received';
                 $po->received_date = now();
@@ -420,7 +597,7 @@ class PurchaseOrderService
         return DB::transaction(function () use ($id) {
             $po = PurchaseOrder::with('items')->findOrFail($id);
 
-            if (!$po->canBeCancelled()) {
+            if (! $po->canBeCancelled()) {
                 throw new \Exception('Esta orden no puede ser cancelada');
             }
 
@@ -428,7 +605,7 @@ class PurchaseOrderService
             if ($po->status === 'partial') {
                 foreach ($po->items as $item) {
                     if ($item->quantity_received > 0) {
-                        $useVariant = !empty($item->variant_id);
+                        $useVariant = ! empty($item->variant_id);
                         $productId = $item->product_id;
                         $variantId = $item->variant_id;
 
@@ -491,30 +668,30 @@ class PurchaseOrderService
     {
         $query = PurchaseOrder::query();
 
-        if (!empty($filters['date_from'])) {
+        if (! empty($filters['date_from'])) {
             $query->where('order_date', '>=', $filters['date_from']);
         }
-        if (!empty($filters['date_to'])) {
+        if (! empty($filters['date_to'])) {
             $query->where('order_date', '<=', $filters['date_to']);
         }
 
         $allOrders = (clone $query)->withSum('payments', 'amount')->get();
 
         return [
-            'total_orders'           => $allOrders->count(),
-            'total_spent'            => $allOrders->where('status', '!=', 'cancelled')->sum('total'),
-            'draft_orders'           => $allOrders->where('status', 'draft')->count(),
-            'sent_orders'            => $allOrders->where('status', 'sent')->count(),
-            'partial_orders'         => $allOrders->where('status', 'partial')->count(),
-            'received_orders'        => $allOrders->where('status', 'received')->count(),
-            'cancelled_orders'       => $allOrders->where('status', 'cancelled')->count(),
-            'average_order_value'    => $allOrders->where('status', '!=', 'cancelled')->avg('total') ?? 0,
-            'total_unpaid'           => $allOrders->where('payment_status', '!=', 'paid')
-                                           ->where('status', '!=', 'cancelled')
-                                           ->sum(fn($o) => max(0, (float)$o->total - (float)($o->payments_sum_amount ?? 0))),
+            'total_orders' => $allOrders->count(),
+            'total_spent' => $allOrders->where('status', '!=', 'cancelled')->sum('total'),
+            'draft_orders' => $allOrders->where('status', 'draft')->count(),
+            'sent_orders' => $allOrders->where('status', 'sent')->count(),
+            'partial_orders' => $allOrders->where('status', 'partial')->count(),
+            'received_orders' => $allOrders->where('status', 'received')->count(),
+            'cancelled_orders' => $allOrders->where('status', 'cancelled')->count(),
+            'average_order_value' => $allOrders->where('status', '!=', 'cancelled')->avg('total') ?? 0,
+            'total_unpaid' => $allOrders->where('payment_status', '!=', 'paid')
+                ->where('status', '!=', 'cancelled')
+                ->sum(fn ($o) => max(0, (float) $o->total - (float) ($o->payments_sum_amount ?? 0))),
             'pending_payment_orders' => $allOrders->where('payment_status', '!=', 'paid')
-                                           ->where('status', '!=', 'cancelled')
-                                           ->count(),
+                ->where('status', '!=', 'cancelled')
+                ->count(),
         ];
     }
 
@@ -561,18 +738,18 @@ class PurchaseOrderService
     /**
      * Add an item to the daily PO with immediate stock reception.
      * This is the core method for Quick Purchase from POS.
-     * 
-     * @param array $data [
-     *   'warehouse_id' => int,
-     *   'supplier_id' => int,
-     *   'variant_id' => int (optional),
-     *   'product_id' => int (optional, required if no variant_id),
-     *   'quantity' => int,
-     *   'unit_cost' => float,
-     *   'sale_price' => float (optional),
-     *   'batch_number' => string (optional),
-     *   'expiry_date' => string (optional),
-     * ]
+     *
+     * @param  array  $data  [
+     *                       'warehouse_id' => int,
+     *                       'supplier_id' => int,
+     *                       'variant_id' => int (optional),
+     *                       'product_id' => int (optional, required if no variant_id),
+     *                       'quantity' => int,
+     *                       'unit_cost' => float,
+     *                       'sale_price' => float (optional),
+     *                       'batch_number' => string (optional),
+     *                       'expiry_date' => string (optional),
+     *                       ]
      */
     public function addItemToDailyPO(array $data): PurchaseOrderItem
     {
@@ -585,7 +762,7 @@ class PurchaseOrderService
             $unitCost = $data['unit_cost'];
 
             // Get product_id from variant if needed
-            if ($variantId && !$productId) {
+            if ($variantId && ! $productId) {
                 $variant = \App\Models\ProductVariant::find($variantId);
                 if ($variant) {
                     $productId = $variant->product_id;
@@ -608,7 +785,7 @@ class PurchaseOrderService
             ]);
 
             // Create inventory movement (entry)
-            $useVariant = !empty($variantId);
+            $useVariant = ! empty($variantId);
             $movementData = [
                 'warehouse_id' => $warehouseId,
                 'movement_type' => 'in',
@@ -646,7 +823,7 @@ class PurchaseOrderService
 
             // Handle batch tracking if applicable
             $product = \App\Models\Product::find($productId);
-            if ($product?->batch_tracking && !empty($data['batch_number'])) {
+            if ($product?->batch_tracking && ! empty($data['batch_number'])) {
                 $batchData = [
                     'product_id' => $productId,
                     'batch_number' => $data['batch_number'],
@@ -661,7 +838,7 @@ class PurchaseOrderService
             }
 
             // Update sale price if provided
-            if (!empty($data['sale_price'])) {
+            if (! empty($data['sale_price'])) {
                 $this->updateItemSalePrice($item, (float) $data['sale_price']);
             }
 
@@ -674,9 +851,8 @@ class PurchaseOrderService
 
     /**
      * Batch add items to daily PO (for POS Reception Mode).
-     * 
-     * @param int $warehouseId
-     * @param array $items Array of item data (same format as addItemToDailyPO)
+     *
+     * @param  array  $items  Array of item data (same format as addItemToDailyPO)
      * @return PurchaseOrder The daily PO with all added items
      */
     public function batchAddItemsToDailyPO(int $warehouseId, array $items): PurchaseOrder
@@ -688,6 +864,7 @@ class PurchaseOrderService
             }
 
             $dailyPO = $this->getOrCreateDailyPurchaseOrder($warehouseId);
+
             return $dailyPO->fresh(['items.product', 'items.variant', 'items.supplier']);
         });
     }
@@ -726,8 +903,8 @@ class PurchaseOrderService
      */
     private function updateItemSalePrice(PurchaseOrderItem $item, float $salePrice): void
     {
-        $useVariant = !empty($item->variant_id);
-        
+        $useVariant = ! empty($item->variant_id);
+
         if ($useVariant && $item->variant) {
             $pricing = $item->variant->pricing;
             if ($pricing && (float) $pricing->base_price !== $salePrice) {

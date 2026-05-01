@@ -24,11 +24,13 @@ Route::prefix('purchase-orders')->middleware(['role:admin,manager,buyer', 'wareh
 
     // CRUD
     Route::get('/', [PurchaseOrderController::class, 'index']);
+    Route::get('/supplier-candidates', [PurchaseOrderController::class, 'supplierCandidates']);
     Route::post('/', [PurchaseOrderController::class, 'store']);
     Route::post('/quick-receive', [PurchaseOrderController::class, 'quickReceive']); // Legacy
     Route::get('/{id}', [PurchaseOrderController::class, 'show']);
     Route::put('/{id}', [PurchaseOrderController::class, 'update']);
     Route::delete('/{id}', [PurchaseOrderController::class, 'destroy']);
+    Route::post('/{id}/duplicate', [PurchaseOrderController::class, 'duplicate']);
 
     // Export
     Route::get('/{id}/pdf', [PurchaseOrderController::class, 'exportPdf']);

@@ -14,6 +14,7 @@ class PurchaseOrder extends Model
 
     protected $fillable = [
         'po_number',
+        'supplier_invoice_number',
         'supplier_id',
         'warehouse_id',
         'user_id',
@@ -99,19 +100,19 @@ class PurchaseOrder extends Model
 
     public function getFormattedTotalAttribute(): string
     {
-        return '$' . number_format($this->total, 2);
+        return '$'.number_format($this->total, 2);
     }
 
     public function getStatusLabelAttribute(): string
     {
-        return match($this->status) {
-            'draft'    => 'Borrador',
-            'open'     => 'Abierta',
-            'sent'     => 'Enviado',
-            'partial'  => 'Parcialmente Recibido',
+        return match ($this->status) {
+            'draft' => 'Borrador',
+            'open' => 'Abierta',
+            'sent' => 'Enviado',
+            'partial' => 'Parcialmente Recibido',
             'received' => 'Recibido',
-            'cancelled'=> 'Cancelado',
-            default    => $this->status,
+            'cancelled' => 'Cancelado',
+            default => $this->status,
         };
     }
 
@@ -127,10 +128,10 @@ class PurchaseOrder extends Model
 
     public function getPaymentStatusLabelAttribute(): string
     {
-        return match($this->payment_status ?? 'pending') {
-            'paid'    => 'Pagado',
+        return match ($this->payment_status ?? 'pending') {
+            'paid' => 'Pagado',
             'partial' => 'Pago Parcial',
-            default   => 'Pendiente',
+            default => 'Pendiente',
         };
     }
 
@@ -142,7 +143,7 @@ class PurchaseOrder extends Model
     public static function generatePoNumber(): string
     {
         $date = now()->format('Ymd');
-        
+
         // Get the maximum sequence for today, INCLUDING soft-deleted records
         // to avoid UNIQUE constraint violations
         $lastPo = self::withTrashed()
@@ -152,7 +153,7 @@ class PurchaseOrder extends Model
 
         $sequence = $lastPo ? (int) substr($lastPo->po_number, -4) + 1 : 1;
 
-        return 'PO-' . $date . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
+        return 'PO-'.$date.'-'.str_pad($sequence, 4, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -186,7 +187,7 @@ class PurchaseOrder extends Model
      */
     public function canReceiveItems(): bool
     {
-        return in_array($this->status, ['sent', 'partial', 'open']);
+        return in_array($this->status, ['draft', 'sent', 'partial', 'open'], true) && $this->items()->count() > 0;
     }
 
     /**
@@ -194,7 +195,7 @@ class PurchaseOrder extends Model
      */
     public function canBeCancelled(): bool
     {
-        return !in_array($this->status, ['received', 'cancelled']);
+        return ! in_array($this->status, ['received', 'cancelled']);
     }
 
     /**
@@ -225,9 +226,9 @@ class PurchaseOrder extends Model
     public function getDisplayNameAttribute(): string
     {
         if ($this->isDailyGlobalPO()) {
-            return 'OC del ' . $this->order_date->format('d M Y');
+            return 'OC del '.$this->order_date->format('d M Y');
         }
-        
+
         return $this->supplier?->name ?? $this->po_number;
     }
 
@@ -237,7 +238,7 @@ class PurchaseOrder extends Model
     public function isFullyReceived(): bool
     {
         return $this->items->every(function ($item) {
-            return $item->quantity_received >= $item->quantity_ordered;
+            return $item->is_fully_received;
         });
     }
 
@@ -247,12 +248,12 @@ class PurchaseOrder extends Model
     public function addPayment(float $amount, string $method = 'cash', ?string $referenceNumber = null, ?string $notes = null): PurchaseOrderPayment
     {
         $payment = $this->payments()->create([
-            'amount'           => $amount,
-            'method'           => $method,
+            'amount' => $amount,
+            'method' => $method,
             'reference_number' => $referenceNumber,
-            'notes'            => $notes,
-            'paid_at'          => now(),
-            'user_id'          => auth()->id(),
+            'notes' => $notes,
+            'paid_at' => now(),
+            'user_id' => auth()->id(),
         ]);
 
         $this->recalculatePaymentStatus();
@@ -292,12 +293,12 @@ class PurchaseOrder extends Model
                 $attempts = 0;
                 while ($attempts < 5) {
                     $po->po_number = self::generatePoNumber();
-                    
+
                     // Check if this number already exists (including soft-deleted)
-                    if (!self::withTrashed()->where('po_number', $po->po_number)->exists()) {
+                    if (! self::withTrashed()->where('po_number', $po->po_number)->exists()) {
                         break;
                     }
-                    
+
                     $attempts++;
                     // Small delay to let other transactions commit
                     usleep(100000); // 100ms

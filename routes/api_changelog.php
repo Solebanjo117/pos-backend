@@ -10,3 +10,8 @@ use Illuminate\Support\Facades\Route;
 */
 
 Route::get('/changelog', [ChangelogController::class, 'index']);
+
+Route::middleware(['role:admin,manager'])->group(function () {
+    Route::post('/changelog/entries', [ChangelogController::class, 'store']);
+    Route::patch('/changelog/entries/{changelogEntry}/publish', [ChangelogController::class, 'publish']);
+});

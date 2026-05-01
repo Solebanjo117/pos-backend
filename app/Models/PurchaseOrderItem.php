@@ -27,14 +27,14 @@ class PurchaseOrderItem extends Model
 
     protected $casts = [
         'purchase_order_id' => 'integer',
-        'supplier_id'       => 'integer',
-        'product_id'        => 'integer',
-        'quantity_ordered'  => 'integer',
+        'supplier_id' => 'integer',
+        'product_id' => 'integer',
+        'quantity_ordered' => 'integer',
         'units_per_package' => 'integer',
         'quantity_received' => 'integer',
         'pre_stock_applied_qty' => 'integer',
-        'unit_cost'         => 'decimal:2',
-        'subtotal'          => 'decimal:2',
+        'unit_cost' => 'decimal:2',
+        'subtotal' => 'decimal:2',
     ];
 
     protected $appends = [
@@ -136,11 +136,11 @@ class PurchaseOrderItem extends Model
 
         // Auto-calculate subtotal
         static::creating(function ($item) {
-            $item->subtotal = $item->quantity_ordered * $item->unit_cost;
+            $item->subtotal = $item->quantity_ordered * ($item->units_per_package ?? 1) * $item->unit_cost;
         });
 
         static::updating(function ($item) {
-            $item->subtotal = $item->quantity_ordered * $item->unit_cost;
+            $item->subtotal = $item->quantity_ordered * ($item->units_per_package ?? 1) * $item->unit_cost;
         });
     }
 }
