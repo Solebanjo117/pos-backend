@@ -22,6 +22,10 @@ Route::prefix('suppliers')->middleware('role:admin,manager,buyer')->group(functi
 
     // Sub-resources
     Route::get('/{id}/purchase-orders', [SupplierController::class, 'purchaseOrders']);
+    Route::get('/{id}/variants', [SupplierController::class, 'variants']);
+    Route::post('/{id}/variants', [SupplierController::class, 'attachVariant']);
+    Route::put('/{id}/variants/{variantId}', [SupplierController::class, 'updateVariant']);
+    Route::delete('/{id}/variants/{variantId}', [SupplierController::class, 'detachVariant']);
     Route::get('/{id}/brands', [SupplierController::class, 'brands']);
     Route::post('/{id}/brands', [SupplierController::class, 'attachBrand']);
     Route::delete('/{id}/brands/{brandId}', [SupplierController::class, 'detachBrand']);

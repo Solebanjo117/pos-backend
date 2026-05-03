@@ -122,6 +122,7 @@ class PurchaseOrderService
                     }
 
                     $po->items()->create([
+                        'supplier_id' => $po->supplier_id,
                         'product_id' => $productId,
                         'variant_id' => $variantId,
                         'quantity_ordered' => $itemData['quantity_ordered'],
@@ -147,6 +148,47 @@ class PurchaseOrderService
         }
 
         return $this->getDailySupplyListCandidates($data);
+    }
+
+    public function supplierMismatchWarnings(int $supplierId, array $items): array
+    {
+        $variantIds = collect($items)
+            ->pluck('variant_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($variantIds->isEmpty()) {
+            return [];
+        }
+
+        $linkedVariantIds = ProductVariant::query()
+            ->whereIn('id', $variantIds)
+            ->whereHas('suppliers', fn ($query) => $query->where('suppliers.id', $supplierId))
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id);
+
+        $missingVariantIds = $variantIds->diff($linkedVariantIds);
+
+        if ($missingVariantIds->isEmpty()) {
+            return [];
+        }
+
+        return ProductVariant::with(['product:id,name,sku_base', 'brand:id,name'])
+            ->whereIn('id', $missingVariantIds)
+            ->get()
+            ->map(fn (ProductVariant $variant) => [
+                'type' => 'supplier_variant_missing',
+                'variant_id' => $variant->id,
+                'product_id' => $variant->product_id,
+                'sku' => $variant->sku ?? $variant->product?->sku_base,
+                'product_name' => $variant->product?->name,
+                'brand_name' => $variant->brand?->name,
+                'message' => 'La variante '.$variant->display_name.' no esta vinculada a este proveedor.',
+            ])
+            ->values()
+            ->all();
     }
 
     private function getLowStockCandidates(array $data, SmartReorderService $smartReorderService): array
@@ -302,6 +344,7 @@ class PurchaseOrderService
                     $orderedQty = (int) ($itemData['quantity_ordered'] ?? 0);
 
                     $po->items()->create([
+                        'supplier_id' => $po->supplier_id,
                         'product_id' => $productId,
                         'variant_id' => $variantId,
                         'quantity_ordered' => $orderedQty,

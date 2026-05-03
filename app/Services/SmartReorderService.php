@@ -15,15 +15,18 @@ class SmartReorderService
     public function getLowStockProducts(?int $warehouseId = null)
     {
         $query = ProductInventory::with([
+            'variant.suppliers' => function ($q) {
+                $q->orderByDesc('is_preferred');
+            },
             'product.productSuppliers' => function ($q) {
                 $q->orderByDesc('is_preferred');
             },
             'product.productSuppliers.supplier',
             'product.pricing',
-            'warehouse'
+            'warehouse',
         ])
-        ->whereColumn('quantity_available', '<=', 'reorder_point')
-        ->where('quantity_available', '>=', 0); // Only positive stock for reordering
+            ->whereColumn('quantity_available', '<=', 'reorder_point')
+            ->where('quantity_available', '>=', 0); // Only positive stock for reordering
 
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
@@ -36,37 +39,49 @@ class SmartReorderService
 
         foreach ($lowStockItems as $inventoryRecord) {
             $product = $inventoryRecord->product;
-            
-            // Get preferred supplier or first available
-            $preferredSupplier = $product->productSuppliers
-                ->where('is_preferred', true)
-                ->first() ?? $product->productSuppliers->first();
+            $variant = $inventoryRecord->variant;
 
-            if (!$preferredSupplier) {
+            $variantSupplier = $variant?->suppliers?->first(fn ($supplier) => (bool) ($supplier->pivot->is_preferred ?? false))
+                ?? $variant?->suppliers?->first();
+
+            $preferredSupplier = $variantSupplier
+                ? (object) [
+                    'supplier_id' => $variantSupplier->id,
+                    'supplier' => $variantSupplier,
+                    'supplier_cost' => $variantSupplier->pivot->supplier_cost ?? 0,
+                    'lead_time_days' => $variantSupplier->pivot->lead_time_days ?? 0,
+                    'minimum_order_quantity' => $variantSupplier->pivot->minimum_order_quantity ?? 1,
+                ]
+                : ($product->productSuppliers
+                    ->where('is_preferred', true)
+                    ->first() ?? $product->productSuppliers->first());
+
+            if (! $preferredSupplier) {
                 continue; // Skip products without suppliers
             }
 
             $supplierId = $preferredSupplier->supplier_id;
 
-            if (!isset($groupedBySupplier[$supplierId])) {
+            if (! isset($groupedBySupplier[$supplierId])) {
                 $groupedBySupplier[$supplierId] = [
                     'supplier' => $preferredSupplier->supplier,
-                    'items' => []
+                    'items' => [],
                 ];
             }
 
-            $suggestedQuantity = $inventoryRecord->reorder_quantity > 0 
-                ? $inventoryRecord->reorder_quantity 
+            $suggestedQuantity = $inventoryRecord->reorder_quantity > 0
+                ? $inventoryRecord->reorder_quantity
                 : max(1, $inventoryRecord->reorder_point - $inventoryRecord->quantity_available);
 
             // Get unit cost: prefer supplier cost, fallback to product pricing cost
-            $unitCost = $preferredSupplier->supplier_cost 
-                ?? $product->pricing?->cost 
+            $unitCost = $preferredSupplier->supplier_cost
+                ?? $product->pricing?->cost
                 ?? 0;
 
             $groupedBySupplier[$supplierId]['items'][] = [
                 'inventory_id' => $inventoryRecord->id,
                 'product_id' => $product->id,
+                'variant_id' => $inventoryRecord->variant_id,
                 'product' => [
                     'id' => $product->id,
                     'sku' => $product->sku_base,
@@ -151,7 +166,7 @@ class SmartReorderService
         $total = $items->count();
         $critical = $items->where('quantity_available', 0)->count();
         $low = $items->where('quantity_available', '>', 0)->count();
-        
+
         // Count products without suppliers (skipped in smart reorder)
         $withoutSupplier = $items->filter(function ($item) {
             return $item->product->productSuppliers->isEmpty();

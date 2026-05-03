@@ -2,8 +2,10 @@
 
 namespace App\Http\Resources;
 
+use App\Models\Category;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Collection;
 
 class ProductResource extends JsonResource
 {
@@ -114,6 +116,11 @@ class ProductResource extends JsonResource
                 });
             }),
 
+            'attributes' => $this->when(
+                $this->relationLoaded('attributes'),
+                fn () => $this->serializedAttributes()
+            ),
+
             // Key attributes (top 4) for quick display in search results / grids
             'key_attributes' => (function () {
                 $attrs = collect();
@@ -131,6 +138,135 @@ class ProductResource extends JsonResource
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
         ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function serializedAttributes(): array
+    {
+        $attributes = $this->attributes->whereNull('variant_id')->values();
+
+        if ($attributes->isEmpty()) {
+            return [];
+        }
+
+        $categoriesById = $this->categoryDefinitionsById($attributes);
+
+        return $attributes->map(function ($attribute) use ($categoriesById) {
+            $definition = $this->findCategoryAttributeDefinition(
+                $categoriesById->get((int) ($attribute->source_category_id ?? 0)),
+                (string) $attribute->name
+            );
+
+            return [
+                'id' => $attribute->id,
+                'name' => $attribute->name,
+                'value' => $attribute->value,
+                'unit' => $attribute->unit,
+                'type' => $definition['type'] ?? 'string',
+                'options' => $definition['options'] ?? null,
+                'source' => $attribute->source ?? 'custom',
+                'source_category_id' => $attribute->source_category_id,
+            ];
+        })->all();
+    }
+
+    private function categoryDefinitionsById(Collection $attributes): Collection
+    {
+        $sourceCategoryIds = $attributes
+            ->where('source', 'category')
+            ->pluck('source_category_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($sourceCategoryIds->isEmpty()) {
+            return collect();
+        }
+
+        $categoriesById = collect();
+
+        if ($this->relationLoaded('category') && $this->category) {
+            $categoriesById->put((int) $this->category->id, $this->category);
+        }
+
+        if ($this->relationLoaded('extraCategories')) {
+            foreach ($this->extraCategories as $extraCategory) {
+                $categoriesById->put((int) $extraCategory->id, $extraCategory);
+            }
+        }
+
+        $missingIds = $sourceCategoryIds
+            ->reject(fn (int $categoryId) => $categoriesById->has($categoryId))
+            ->values();
+
+        if ($missingIds->isNotEmpty()) {
+            Category::query()
+                ->whereIn('id', $missingIds)
+                ->get(['id', 'default_attributes'])
+                ->each(fn (Category $category) => $categoriesById->put((int) $category->id, $category));
+        }
+
+        return $categoriesById;
+    }
+
+    /**
+     * @return array{type: string, options: array<int, string>|null}|null
+     */
+    private function findCategoryAttributeDefinition(?Category $category, string $attributeName): ?array
+    {
+        if (! $category) {
+            return null;
+        }
+
+        $targetName = mb_strtolower(trim($attributeName));
+        if ($targetName === '') {
+            return null;
+        }
+
+        foreach (($category->default_attributes ?? []) as $definition) {
+            $definitionName = mb_strtolower(trim((string) ($definition['name'] ?? '')));
+            if ($definitionName !== $targetName) {
+                continue;
+            }
+
+            $type = $definition['type'] ?? 'string';
+            if (! in_array($type, ['string', 'select'], true)) {
+                $type = 'string';
+            }
+
+            return [
+                'type' => $type,
+                'options' => $type === 'select'
+                    ? $this->normalizeDefinitionOptions($definition['options'] ?? null)
+                    : null,
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function normalizeDefinitionOptions(mixed $options): array
+    {
+        if (! is_array($options)) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            array_map(function ($option): string {
+                if (! is_scalar($option)) {
+                    return '';
+                }
+
+                return trim((string) $option);
+            }, $options),
+            fn (string $option): bool => $option !== ''
+        ));
     }
 
     /**

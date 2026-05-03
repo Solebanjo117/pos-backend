@@ -2,8 +2,10 @@
 
 namespace App\Http\Resources;
 
+use App\Models\Category;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Collection;
 
 class ProductDetailResource extends JsonResource
 {
@@ -101,15 +103,7 @@ class ProductDetailResource extends JsonResource
 
             'attributes' => $this->when(
                 $this->relationLoaded('attributes'),
-                fn () => $this->attributes
-                    ->whereNull('variant_id')
-                    ->map(fn ($attr) => [
-                        'id' => $attr->id,
-                        'name' => $attr->name,
-                        'value' => $attr->value,
-                        'unit' => $attr->unit,
-                    ])
-                    ->values()
+                fn () => $this->serializedAttributes()
             ),
 
             // Total stock across all variants
@@ -126,17 +120,7 @@ class ProductDetailResource extends JsonResource
                 }
             ),
 
-            'suppliers' => $this->when(
-                $this->relationLoaded('productSuppliers'),
-                fn () => $this->productSuppliers->map(fn ($ps) => [
-                    'id' => $ps->supplier->id,
-                    'name' => $ps->supplier->name,
-                    'supplier_cost' => (float) $ps->supplier_cost,
-                    'lead_time_days' => $ps->lead_time_days,
-                    'minimum_order_quantity' => $ps->minimum_order_quantity,
-                    'is_preferred' => (bool) $ps->is_preferred,
-                ])
-            ),
+            'suppliers' => $this->variantSuppliers(),
 
             'media' => $this->when(
                 $this->relationLoaded('media'),
@@ -244,5 +228,172 @@ class ProductDetailResource extends JsonResource
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
         ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function serializedAttributes(): array
+    {
+        $attributes = $this->attributes->whereNull('variant_id')->values();
+
+        if ($attributes->isEmpty()) {
+            return [];
+        }
+
+        $categoriesById = $this->categoryDefinitionsById($attributes);
+
+        return $attributes->map(function ($attribute) use ($categoriesById) {
+            $definition = $this->findCategoryAttributeDefinition(
+                $categoriesById->get((int) ($attribute->source_category_id ?? 0)),
+                (string) $attribute->name
+            );
+
+            return [
+                'id' => $attribute->id,
+                'name' => $attribute->name,
+                'value' => $attribute->value,
+                'unit' => $attribute->unit,
+                'type' => $definition['type'] ?? 'string',
+                'options' => $definition['options'] ?? null,
+                'source' => $attribute->source ?? 'custom',
+                'source_category_id' => $attribute->source_category_id,
+            ];
+        })->all();
+    }
+
+    private function categoryDefinitionsById(Collection $attributes): Collection
+    {
+        $sourceCategoryIds = $attributes
+            ->where('source', 'category')
+            ->pluck('source_category_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($sourceCategoryIds->isEmpty()) {
+            return collect();
+        }
+
+        $categoriesById = collect();
+
+        if ($this->relationLoaded('category') && $this->category) {
+            $categoriesById->put((int) $this->category->id, $this->category);
+        }
+
+        if ($this->relationLoaded('extraCategories')) {
+            foreach ($this->extraCategories as $extraCategory) {
+                $categoriesById->put((int) $extraCategory->id, $extraCategory);
+            }
+        }
+
+        $missingIds = $sourceCategoryIds
+            ->reject(fn (int $categoryId) => $categoriesById->has($categoryId))
+            ->values();
+
+        if ($missingIds->isNotEmpty()) {
+            Category::query()
+                ->whereIn('id', $missingIds)
+                ->get(['id', 'default_attributes'])
+                ->each(fn (Category $category) => $categoriesById->put((int) $category->id, $category));
+        }
+
+        return $categoriesById;
+    }
+
+    /**
+     * @return array{type: string, options: array<int, string>|null}|null
+     */
+    private function findCategoryAttributeDefinition(?Category $category, string $attributeName): ?array
+    {
+        if (! $category) {
+            return null;
+        }
+
+        $targetName = mb_strtolower(trim($attributeName));
+        if ($targetName === '') {
+            return null;
+        }
+
+        foreach (($category->default_attributes ?? []) as $definition) {
+            $definitionName = mb_strtolower(trim((string) ($definition['name'] ?? '')));
+            if ($definitionName !== $targetName) {
+                continue;
+            }
+
+            $type = $definition['type'] ?? 'string';
+            if (! in_array($type, ['string', 'select'], true)) {
+                $type = 'string';
+            }
+
+            return [
+                'type' => $type,
+                'options' => $type === 'select'
+                    ? $this->normalizeDefinitionOptions($definition['options'] ?? null)
+                    : null,
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function normalizeDefinitionOptions(mixed $options): array
+    {
+        if (! is_array($options)) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            array_map(function ($option): string {
+                if (! is_scalar($option)) {
+                    return '';
+                }
+
+                return trim((string) $option);
+            }, $options),
+            fn (string $option): bool => $option !== ''
+        ));
+    }
+
+    private function variantSuppliers(): mixed
+    {
+        if ($this->relationLoaded('variants')) {
+            $suppliers = $this->variants
+                ->filter(fn ($variant) => $variant->relationLoaded('suppliers'))
+                ->flatMap(fn ($variant) => $variant->suppliers->map(fn ($supplier) => [
+                    'id' => $supplier->id,
+                    'name' => $supplier->name,
+                    'variant_id' => $variant->id,
+                    'variant_sku' => $variant->sku,
+                    'brand_name' => $variant->brand?->name,
+                    'supplier_cost' => (float) ($supplier->pivot->supplier_cost ?? 0),
+                    'lead_time_days' => $supplier->pivot->lead_time_days,
+                    'minimum_order_quantity' => $supplier->pivot->minimum_order_quantity,
+                    'is_preferred' => (bool) ($supplier->pivot->is_preferred ?? false),
+                ]));
+
+            if ($suppliers->isNotEmpty()) {
+                return $suppliers->values();
+            }
+        }
+
+        return $this->when(
+            $this->relationLoaded('productSuppliers'),
+            fn () => $this->productSuppliers->map(fn ($ps) => [
+                'id' => $ps->supplier->id,
+                'name' => $ps->supplier->name,
+                'variant_id' => $ps->variant_id,
+                'variant_sku' => $ps->variant?->sku,
+                'brand_name' => $ps->variant?->brand?->name,
+                'supplier_cost' => (float) $ps->supplier_cost,
+                'lead_time_days' => $ps->lead_time_days,
+                'minimum_order_quantity' => $ps->minimum_order_quantity,
+                'is_preferred' => (bool) $ps->is_preferred,
+            ])->values()
+        );
     }
 }

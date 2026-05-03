@@ -73,7 +73,13 @@ class CategoryController extends Controller
             'description' => 'nullable|string',
             'default_attributes' => 'nullable|array',
             'default_attributes.*.name' => 'required_with:default_attributes|string|max:100',
+            'default_attributes.*.type' => 'nullable|string|in:string,select',
+            'default_attributes.*.options' => 'nullable|array',
+            'default_attributes.*.options.*' => 'string|max:100',
             'default_attributes.*.required' => 'nullable|boolean',
+            'default_attributes.*.unit' => 'nullable|string|max:50',
+            'default_attributes.*.value' => 'nullable|string',
+            'default_attributes.*.default_value' => 'nullable|string',
             'icon' => 'nullable|string|max:50',
             'image_url' => 'nullable|url|max:500',
             'priority' => 'nullable|integer',
@@ -83,6 +89,11 @@ class CategoryController extends Controller
             'applies_itbm' => 'nullable|boolean',
             'itbm_percent' => 'nullable|integer|min:0|max:100',
         ]);
+
+        // Normalizar y validar default_attributes
+        if (isset($validated['default_attributes'])) {
+            $validated['default_attributes'] = $this->normalizeDefaultAttributes($validated['default_attributes']);
+        }
 
         $category = Category::create($validated);
 
@@ -113,7 +124,13 @@ class CategoryController extends Controller
             'description' => 'nullable|string',
             'default_attributes' => 'nullable|array',
             'default_attributes.*.name' => 'required_with:default_attributes|string|max:100',
+            'default_attributes.*.type' => 'nullable|string|in:string,select',
+            'default_attributes.*.options' => 'nullable|array',
+            'default_attributes.*.options.*' => 'string|max:100',
             'default_attributes.*.required' => 'nullable|boolean',
+            'default_attributes.*.unit' => 'nullable|string|max:50',
+            'default_attributes.*.value' => 'nullable|string',
+            'default_attributes.*.default_value' => 'nullable|string',
             'icon' => 'nullable|string|max:50',
             'image_url' => 'nullable|url|max:500',
             'priority' => 'nullable|integer',
@@ -125,6 +142,11 @@ class CategoryController extends Controller
         ]);
 
         $oldDefaults = $category->default_attributes ?? [];
+
+        // Normalizar y validar default_attributes
+        if (isset($validated['default_attributes'])) {
+            $validated['default_attributes'] = $this->normalizeDefaultAttributes($validated['default_attributes']);
+        }
 
         $category->update($validated);
 
@@ -429,6 +451,75 @@ class CategoryController extends Controller
         if (Storage::disk('public')->exists($imagePath)) {
             Storage::disk('public')->delete($imagePath);
         }
+    }
+
+    /**
+     * Normaliza y valida los atributos por defecto de categoría.
+     * - Asigna type = 'string' si no está presente
+     * - Rechaza select sin opciones válidas
+     * - Limpia options si type != 'select'
+     */
+    private function normalizeDefaultAttributes(array $attributes): array
+    {
+        $normalized = [];
+
+        foreach ($attributes as $attribute) {
+            $type = $attribute['type'] ?? 'string';
+            $options = $attribute['options'] ?? null;
+
+            // Normalizar type a string por defecto
+            if (! in_array($type, ['string', 'select'], true)) {
+                $type = 'string';
+            }
+
+            // Validar select con opciones válidas
+            if ($type === 'select') {
+                if (! is_array($options) || count($options) === 0) {
+                    throw new \Illuminate\Validation\ValidationException(
+                        validator([], []),
+                        response()->json([
+                            'message' => 'El atributo "'.$attribute['name'].'" tipo select debe tener al menos una opción válida',
+                            'errors' => [
+                                'default_attributes' => ['Los atributos tipo select requieren opciones válidas'],
+                            ],
+                        ], 422)
+                    );
+                }
+
+                // Filtrar opciones vacías
+                $options = array_values(array_filter(
+                    array_map('trim', $options),
+                    fn ($opt) => $opt !== ''
+                ));
+
+                if (count($options) === 0) {
+                    throw new \Illuminate\Validation\ValidationException(
+                        validator([], []),
+                        response()->json([
+                            'message' => 'El atributo "'.$attribute['name'].'" tipo select debe tener al menos una opción válida',
+                            'errors' => [
+                                'default_attributes' => ['Los atributos tipo select requieren opciones válidas'],
+                            ],
+                        ], 422)
+                    );
+                }
+            } else {
+                // Limpiar options si no es select
+                $options = null;
+            }
+
+            $normalized[] = [
+                'name' => $attribute['name'],
+                'type' => $type,
+                'options' => $options,
+                'required' => $attribute['required'] ?? false,
+                'unit' => $attribute['unit'] ?? null,
+                'value' => $attribute['value'] ?? null,
+                'default_value' => $attribute['default_value'] ?? null,
+            ];
+        }
+
+        return $normalized;
     }
 
     private function normalizeIntegerPercentField(Request $request, string $field): void

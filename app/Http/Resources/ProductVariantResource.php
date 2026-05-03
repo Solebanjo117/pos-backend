@@ -74,6 +74,18 @@ class ProductVariantResource extends JsonResource
                 ])
             ),
 
+            'suppliers' => $this->when(
+                $this->relationLoaded('suppliers'),
+                fn () => $this->suppliers->map(fn ($supplier) => [
+                    'id' => $supplier->id,
+                    'name' => $supplier->name,
+                    'supplier_cost' => (float) ($supplier->pivot->supplier_cost ?? 0),
+                    'lead_time_days' => $supplier->pivot->lead_time_days,
+                    'minimum_order_quantity' => $supplier->pivot->minimum_order_quantity,
+                    'is_preferred' => (bool) ($supplier->pivot->is_preferred ?? false),
+                ])->values()
+            ),
+
             'total_stock' => $this->when(
                 $this->relationLoaded('inventory'),
                 fn () => $this->inventory->sum('quantity_available')

@@ -93,11 +93,16 @@ class PurchaseOrderController extends Controller
         ]);
 
         try {
+            $warnings = $this->purchaseOrderService->supplierMismatchWarnings(
+                (int) $validated['supplier_id'],
+                $validated['items']
+            );
             $order = $this->purchaseOrderService->create($validated);
 
             return response()->json([
                 'message' => 'Orden de compra creada exitosamente',
                 'data' => $order,
+                'warnings' => $warnings,
             ], 201);
         } catch (\Exception $e) {
             return response()->json([
@@ -130,11 +135,18 @@ class PurchaseOrderController extends Controller
         ]);
 
         try {
+            $warnings = isset($validated['supplier_id'], $validated['items'])
+                ? $this->purchaseOrderService->supplierMismatchWarnings(
+                    (int) $validated['supplier_id'],
+                    $validated['items']
+                )
+                : [];
             $order = $this->purchaseOrderService->update($id, $validated);
 
             return response()->json([
                 'message' => 'Orden de compra actualizada exitosamente',
                 'data' => $order,
+                'warnings' => $warnings,
             ]);
         } catch (\Exception $e) {
             return response()->json([

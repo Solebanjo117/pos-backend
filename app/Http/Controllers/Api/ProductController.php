@@ -90,6 +90,7 @@ class ProductController extends Controller
             },
             'variants.brand',
             'variants.pricing',
+            'variants.suppliers',
             'variants.inventory' => function ($q) use ($warehouseId) {
                 if ($warehouseId) {
                     $q->where('warehouse_id', $warehouseId);

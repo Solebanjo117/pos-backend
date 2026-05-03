@@ -46,6 +46,74 @@ class ProductService
             ->all();
     }
 
+    /**
+     * Valida que los atributos con source=category cumplan con las restricciones
+     * de tipo select definidas en la categoría origen.
+     *
+     * @throws \Illuminate\Validation\ValidationException
+     */
+    private function validateInheritedAttributeValues(array $attributes): void
+    {
+        $categoryIds = collect($attributes)
+            ->where('source', 'category')
+            ->pluck('source_category_id')
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($categoryIds->isEmpty()) {
+            return;
+        }
+
+        // Cargar definiciones de atributos de todas las categorías involucradas
+        $categories = Category::whereIn('id', $categoryIds)->get()->keyBy('id');
+
+        foreach ($attributes as $attribute) {
+            if ($attribute['source'] !== 'category' || ! $attribute['source_category_id']) {
+                continue;
+            }
+
+            $category = $categories->get($attribute['source_category_id']);
+            if (! $category) {
+                continue;
+            }
+
+            $attributeName = $this->attributeNameKey($attribute['name']);
+            $attributeValue = $attribute['value'];
+
+            // Buscar la definición del atributo en la categoría
+            foreach (($category->default_attributes ?? []) as $definition) {
+                $definitionName = $this->attributeNameKey($definition['name'] ?? '');
+
+                if ($definitionName !== $attributeName) {
+                    continue;
+                }
+
+                $type = $definition['type'] ?? 'string';
+                $options = $definition['options'] ?? null;
+
+                // Validar solo atributos tipo select
+                if ($type === 'select' && is_array($options) && count($options) > 0) {
+                    if (! in_array($attributeValue, $options, true)) {
+                        throw new \Illuminate\Validation\ValidationException(
+                            validator([], []),
+                            response()->json([
+                                'message' => 'El valor "'.$attributeValue.'" no es válido para el atributo "'.$attribute['name'].'"',
+                                'errors' => [
+                                    'attributes' => [
+                                        'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
+                                    ],
+                                ],
+                            ], 422)
+                        );
+                    }
+                }
+
+                break;
+            }
+        }
+    }
+
     private function attributeNameKey(string $name): string
     {
         return mb_strtolower(trim($name));
@@ -177,10 +245,15 @@ class ProductService
                 }
 
                 $existing = $existingByName->get($key, []);
+                $type = $attribute['type'] ?? 'string';
+                $options = $attribute['options'] ?? null;
+
                 $defaults[] = [
                     'name' => $name,
                     'value' => $existing['value'] ?? ($attribute['default_value'] ?? $attribute['value'] ?? ''),
                     'unit' => $attribute['unit'] ?? ($existing['unit'] ?? null),
+                    'type' => $type,
+                    'options' => $options,
                     'source' => 'category',
                     'source_category_id' => $category->id,
                 ];
@@ -208,6 +281,8 @@ class ProductService
                 'name' => $attribute->name,
                 'value' => $attribute->value,
                 'unit' => $attribute->unit,
+                'type' => 'string',
+                'options' => null,
                 'source' => $attribute->source ?? 'custom',
                 'source_category_id' => $attribute->source_category_id,
             ])
@@ -491,6 +566,7 @@ class ProductService
             }
 
             if (! empty($providedAttributes)) {
+                $this->validateInheritedAttributeValues($providedAttributes);
                 $this->assignAttributes($product, $providedAttributes);
             }
 
@@ -524,7 +600,7 @@ class ProductService
 
             DB::commit();
 
-            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories']);
+            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories', 'attributes']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -660,6 +736,8 @@ class ProductService
                     );
                 }
 
+                $this->validateInheritedAttributeValues($normalizedAttributes);
+
                 $this->assignAttributes(
                     $product,
                     $normalizedAttributes,
@@ -681,7 +759,7 @@ class ProductService
 
             DB::commit();
 
-            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories']);
+            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories', 'attributes']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -784,6 +862,7 @@ class ProductService
         $query = Product::with([
             'variants.brand',
             'variants.pricing',
+            'variants.suppliers',
             'pricing',
             'defaultVariant.brand',
             'defaultVariant.pricing',
@@ -1505,6 +1584,7 @@ class ProductService
                 'productLine',
                 'category',
                 'extraCategories',
+                'attributes',
                 'productSuppliers',
                 'variants.attributes',
                 'variants.suppliers',

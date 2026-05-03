@@ -21,7 +21,7 @@ class ProductVariantController extends Controller
     public function index(Product $product): JsonResponse
     {
         $variants = $product->variants()
-            ->with(['brand', 'pricing', 'inventory.warehouse', 'attributes'])
+            ->with(['brand', 'pricing', 'inventory.warehouse', 'attributes', 'suppliers'])
             ->get();
 
         return response()->json([

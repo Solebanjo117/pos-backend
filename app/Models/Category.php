@@ -31,7 +31,6 @@ class Category extends Model
     protected $casts = [
         'parent_id' => 'integer',
         'priority' => 'integer',
-        'default_attributes' => 'array',
         'default_margin_percent' => 'float',
         'min_suggested_price' => 'float',
         'applies_itbm' => 'boolean',
@@ -130,5 +129,89 @@ class Category extends Model
         }
 
         return asset('storage/'.ltrim($value, '/'));
+    }
+
+    public function setDefaultAttributesAttribute(mixed $value): void
+    {
+        if (! is_array($value)) {
+            $this->attributes['default_attributes'] = $value;
+
+            return;
+        }
+
+        $this->attributes['default_attributes'] = json_encode(
+            $this->normalizeDefaultAttributes($value),
+            JSON_UNESCAPED_UNICODE
+        );
+    }
+
+    public function getDefaultAttributesAttribute(mixed $value): array
+    {
+        if (is_array($value)) {
+            return $this->normalizeDefaultAttributes($value);
+        }
+
+        if (! is_string($value) || trim($value) === '') {
+            return [];
+        }
+
+        $decoded = json_decode($value, true);
+
+        if (! is_array($decoded)) {
+            return [];
+        }
+
+        return $this->normalizeDefaultAttributes($decoded);
+    }
+
+    /**
+     * @param  array<int, mixed>  $attributes
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeDefaultAttributes(array $attributes): array
+    {
+        $normalized = [];
+
+        foreach ($attributes as $attribute) {
+            if (! is_array($attribute)) {
+                continue;
+            }
+
+            $name = trim((string) ($attribute['name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+
+            $type = $attribute['type'] ?? 'string';
+            if (! in_array($type, ['string', 'select'], true)) {
+                $type = 'string';
+            }
+
+            $options = [];
+            if ($type === 'select' && is_array($attribute['options'] ?? null)) {
+                $options = array_values(array_filter(
+                    array_map(function ($option): string {
+                        if (! is_scalar($option)) {
+                            return '';
+                        }
+
+                        return trim((string) $option);
+                    }, $attribute['options']),
+                    fn (string $option): bool => $option !== ''
+                ));
+            }
+
+            $normalized[] = [
+                'name' => $name,
+                'required' => (bool) ($attribute['required'] ?? false),
+                'type' => $type,
+                'options' => $type === 'select' ? $options : null,
+                'unit' => isset($attribute['unit']) ? (string) $attribute['unit'] : null,
+                'value' => isset($attribute['value']) ? (string) $attribute['value'] : null,
+                'default_value' => isset($attribute['default_value']) ? (string) $attribute['default_value'] : null,
+            ];
+        }
+
+        return $normalized;
     }
 }

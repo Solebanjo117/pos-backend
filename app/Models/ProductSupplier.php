@@ -12,6 +12,7 @@ class ProductSupplier extends Model
 
     protected $fillable = [
         'product_id',
+        'variant_id',
         'supplier_id',
         'supplier_cost',
         'lead_time_days',
@@ -21,6 +22,7 @@ class ProductSupplier extends Model
 
     protected $casts = [
         'product_id' => 'integer',
+        'variant_id' => 'integer',
         'supplier_id' => 'integer',
         'supplier_cost' => 'decimal:2',
         'lead_time_days' => 'integer',
@@ -34,6 +36,11 @@ class ProductSupplier extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(Product::class);
+    }
+
+    public function variant(): BelongsTo
+    {
+        return $this->belongsTo(ProductVariant::class, 'variant_id');
     }
 
     /**
