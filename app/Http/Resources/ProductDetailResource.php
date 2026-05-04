@@ -249,12 +249,14 @@ class ProductDetailResource extends JsonResource
                 (string) $attribute->name
             );
 
+            $type = $definition['type'] ?? 'string';
+
             return [
                 'id' => $attribute->id,
                 'name' => $attribute->name,
-                'value' => $attribute->value,
+                'value' => $this->deserializeAttributeValue($attribute->value, $type),
                 'unit' => $attribute->unit,
-                'type' => $definition['type'] ?? 'string',
+                'type' => $type,
                 'options' => $definition['options'] ?? null,
                 'source' => $attribute->source ?? 'custom',
                 'source_category_id' => $attribute->source_category_id,
@@ -357,6 +359,35 @@ class ProductDetailResource extends JsonResource
             }, $options),
             fn (string $option): bool => $option !== ''
         ));
+    }
+
+    /**
+     * Deserialize a stored attribute value.
+     *
+     * For select-type attributes the DB stores a JSON-encoded array.
+     * Legacy values (plain strings) are wrapped in an array.
+     *
+     * @return string|string[]
+     */
+    private function deserializeAttributeValue(string $rawValue, string $type): string|array
+    {
+        if ($type !== 'select') {
+            return $rawValue;
+        }
+
+        $decoded = json_decode($rawValue, true);
+
+        if (is_array($decoded)) {
+            return array_values(array_filter(
+                array_map(fn ($v) => trim((string) $v), $decoded),
+                fn (string $v) => $v !== ''
+            ));
+        }
+
+        // Legacy: plain string stored for a select attribute—wrap in array.
+        $trimmed = trim($rawValue);
+
+        return $trimmed !== '' ? [$trimmed] : [];
     }
 
     private function variantSuppliers(): mixed

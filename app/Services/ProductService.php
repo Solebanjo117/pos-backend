@@ -16,18 +16,36 @@ class ProductService
 {
     /**
      * Normalize incoming attribute payload into name/value/unit triplets.
+     *
+     * For select-type attributes the frontend may send value as an array of
+     * selected options.  We keep the array intact through validation and only
+     * serialize it to a JSON string at storage time (see assignAttributes).
      */
     private function normalizeAttributes(array $attributes): array
     {
         return collect($attributes)
             ->map(function ($attribute) {
                 $name = trim((string) ($attribute['name'] ?? ''));
-                $value = trim((string) ($attribute['value'] ?? ''));
+                $rawValue = $attribute['value'] ?? '';
+
+                // Arrays are kept as-is (multi-select); scalars are trimmed.
+                if (is_array($rawValue)) {
+                    $value = array_values(array_filter(
+                        array_map(fn ($v) => trim((string) $v), $rawValue),
+                        fn (string $v) => $v !== ''
+                    ));
+                    if (count($value) === 0) {
+                        $value = '';
+                    }
+                } else {
+                    $value = trim((string) $rawValue);
+                }
+
                 $unitRaw = isset($attribute['unit']) ? trim((string) $attribute['unit']) : null;
                 $source = ($attribute['source'] ?? 'custom') === 'category' ? 'category' : 'custom';
                 $sourceCategoryId = $source === 'category' ? ($attribute['source_category_id'] ?? null) : null;
 
-                if ($name === '' || $value === '') {
+                if ($name === '' || (is_string($value) && $value === '') || (is_array($value) && count($value) === 0)) {
                     return null;
                 }
 
@@ -94,18 +112,25 @@ class ProductService
 
                 // Validar solo atributos tipo select
                 if ($type === 'select' && is_array($options) && count($options) > 0) {
-                    if (! in_array($attributeValue, $options, true)) {
-                        throw new \Illuminate\Validation\ValidationException(
-                            validator([], []),
-                            response()->json([
-                                'message' => 'El valor "'.$attributeValue.'" no es válido para el atributo "'.$attribute['name'].'"',
-                                'errors' => [
-                                    'attributes' => [
-                                        'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
+                    // Multiselección: validar cada opción del array
+                    $valuesToCheck = is_array($attributeValue)
+                        ? $attributeValue
+                        : [$attributeValue];
+
+                    foreach ($valuesToCheck as $singleValue) {
+                        if (! in_array($singleValue, $options, true)) {
+                            throw new \Illuminate\Validation\ValidationException(
+                                validator([], []),
+                                response()->json([
+                                    'message' => 'El valor "'.$singleValue.'" no es válido para el atributo "'.$attribute['name'].'"',
+                                    'errors' => [
+                                        'attributes' => [
+                                            'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
+                                        ],
                                     ],
-                                ],
-                            ], 422)
-                        );
+                                ], 422)
+                            );
+                        }
                     }
                 }
 
@@ -843,9 +868,15 @@ class ProductService
 
         // Create new product-level attributes.
         foreach ($attributes as $attribute) {
+            // Serialize array values (multi-select) to JSON string for storage.
+            $value = $attribute['value'];
+            if (is_array($value)) {
+                $value = json_encode($value, JSON_UNESCAPED_UNICODE);
+            }
+
             $product->attributes()->create([
                 'name' => $attribute['name'],
-                'value' => $attribute['value'],
+                'value' => $value,
                 'unit' => $attribute['unit'] ?? null,
                 'variant_id' => null,
                 'source' => $attribute['source'] ?? 'custom',

@@ -138,7 +138,27 @@ class UpdateProductRequest extends FormRequest
             'is_universal' => 'sometimes|boolean',
             'attributes' => 'sometimes|array',
             'attributes.*.name' => 'required_with:attributes|string|max:100',
-            'attributes.*.value' => 'required_with:attributes|string|max:255',
+            'attributes.*.value' => ['required_with:attributes', function (string $attribute, mixed $value, \Closure $fail) {
+                if (is_string($value)) {
+                    if (mb_strlen($value) > 1000) {
+                        $fail('El valor del atributo no puede exceder 1000 caracteres.');
+                    }
+
+                    return;
+                }
+                if (is_array($value)) {
+                    foreach ($value as $item) {
+                        if (! is_string($item) || mb_strlen($item) > 255) {
+                            $fail('Cada opción seleccionada debe ser texto de máximo 255 caracteres.');
+
+                            return;
+                        }
+                    }
+
+                    return;
+                }
+                $fail('El valor del atributo debe ser texto o una lista de opciones.');
+            }],
             'attributes.*.unit' => 'nullable|string|max:50',
             'attributes.*.source' => 'nullable|string|in:custom,category',
             'attributes.*.source_category_id' => 'nullable|integer|exists:categories,id',

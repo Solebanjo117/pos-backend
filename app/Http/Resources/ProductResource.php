@@ -130,7 +130,7 @@ class ProductResource extends JsonResource
 
                 return $attrs->map(fn ($a) => [
                     'name' => $a->name,
-                    'value' => $a->value,
+                    'value' => $this->formatAttributeValueForDisplay($a->value),
                     'unit' => $a->unit,
                 ])->values();
             })(),
@@ -159,12 +159,14 @@ class ProductResource extends JsonResource
                 (string) $attribute->name
             );
 
+            $type = $definition['type'] ?? 'string';
+
             return [
                 'id' => $attribute->id,
                 'name' => $attribute->name,
-                'value' => $attribute->value,
+                'value' => $this->deserializeAttributeValue($attribute->value, $type),
                 'unit' => $attribute->unit,
-                'type' => $definition['type'] ?? 'string',
+                'type' => $type,
                 'options' => $definition['options'] ?? null,
                 'source' => $attribute->source ?? 'custom',
                 'source_category_id' => $attribute->source_category_id,
@@ -267,6 +269,59 @@ class ProductResource extends JsonResource
             }, $options),
             fn (string $option): bool => $option !== ''
         ));
+    }
+
+    /**
+     * Deserialize a stored attribute value.
+     *
+     * For select-type attributes the DB stores a JSON-encoded array.
+     * For string-type attributes the raw string is returned.
+     * Legacy values (plain strings in select columns) are wrapped in an array.
+     *
+     * @return string|string[]
+     */
+    private function deserializeAttributeValue(string $rawValue, string $type): string|array
+    {
+        if ($type !== 'select') {
+            return $rawValue;
+        }
+
+        $decoded = json_decode($rawValue, true);
+
+        if (is_array($decoded)) {
+            return array_values(array_filter(
+                array_map(fn ($v) => trim((string) $v), $decoded),
+                fn (string $v) => $v !== ''
+            ));
+        }
+
+        // Legacy: plain string stored for a select attribute—wrap in array.
+        $trimmed = trim($rawValue);
+
+        return $trimmed !== '' ? [$trimmed] : [];
+    }
+
+    /**
+     * Format an attribute value for text-only display contexts (key_attributes).
+     *
+     * JSON-encoded arrays are joined as "Opt1, Opt2"; plain strings pass through.
+     */
+    private function formatAttributeValueForDisplay(string $rawValue): string
+    {
+        $decoded = json_decode($rawValue, true);
+
+        if (is_array($decoded)) {
+            $items = array_filter(
+                array_map(fn ($v) => trim((string) $v), $decoded),
+                fn (string $v) => $v !== ''
+            );
+
+            sort($items);
+
+            return count($items) > 0 ? implode(', ', $items) : '—';
+        }
+
+        return $rawValue;
     }
 
     /**
