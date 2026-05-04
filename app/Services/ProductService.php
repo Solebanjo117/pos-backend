@@ -65,12 +65,10 @@ class ProductService
     }
 
     /**
-     * Valida que los atributos con source=category cumplan con las restricciones
-     * de tipo select definidas en la categoría origen.
-     *
-     * @throws \Illuminate\Validation\ValidationException
+     * Valida y auto-corrige que los atributos con source=category cumplan con las restricciones
+     * de tipo select definidas en la categoría origen, eliminando opciones inválidas (legacy).
      */
-    private function validateInheritedAttributeValues(array $attributes): void
+    private function validateInheritedAttributeValues(array $attributes): array
     {
         $categoryIds = collect($attributes)
             ->where('source', 'category')
@@ -80,13 +78,13 @@ class ProductService
             ->values();
 
         if ($categoryIds->isEmpty()) {
-            return;
+            return $attributes;
         }
 
         // Cargar definiciones de atributos de todas las categorías involucradas
         $categories = Category::whereIn('id', $categoryIds)->get()->keyBy('id');
 
-        foreach ($attributes as $attribute) {
+        foreach ($attributes as &$attribute) {
             if ($attribute['source'] !== 'category' || ! $attribute['source_category_id']) {
                 continue;
             }
@@ -117,26 +115,33 @@ class ProductService
                         ? $attributeValue
                         : [$attributeValue];
 
+                    $validValues = [];
                     foreach ($valuesToCheck as $singleValue) {
-                        if (! in_array($singleValue, $options, true)) {
-                            throw new \Illuminate\Validation\ValidationException(
-                                validator([], []),
-                                response()->json([
-                                    'message' => 'El valor "'.$singleValue.'" no es válido para el atributo "'.$attribute['name'].'"',
-                                    'errors' => [
-                                        'attributes' => [
-                                            'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
-                                        ],
-                                    ],
-                                ], 422)
-                            );
+                        if (in_array($singleValue, $options, true)) {
+                            $validValues[] = $singleValue;
                         }
+                    }
+
+                    // Auto-healing: Keep only valid values
+                    if (count($validValues) === 0) {
+                        $attribute['value'] = '';
+                    } else {
+                        // Always keep as array if it was array, or single if single
+                        $attribute['value'] = is_array($attributeValue) ? $validValues : $validValues[0];
                     }
                 }
 
                 break;
             }
         }
+        unset($attribute);
+
+        // Filter out attributes that became empty after validation
+        return array_values(array_filter($attributes, function ($attr) {
+            return $attr['name'] !== '' &&
+                   ! (is_string($attr['value']) && $attr['value'] === '') &&
+                   ! (is_array($attr['value']) && count($attr['value']) === 0);
+        }));
     }
 
     private function attributeNameKey(string $name): string
@@ -591,7 +596,7 @@ class ProductService
             }
 
             if (! empty($providedAttributes)) {
-                $this->validateInheritedAttributeValues($providedAttributes);
+                $providedAttributes = $this->validateInheritedAttributeValues($providedAttributes);
                 $this->assignAttributes($product, $providedAttributes);
             }
 
@@ -761,7 +766,7 @@ class ProductService
                     );
                 }
 
-                $this->validateInheritedAttributeValues($normalizedAttributes);
+                $normalizedAttributes = $this->validateInheritedAttributeValues($normalizedAttributes);
 
                 $this->assignAttributes(
                     $product,
