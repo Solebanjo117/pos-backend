@@ -5,9 +5,11 @@ namespace App\Services;
 use App\Models\InventoryMovement;
 use App\Models\ProductBatch;
 use App\Models\ProductInventory;
+use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
+use App\Models\Supplier;
 use App\Models\SupplyListItem;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Auth;
@@ -163,9 +165,34 @@ class PurchaseOrderService
             return [];
         }
 
-        $linkedVariantIds = ProductVariant::query()
+        $variants = ProductVariant::query()
             ->whereIn('id', $variantIds)
-            ->whereHas('suppliers', fn ($query) => $query->where('suppliers.id', $supplierId))
+            ->get(['id', 'product_id', 'brand_id']);
+
+        $supplierBrandIds = Supplier::query()
+            ->find($supplierId)
+            ?->brands()
+            ->pluck('brands.id')
+            ->map(fn ($id) => (int) $id)
+            ?? collect();
+
+        $directVariantIds = ProductSupplier::query()
+            ->where('supplier_id', $supplierId)
+            ->whereIn('variant_id', $variantIds)
+            ->pluck('variant_id')
+            ->map(fn ($id) => (int) $id);
+
+        $productLevelProductIds = ProductSupplier::query()
+            ->where('supplier_id', $supplierId)
+            ->whereIn('product_id', $variants->pluck('product_id')->unique())
+            ->whereNull('variant_id')
+            ->pluck('product_id')
+            ->map(fn ($id) => (int) $id);
+
+        $linkedVariantIds = $variants
+            ->filter(fn (ProductVariant $variant): bool => $directVariantIds->contains((int) $variant->id)
+                || $productLevelProductIds->contains((int) $variant->product_id)
+                || ($variant->brand_id && $supplierBrandIds->contains((int) $variant->brand_id)))
             ->pluck('id')
             ->map(fn ($id) => (int) $id);
 

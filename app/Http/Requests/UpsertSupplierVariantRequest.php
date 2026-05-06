@@ -13,8 +13,11 @@ class UpsertSupplierVariantRequest extends FormRequest
 
     public function rules(): array
     {
+        $updating = (bool) $this->route('variantId');
+
         return [
-            'variant_id' => ($this->route('variantId') ? 'nullable' : 'required').'|exists:product_variants,id',
+            'variant_id' => [$updating ? 'nullable' : 'required_without:product_id', 'nullable', 'exists:product_variants,id'],
+            'product_id' => [$updating ? 'nullable' : 'required_without:variant_id', 'nullable', 'exists:products,id'],
             'supplier_cost' => 'required|numeric|min:0',
             'lead_time_days' => 'nullable|integer|min:0',
             'minimum_order_quantity' => 'nullable|integer|min:1',

@@ -65,8 +65,10 @@ class ProductService
     }
 
     /**
-     * Valida y auto-corrige que los atributos con source=category cumplan con las restricciones
-     * de tipo select definidas en la categoría origen, eliminando opciones inválidas (legacy).
+     * Valida que los atributos con source=category cumplan con las restricciones
+     * de tipo select definidas en la categoria origen.
+     *
+     * @throws \Illuminate\Validation\ValidationException
      */
     private function validateInheritedAttributeValues(array $attributes): array
     {
@@ -115,19 +117,20 @@ class ProductService
                         ? $attributeValue
                         : [$attributeValue];
 
-                    $validValues = [];
                     foreach ($valuesToCheck as $singleValue) {
-                        if (in_array($singleValue, $options, true)) {
-                            $validValues[] = $singleValue;
+                        if (! in_array($singleValue, $options, true)) {
+                            throw new \Illuminate\Validation\ValidationException(
+                                validator([], []),
+                                response()->json([
+                                    'message' => 'El valor "'.$singleValue.'" no es valido para el atributo "'.$attribute['name'].'"',
+                                    'errors' => [
+                                        'attributes' => [
+                                            'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
+                                        ],
+                                    ],
+                                ], 422)
+                            );
                         }
-                    }
-
-                    // Auto-healing: Keep only valid values
-                    if (count($validValues) === 0) {
-                        $attribute['value'] = '';
-                    } else {
-                        // Always keep as array if it was array, or single if single
-                        $attribute['value'] = is_array($attributeValue) ? $validValues : $validValues[0];
                     }
                 }
 
@@ -136,12 +139,7 @@ class ProductService
         }
         unset($attribute);
 
-        // Filter out attributes that became empty after validation
-        return array_values(array_filter($attributes, function ($attr) {
-            return $attr['name'] !== '' &&
-                   ! (is_string($attr['value']) && $attr['value'] === '') &&
-                   ! (is_array($attr['value']) && count($attr['value']) === 0);
-        }));
+        return $attributes;
     }
 
     private function attributeNameKey(string $name): string
@@ -805,11 +803,12 @@ class ProductService
 
         try {
             // Update variant fields
-            $variant->update(array_filter([
+            $variant->update([
+                'brand_id' => $data['brand_id'] ?? $variant->brand_id,
                 'sku' => $data['sku'] ?? $variant->sku,
                 'upc' => $data['upc'] ?? $variant->upc,
                 'status' => $data['status'] ?? $variant->status,
-            ]));
+            ]);
 
             DB::commit();
 

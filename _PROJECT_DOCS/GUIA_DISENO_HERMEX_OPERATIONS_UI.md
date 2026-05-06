@@ -2,7 +2,7 @@
 
 ## Proposito
 
-Esta guia define el estilo visual y operativo usado en las nuevas pantallas de ordenes de compra y detalle de producto. Debe usarse como referencia para futuras iteraciones de UI en modulos administrativos, inventario, compras, recepcion, productos y flujos operativos internos.
+Esta guia define el estilo visual y operativo base para las pantallas internas de HermeX. Debe usarse como referencia en modulos administrativos, inventario, compras, recepcion, productos, proveedores, caja, cotizaciones, reportes y cualquier flujo operativo donde el usuario toma decisiones con datos.
 
 El objetivo no es hacer pantallas de marketing ni copiar un sistema externo. El objetivo es construir una interfaz de trabajo diaria: clara, densa, rapida de escanear y orientada a decisiones.
 
@@ -192,6 +192,47 @@ La OC debe sentirse como un workbench de compras:
 - recepcion con estado por fila;
 - resumen de cantidades;
 - advertencias claras para POS preaplicado.
+
+### Proveedores
+
+El detalle de proveedor debe sentirse como una mesa de trabajo de abastecimiento:
+
+- datos comerciales visibles sin ocupar demasiado espacio;
+- marcas y productos suministrados como relaciones operativas, no como texto suelto;
+- busqueda simple y paginacion cuando hay muchas relaciones;
+- productos agrupados en submenus desplegables;
+- costo, MOQ, lead time y proveedor preferido editables cerca de la relacion;
+- acciones destructivas separadas o menos prominentes que las acciones de guardado/vinculacion.
+
+### Inventario Y Movimientos
+
+Las pantallas de inventario deben priorizar trazabilidad y ejecucion:
+
+- almacen, stock actual, cantidad y motivo siempre visibles;
+- producto/variante claramente identificados por nombre y SKU;
+- tablas compactas para multiples lineas;
+- advertencias visibles cuando una accion afecta disponibilidad;
+- estados de carga y confirmacion sobrios, sin interrumpir el flujo si no es necesario.
+
+### Caja, Cotizaciones Y Ventas
+
+Las pantallas de venta deben seguir el mismo lenguaje operativo, pero con mayor foco en rapidez:
+
+- busqueda y seleccion de variantes directa;
+- totales, impuestos, descuentos y disponibilidad faciles de escanear;
+- acciones primarias visibles y consistentes;
+- advertencias de stock claras;
+- evitar pasos modales encadenados si una sola vista puede resolver la seleccion.
+
+### Reportes Y Paneles
+
+Los reportes deben ser densos y comparables:
+
+- metricas superiores compactas;
+- filtros en una franja clara;
+- tablas o graficas solo cuando ayudan a decidir;
+- totales y diferencias alineados a la derecha;
+- exportar/imprimir como acciones secundarias claras.
 
 ### Productos
 

@@ -298,6 +298,81 @@ it('product update rejects invalid select option value', function () {
     expect($response->json('errors.attributes'))->toContain('El atributo "LADO" debe ser uno de: RH, LH');
 });
 
+it('standalone attribute update rejects invalid select option value', function () {
+    $category = Category::create([
+        'name' => 'Espejos',
+        'default_attributes' => [
+            [
+                'name' => 'LADO',
+                'type' => 'select',
+                'options' => ['RH', 'LH'],
+                'required' => true,
+            ],
+        ],
+    ]);
+
+    $product = Product::create([
+        'sku_base' => 'ESP-DIRECT-001',
+        'name' => 'Espejo directo',
+        'category_id' => $category->id,
+        'status' => 'active',
+    ]);
+
+    $attribute = ProductAttribute::create([
+        'product_id' => $product->id,
+        'name' => 'LADO',
+        'value' => 'RH',
+        'source' => 'category',
+        'source_category_id' => $category->id,
+    ]);
+
+    $user = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    actingAs($user);
+
+    $response = $this->putJson("/api/v1/product-attributes/{$attribute->id}", [
+        'value' => 'CENTRO',
+    ]);
+
+    $response->assertStatus(422);
+    expect($response->json('errors.value'))->toContain('El atributo "LADO" debe ser uno de: RH, LH');
+    expect($attribute->fresh()->value)->toBe('RH');
+});
+
+it('standalone attribute store rejects invalid select option value', function () {
+    $category = Category::create([
+        'name' => 'Suspension directa',
+        'default_attributes' => [
+            [
+                'name' => 'POSICION',
+                'type' => 'select',
+                'options' => ['DELANTERO', 'TRASERO'],
+                'required' => true,
+            ],
+        ],
+    ]);
+
+    $product = Product::create([
+        'sku_base' => 'SUS-DIRECT-001',
+        'name' => 'Amortiguador directo',
+        'category_id' => $category->id,
+        'status' => 'active',
+    ]);
+
+    $user = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    actingAs($user);
+
+    $response = $this->postJson('/api/v1/product-attributes', [
+        'product_id' => $product->id,
+        'name' => 'POSICION',
+        'value' => 'LATERAL',
+        'source' => 'category',
+        'source_category_id' => $category->id,
+    ]);
+
+    $response->assertStatus(422);
+    expect($response->json('errors.value'))->toContain('El atributo "POSICION" debe ser uno de: DELANTERO, TRASERO');
+});
+
 it('category attribute without explicit type defaults to string', function () {
     $category = Category::create([
         'name' => 'Herramientas',

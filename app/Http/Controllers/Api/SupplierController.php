@@ -5,9 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSupplierRequest;
 use App\Http\Requests\UpsertSupplierVariantRequest;
+use App\Models\Product;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\Supplier;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -58,7 +61,7 @@ class SupplierController extends Controller
 
         // Load products with pricing
         $products = $supplier->productSuppliers()
-            ->with(['product.pricing', 'variant.brand', 'variant.pricing', 'variant.inventory'])
+            ->with(['product.pricing', 'product.inventory', 'variant.brand', 'variant.pricing', 'variant.inventory'])
             ->get()
             ->map(function ($ps) {
                 return [
@@ -72,7 +75,9 @@ class SupplierController extends Controller
                     'lead_time_days' => $ps->lead_time_days,
                     'minimum_order_quantity' => $ps->minimum_order_quantity,
                     'is_preferred' => $ps->is_preferred,
-                    'total_stock' => $ps->variant?->inventory?->sum('quantity_available') ?? 0,
+                    'total_stock' => $ps->variant?->inventory?->sum('quantity_available')
+                        ?? $ps->product?->inventory?->sum('quantity_available')
+                        ?? 0,
                 ];
             });
 
@@ -239,35 +244,88 @@ class SupplierController extends Controller
         ]);
     }
 
-    public function variants(int $id): JsonResponse
+    public function variants(Request $request, int $id): JsonResponse
     {
         $supplier = Supplier::findOrFail($id);
+        $search = trim((string) $request->get('search', ''));
+        $perPage = min(50, max(5, (int) $request->get('per_page', 10)));
 
-        return response()->json([
-            'data' => $this->supplierVariantRows($supplier),
-        ]);
+        $query = $this->supplierVariantQuery($supplier);
+
+        if ($search !== '') {
+            $query->where(function (Builder $query) use ($search) {
+                $query
+                    ->whereHas('product', function (Builder $productQuery) use ($search) {
+                        $productQuery
+                            ->where('name', 'ILIKE', "%{$search}%")
+                            ->orWhere('sku_base', 'ILIKE', "%{$search}%");
+                    })
+                    ->orWhereHas('variant', function (Builder $variantQuery) use ($search) {
+                        $variantQuery
+                            ->where('sku', 'ILIKE', "%{$search}%")
+                            ->orWhereHas('brand', function (Builder $brandQuery) use ($search) {
+                                $brandQuery->where('name', 'ILIKE', "%{$search}%");
+                            });
+                    });
+            });
+        }
+
+        $variants = $query->paginate($perPage);
+        $variants->setCollection(
+            $variants->getCollection()->map(fn (ProductSupplier $ps) => $this->supplierVariantRow($ps))
+        );
+
+        return response()->json($variants);
     }
 
     public function attachVariant(UpsertSupplierVariantRequest $request, int $id): JsonResponse
     {
         $supplier = Supplier::findOrFail($id);
         $validated = $request->validated();
-        $variant = ProductVariant::with('brand')->findOrFail($validated['variant_id']);
 
-        if ($validated['is_preferred'] ?? false) {
-            ProductSupplier::query()
-                ->where('variant_id', $variant->id)
-                ->where('supplier_id', '!=', $supplier->id)
-                ->update(['is_preferred' => false]);
+        if (! empty($validated['variant_id'])) {
+            $variant = ProductVariant::with('brand')->findOrFail($validated['variant_id']);
+
+            if ($validated['is_preferred'] ?? false) {
+                ProductSupplier::query()
+                    ->where('variant_id', $variant->id)
+                    ->where('supplier_id', '!=', $supplier->id)
+                    ->update(['is_preferred' => false]);
+            }
+
+            ProductSupplier::query()->updateOrCreate(
+                [
+                    'variant_id' => $variant->id,
+                    'supplier_id' => $supplier->id,
+                ],
+                [
+                    'product_id' => $variant->product_id,
+                    'supplier_cost' => $validated['supplier_cost'],
+                    'lead_time_days' => $validated['lead_time_days'] ?? $supplier->lead_time_days ?? 0,
+                    'minimum_order_quantity' => $validated['minimum_order_quantity'] ?? 1,
+                    'is_preferred' => $validated['is_preferred'] ?? false,
+                ]
+            );
+
+            if ($variant->brand_id) {
+                $supplier->brands()->syncWithoutDetaching([$variant->brand_id]);
+            }
+
+            return response()->json([
+                'message' => 'Variante asociada al proveedor exitosamente',
+                'data' => $this->supplierVariantRows($supplier),
+            ], 201);
         }
+
+        $product = Product::query()->findOrFail($validated['product_id']);
 
         ProductSupplier::query()->updateOrCreate(
             [
-                'variant_id' => $variant->id,
+                'product_id' => $product->id,
                 'supplier_id' => $supplier->id,
+                'variant_id' => null,
             ],
             [
-                'product_id' => $variant->product_id,
                 'supplier_cost' => $validated['supplier_cost'],
                 'lead_time_days' => $validated['lead_time_days'] ?? $supplier->lead_time_days ?? 0,
                 'minimum_order_quantity' => $validated['minimum_order_quantity'] ?? 1,
@@ -275,12 +333,8 @@ class SupplierController extends Controller
             ]
         );
 
-        if ($variant->brand_id) {
-            $supplier->brands()->syncWithoutDetaching([$variant->brand_id]);
-        }
-
         return response()->json([
-            'message' => 'Variante asociada al proveedor exitosamente',
+            'message' => 'Producto asociado al proveedor exitosamente',
             'data' => $this->supplierVariantRows($supplier),
         ], 201);
     }
@@ -288,7 +342,7 @@ class SupplierController extends Controller
     public function updateVariant(UpsertSupplierVariantRequest $request, int $id, int $variantId): JsonResponse
     {
         $supplier = Supplier::findOrFail($id);
-        $validated = $request->safe()->except('variant_id');
+        $validated = $request->safe()->except(['variant_id', 'product_id']);
 
         $productSupplier = ProductSupplier::query()
             ->where('supplier_id', $supplier->id)
@@ -325,27 +379,41 @@ class SupplierController extends Controller
         ]);
     }
 
-    private function supplierVariantRows(Supplier $supplier): array
+    private function supplierVariantQuery(Supplier $supplier): HasMany
     {
         return $supplier->productSuppliers()
-            ->whereNotNull('variant_id')
-            ->with(['product:id,name,sku_base', 'variant.brand:id,name', 'variant.pricing:id,variant_id,cost', 'variant.inventory'])
-            ->orderBy('id')
+            ->with(['product:id,name,sku_base', 'product.inventory', 'variant.brand:id,name', 'variant.pricing:id,variant_id,cost', 'variant.inventory'])
+            ->orderBy('id');
+    }
+
+    private function supplierVariantRows(Supplier $supplier): array
+    {
+        return $this->supplierVariantQuery($supplier)
             ->get()
-            ->map(fn (ProductSupplier $ps) => [
-                'id' => $ps->id,
-                'product_id' => $ps->product_id,
-                'variant_id' => $ps->variant_id,
-                'product_name' => $ps->product?->name ?? 'Producto',
-                'product_sku' => $ps->variant?->sku ?? $ps->product?->sku_base,
-                'brand_name' => $ps->variant?->brand?->name,
-                'supplier_cost' => (float) $ps->supplier_cost,
-                'lead_time_days' => $ps->lead_time_days,
-                'minimum_order_quantity' => $ps->minimum_order_quantity,
-                'is_preferred' => (bool) $ps->is_preferred,
-                'total_stock' => (int) ($ps->variant?->inventory?->sum('quantity_available') ?? 0),
-            ])
+            ->map(fn (ProductSupplier $ps) => $this->supplierVariantRow($ps))
             ->values()
             ->all();
+    }
+
+    private function supplierVariantRow(ProductSupplier $ps): array
+    {
+        return [
+            'id' => $ps->id,
+            'product_id' => $ps->product_id,
+            'variant_id' => $ps->variant_id,
+            'product_name' => $ps->product?->name ?? 'Producto',
+            'product_sku' => $ps->product?->sku_base,
+            'variant_sku' => $ps->variant?->sku,
+            'brand_name' => $ps->variant?->brand?->name,
+            'supplier_cost' => (float) $ps->supplier_cost,
+            'lead_time_days' => $ps->lead_time_days,
+            'minimum_order_quantity' => $ps->minimum_order_quantity,
+            'is_preferred' => (bool) $ps->is_preferred,
+            'total_stock' => (int) (
+                $ps->variant?->inventory?->sum('quantity_available')
+                ?? $ps->product?->inventory?->sum('quantity_available')
+                ?? 0
+            ),
+        ];
     }
 }

@@ -199,6 +199,7 @@ class ProductVariantController extends Controller
         $this->normalizePricingTaxRates($request);
 
         $validated = $request->validate([
+            'brand_id' => 'required|exists:brands,id',
             'sku' => [
                 'nullable',
                 'string',

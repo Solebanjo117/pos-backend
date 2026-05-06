@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Category;
 use App\Models\ProductAttribute;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -44,6 +45,8 @@ class ProductAttributeController extends Controller
         unset($validated['variant_id']);
         $validated['variant_id'] = null;
 
+        $this->validateInheritedSelectValue($validated);
+
         $attribute = ProductAttribute::create($validated);
 
         return response()->json([
@@ -71,6 +74,14 @@ class ProductAttributeController extends Controller
         }
 
         $validated = $request->validate($rules);
+        $nextAttribute = array_merge($attribute->only([
+            'name',
+            'value',
+            'source',
+            'source_category_id',
+        ]), $validated);
+
+        $this->validateInheritedSelectValue($nextAttribute);
 
         $attribute->update($validated);
 
@@ -99,5 +110,55 @@ class ProductAttributeController extends Controller
         return response()->json([
             'message' => 'Atributo eliminado exitosamente',
         ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $attribute
+     */
+    private function validateInheritedSelectValue(array $attribute): void
+    {
+        if (($attribute['source'] ?? 'custom') !== 'category' || empty($attribute['source_category_id'])) {
+            return;
+        }
+
+        $category = Category::find($attribute['source_category_id']);
+        if (! $category) {
+            return;
+        }
+
+        $attributeName = $this->attributeNameKey((string) ($attribute['name'] ?? ''));
+        $attributeValue = (string) ($attribute['value'] ?? '');
+
+        foreach (($category->default_attributes ?? []) as $definition) {
+            if ($this->attributeNameKey((string) ($definition['name'] ?? '')) !== $attributeName) {
+                continue;
+            }
+
+            $options = $definition['options'] ?? null;
+            if (($definition['type'] ?? 'string') !== 'select' || ! is_array($options) || count($options) === 0) {
+                return;
+            }
+
+            if (! in_array($attributeValue, $options, true)) {
+                throw new \Illuminate\Validation\ValidationException(
+                    validator([], []),
+                    response()->json([
+                        'message' => 'El valor "'.$attributeValue.'" no es valido para el atributo "'.$attribute['name'].'"',
+                        'errors' => [
+                            'value' => [
+                                'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
+                            ],
+                        ],
+                    ], 422)
+                );
+            }
+
+            return;
+        }
+    }
+
+    private function attributeNameKey(string $name): string
+    {
+        return mb_strtolower(trim($name));
     }
 }
