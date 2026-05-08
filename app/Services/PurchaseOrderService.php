@@ -130,6 +130,7 @@ class PurchaseOrderService
                         'quantity_ordered' => $itemData['quantity_ordered'],
                         'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
+                        'tax_rate' => $itemData['tax_rate'] ?? 7,
                         'notes' => $itemData['notes'] ?? null,
                     ]);
                 }
@@ -240,6 +241,7 @@ class PurchaseOrderService
                     'current_stock' => $item['current_stock'] ?? null,
                     'suggested_quantity' => max(1, (int) ($item['suggested_quantity'] ?? 1)),
                     'unit_cost' => (float) ($item['unit_cost'] ?? 0),
+                    'tax_rate' => 7,
                     'notes' => 'Stock bajo: actual '.($item['current_stock'] ?? 0).' / minimo '.($item['reorder_point'] ?? 0),
                 ])
                 ->values()
@@ -274,6 +276,7 @@ class PurchaseOrderService
                 'current_stock' => $item->stock_added_qty,
                 'suggested_quantity' => max(1, (int) ceil((float) $item->quantity_needed)),
                 'unit_cost' => (float) ($item->unit_cost ?? 0),
+                'tax_rate' => (int) ($item->tax_rate ?? 7),
                 'notes' => $item->notes ?: 'Desde OC diaria',
             ])
             ->values()
@@ -378,6 +381,7 @@ class PurchaseOrderService
                         'pre_stock_applied_qty' => min($existingPreApplied, max(0, $orderedQty)),
                         'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
+                        'tax_rate' => $itemData['tax_rate'] ?? 7,
                         'notes' => $itemData['notes'] ?? null,
                     ]);
                 }
@@ -437,6 +441,7 @@ class PurchaseOrderService
                     'quantity_ordered' => $item->quantity_ordered,
                     'units_per_package' => $item->units_per_package ?? 1,
                     'unit_cost' => $item->unit_cost,
+                    'tax_rate' => $item->tax_rate ?? 7,
                     'notes' => $item->notes,
                 ]);
             }
@@ -850,6 +855,7 @@ class PurchaseOrderService
                 'quantity_ordered' => $quantity,
                 'quantity_received' => $quantity, // Immediately received
                 'unit_cost' => $unitCost,
+                'tax_rate' => $data['tax_rate'] ?? 7,
                 'status' => 'received',
                 'notes' => $data['notes'] ?? null,
             ]);
@@ -956,6 +962,7 @@ class PurchaseOrderService
                     'product_id' => $itemData['product_id'] ?? null,
                     'quantity' => $itemData['quantity_ordered'] ?? $itemData['quantity'],
                     'unit_cost' => $itemData['unit_cost'],
+                    'tax_rate' => $itemData['tax_rate'] ?? 7,
                     'sale_price' => $itemData['sale_price'] ?? null,
                     'batch_number' => $itemData['batch_number'] ?? null,
                     'expiry_date' => $itemData['expiry_date'] ?? null,

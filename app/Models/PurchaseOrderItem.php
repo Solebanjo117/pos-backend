@@ -21,6 +21,8 @@ class PurchaseOrderItem extends Model
         'pre_stock_applied_qty',
         'unit_cost',
         'subtotal',
+        'tax_rate',
+        'tax_amount',
         'status',
         'notes',
     ];
@@ -35,6 +37,8 @@ class PurchaseOrderItem extends Model
         'pre_stock_applied_qty' => 'integer',
         'unit_cost' => 'decimal:2',
         'subtotal' => 'decimal:2',
+        'tax_rate' => 'integer',
+        'tax_amount' => 'decimal:2',
     ];
 
     protected $appends = [
@@ -45,6 +49,7 @@ class PurchaseOrderItem extends Model
         'total_units_received',
         'effective_received_quantity',
         'pre_applied_quantity',
+        'total',
     ];
 
     // ==================== RELATIONSHIPS ====================
@@ -120,6 +125,11 @@ class PurchaseOrderItem extends Model
         return $this->effective_received_quantity * ($this->units_per_package ?? 1);
     }
 
+    public function getTotalAttribute(): float
+    {
+        return round((float) $this->subtotal + (float) $this->tax_amount, 2);
+    }
+
     /**
      * Get the effective supplier: from item if set, otherwise from PO header.
      */
@@ -128,19 +138,36 @@ class PurchaseOrderItem extends Model
         return $this->supplier ?? $this->purchaseOrder?->supplier;
     }
 
+    public function setTaxRateAttribute($value): void
+    {
+        $parsed = is_numeric($value) ? (int) round((float) $value) : 7;
+
+        $this->attributes['tax_rate'] = max(0, min(100, $parsed));
+    }
+
+    private static function calculateLineAmounts(PurchaseOrderItem $item): void
+    {
+        $subtotal = (float) $item->quantity_ordered
+            * (float) ($item->units_per_package ?? 1)
+            * (float) $item->unit_cost;
+
+        $item->subtotal = round($subtotal, 2);
+        $item->tax_rate = $item->tax_rate ?? 7;
+        $item->tax_amount = round($item->subtotal * ((float) $item->tax_rate / 100), 2);
+    }
+
     // ==================== BOOT ====================
 
     protected static function boot()
     {
         parent::boot();
 
-        // Auto-calculate subtotal
         static::creating(function ($item) {
-            $item->subtotal = $item->quantity_ordered * ($item->units_per_package ?? 1) * $item->unit_cost;
+            self::calculateLineAmounts($item);
         });
 
         static::updating(function ($item) {
-            $item->subtotal = $item->quantity_ordered * ($item->units_per_package ?? 1) * $item->unit_cost;
+            self::calculateLineAmounts($item);
         });
     }
 }

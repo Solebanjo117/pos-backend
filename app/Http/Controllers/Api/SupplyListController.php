@@ -253,8 +253,6 @@ class SupplyListController extends Controller
 
             foreach ($grouped as $supplierId => $groupItems) {
                 $realSupplierId = ($supplierId === 'sin_proveedor') ? null : (int) $supplierId;
-                $taxAmount = round((float) $groupItems->sum(fn (SupplyListItem $item) => $item->tax_amount), 2);
-
                 $po = PurchaseOrder::create([
                     'supplier_id' => $realSupplierId,
                     'warehouse_id' => $warehouseId,
@@ -264,7 +262,7 @@ class SupplyListController extends Controller
                     'expected_date' => $supplyDate,
                     'notes' => 'Generada desde OC diaria / Lista de Abastecimiento',
                     'subtotal' => 0,
-                    'tax_amount' => $taxAmount,
+                    'tax_amount' => 0,
                     'shipping_cost' => 0,
                     'total' => 0,
                 ]);
@@ -280,6 +278,7 @@ class SupplyListController extends Controller
                         'quantity_ordered' => $orderedQty,
                         'pre_stock_applied_qty' => $preAppliedQty,
                         'unit_cost' => $supplyItem->unit_cost ?? 0,
+                        'tax_rate' => $supplyItem->tax_rate ?? 7,
                         'notes' => $supplyItem->notes,
                     ]);
                 }

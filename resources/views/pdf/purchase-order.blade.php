@@ -266,7 +266,7 @@
         ];
         $supplier = $purchaseOrder->supplier;
         $warehouse = $purchaseOrder->warehouse;
-        $itemColumnCount = 8 + ($supplier ? 0 : 1);
+        $itemColumnCount = ($isWorksheet ? 8 : 11) + ($supplier ? 0 : 1);
     @endphp
 
     <div class="header">
@@ -361,6 +361,9 @@
                     <th style="width: 120px;">Observaciones</th>
                 @else
                     <th style="width: 70px;" class="text-right">Costo</th>
+                    <th style="width: 78px;" class="text-right">Subtotal</th>
+                    <th style="width: 45px;" class="text-right">ITBM %</th>
+                    <th style="width: 65px;" class="text-right">ITBM</th>
                     <th style="width: 78px;" class="text-right">Total</th>
                 @endif
             </tr>
@@ -371,7 +374,9 @@
                     $product = $item->product;
                     $variant = $item->variant;
                     $brandName = $variant?->brand?->name;
-                    $lineTotal = (float) ($item->subtotal ?? ((float) $item->quantity_ordered * (float) ($item->units_per_package ?? 1) * (float) $item->unit_cost));
+                    $lineSubtotal = (float) ($item->subtotal ?? ((float) $item->quantity_ordered * (float) ($item->units_per_package ?? 1) * (float) $item->unit_cost));
+                    $lineTaxAmount = (float) ($item->tax_amount ?? 0);
+                    $lineTotal = (float) ($item->total ?? ($lineSubtotal + $lineTaxAmount));
                 @endphp
                 <tr>
                     @if($isWorksheet)
@@ -395,6 +400,9 @@
                         <td></td>
                     @else
                         <td class="text-right mono">${{ number_format((float) $item->unit_cost, 2) }}</td>
+                        <td class="text-right mono">${{ number_format($lineSubtotal, 2) }}</td>
+                        <td class="text-right mono">{{ number_format((float) ($item->tax_rate ?? 7), 0) }}%</td>
+                        <td class="text-right mono">${{ number_format($lineTaxAmount, 2) }}</td>
                         <td class="text-right mono">${{ number_format($lineTotal, 2) }}</td>
                     @endif
                 </tr>
