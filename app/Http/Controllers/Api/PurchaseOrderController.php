@@ -88,6 +88,8 @@ class PurchaseOrderController extends Controller
             'items.*.units_per_package' => 'nullable|integer|min:1',
             'items.*.unit_cost' => 'required|numeric|min:0',
             'items.*.tax_rate' => 'nullable|integer|min:0|max:100',
+            'items.*.tax_amount' => 'nullable|numeric|min:0',
+            'items.*.misc_cost' => 'nullable|numeric|min:0',
             'items.*.notes' => 'nullable|string',
             'source_supply_list_item_ids' => 'nullable|array',
             'source_supply_list_item_ids.*' => 'integer|exists:supply_list_items,id',
@@ -134,6 +136,8 @@ class PurchaseOrderController extends Controller
             'items.*.units_per_package' => 'nullable|integer|min:1',
             'items.*.unit_cost' => 'required_with:items|numeric|min:0',
             'items.*.tax_rate' => 'nullable|integer|min:0|max:100',
+            'items.*.tax_amount' => 'nullable|numeric|min:0',
+            'items.*.misc_cost' => 'nullable|numeric|min:0',
             'items.*.notes' => 'nullable|string',
         ]);
 

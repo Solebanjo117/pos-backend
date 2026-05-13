@@ -131,6 +131,8 @@ class PurchaseOrderService
                         'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
                         'tax_rate' => $itemData['tax_rate'] ?? 7,
+                        'tax_amount' => isset($itemData['tax_amount']) ? (float) $itemData['tax_amount'] : null,
+                        'misc_cost' => (float) ($itemData['misc_cost'] ?? 0),
                         'notes' => $itemData['notes'] ?? null,
                     ]);
                 }
@@ -242,6 +244,8 @@ class PurchaseOrderService
                     'suggested_quantity' => max(1, (int) ($item['suggested_quantity'] ?? 1)),
                     'unit_cost' => (float) ($item['unit_cost'] ?? 0),
                     'tax_rate' => 7,
+                    'tax_amount' => null,
+                    'misc_cost' => 0,
                     'notes' => 'Stock bajo: actual '.($item['current_stock'] ?? 0).' / minimo '.($item['reorder_point'] ?? 0),
                 ])
                 ->values()
@@ -277,6 +281,8 @@ class PurchaseOrderService
                 'suggested_quantity' => max(1, (int) ceil((float) $item->quantity_needed)),
                 'unit_cost' => (float) ($item->unit_cost ?? 0),
                 'tax_rate' => (int) ($item->tax_rate ?? 7),
+                'tax_amount' => null,
+                'misc_cost' => 0,
                 'notes' => $item->notes ?: 'Desde OC diaria',
             ])
             ->values()
@@ -382,6 +388,8 @@ class PurchaseOrderService
                         'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
                         'tax_rate' => $itemData['tax_rate'] ?? 7,
+                        'tax_amount' => isset($itemData['tax_amount']) ? (float) $itemData['tax_amount'] : null,
+                        'misc_cost' => (float) ($itemData['misc_cost'] ?? 0),
                         'notes' => $itemData['notes'] ?? null,
                     ]);
                 }
@@ -442,6 +450,8 @@ class PurchaseOrderService
                     'units_per_package' => $item->units_per_package ?? 1,
                     'unit_cost' => $item->unit_cost,
                     'tax_rate' => $item->tax_rate ?? 7,
+                    'tax_amount' => (float) ($item->tax_amount ?? 0),
+                    'misc_cost' => (float) ($item->misc_cost ?? 0),
                     'notes' => $item->notes,
                 ]);
             }

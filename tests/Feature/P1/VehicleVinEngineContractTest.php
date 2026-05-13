@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\User;
+use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
 use App\Models\VehicleMake;
 use App\Models\VehicleModel;
@@ -104,6 +105,43 @@ it('stores vins by engine id and resolves model from pivot when needed', functio
         'model_id' => $model->id,
         'vin' => 'ENGVIN00000000003',
     ]);
+});
+
+it('rejects legacy engine vin endpoints when engine belongs to multiple models', function () {
+    $make = VehicleMake::create(['name' => 'Vin Multi Model Make']);
+
+    $modelA = VehicleModel::create([
+        'make_id' => $make->id,
+        'name' => 'Vin Multi Model A',
+        'year_from' => 2016,
+        'year_to' => 2020,
+    ]);
+
+    $modelB = VehicleModel::create([
+        'make_id' => $make->id,
+        'name' => 'Vin Multi Model B',
+        'year_from' => 2021,
+        'year_to' => 2026,
+    ]);
+
+    $engine = VehicleEngine::create([
+        'model_id' => null,
+        'engine_code' => 'VIN-MULTI-ENG',
+        'displacement' => '1.8L',
+        'fuel_type' => 'Gasoline',
+    ]);
+
+    $engine->models()->sync([$modelA->id, $modelB->id]);
+
+    $this->getJson("/api/v1/vehicle-engines/{$engine->id}/vins")
+        ->assertUnprocessable()
+        ->assertJsonPath('message', 'El motor pertenece a varios modelos. Usa el endpoint de VIN por modelo y motor.');
+
+    $this->postJson("/api/v1/vehicle-engines/{$engine->id}/vins", [
+        'vin' => 'MULTIMODELVIN001',
+    ])
+        ->assertUnprocessable()
+        ->assertJsonPath('message', 'El motor pertenece a varios modelos. Usa el endpoint de VIN por modelo y motor.');
 });
 
 it('deletes vins by engine id without crossing engines', function () {
@@ -251,4 +289,185 @@ it('accepts vins up to 40 chars and rejects 41 chars for model endpoints', funct
     ])
         ->assertUnprocessable()
         ->assertJsonValidationErrors(['vin']);
+});
+
+it('stores and lists vins scoped by model chassis and engine', function () {
+    $make = VehicleMake::create(['name' => 'Scoped Vin Make']);
+
+    $modelP10 = VehicleModel::create([
+        'make_id' => $make->id,
+        'name' => 'YARIS',
+        'year_from' => 2000,
+        'year_to' => 2005,
+        'generation' => 'P10',
+    ]);
+
+    $modelP90 = VehicleModel::create([
+        'make_id' => $make->id,
+        'name' => 'YARIS',
+        'year_from' => 2006,
+        'year_to' => 2013,
+        'generation' => 'P90',
+    ]);
+
+    $chassisP10 = VehicleChassis::create([
+        'model_id' => $modelP10->id,
+        'code' => 'P10',
+        'name' => 'P10',
+    ]);
+
+    $chassisP90 = VehicleChassis::create([
+        'model_id' => $modelP90->id,
+        'code' => 'P90',
+        'name' => 'P90',
+    ]);
+
+    $engineP10 = VehicleEngine::create([
+        'model_id' => $modelP10->id,
+        'engine_code' => '1NZFE',
+    ]);
+
+    $engineP90 = VehicleEngine::create([
+        'model_id' => $modelP90->id,
+        'engine_code' => '1NZFE',
+    ]);
+
+    $this->postJson("/api/v1/vehicle-models/{$modelP90->id}/chassis/{$chassisP90->id}/engines/{$engineP90->id}/vins", [
+        'vin' => 'JTDBT933X01109408',
+    ])
+        ->assertCreated()
+        ->assertJsonPath('data.model_id', $modelP90->id)
+        ->assertJsonPath('data.chassis_id', $chassisP90->id)
+        ->assertJsonPath('data.engine_id', $engineP90->id);
+
+    $this->getJson("/api/v1/vehicle-models/{$modelP90->id}/chassis/{$chassisP90->id}/engines/{$engineP90->id}/vins")
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.vin', 'JTDBT933X01109408');
+
+    $this->getJson("/api/v1/vehicle-models/{$modelP10->id}/chassis/{$chassisP10->id}/engines/{$engineP10->id}/vins")
+        ->assertOk()
+        ->assertJsonCount(0, 'data');
+});
+
+it('skips duplicate scoped vins without failing', function () {
+    $make = VehicleMake::create(['name' => 'Scoped Duplicate Make']);
+    $model = VehicleModel::create(['make_id' => $make->id, 'name' => 'YARIS', 'year_from' => 2006, 'year_to' => 2013]);
+    $chassis = VehicleChassis::create(['model_id' => $model->id, 'code' => 'P90', 'name' => 'P90']);
+    $engine = VehicleEngine::create(['model_id' => $model->id, 'engine_code' => '1NZFE']);
+
+    $payload = ['vin' => 'JTDBT933X01109408'];
+
+    $this->postJson("/api/v1/vehicle-models/{$model->id}/chassis/{$chassis->id}/engines/{$engine->id}/vins", $payload)
+        ->assertCreated();
+
+    $this->postJson("/api/v1/vehicle-models/{$model->id}/chassis/{$chassis->id}/engines/{$engine->id}/vins", $payload)
+        ->assertOk();
+
+    $this->assertDatabaseCount('vehicle_vins', 1);
+});
+
+it('stores and lists vins scoped by model and engine without chassis', function () {
+    $make = VehicleMake::create(['name' => 'Model Engine Vin Make']);
+    $model = VehicleModel::create(['make_id' => $make->id, 'name' => 'YARIS', 'year_from' => 2006, 'year_to' => 2013]);
+    $engine = VehicleEngine::create(['model_id' => $model->id, 'engine_code' => '1NZFE']);
+
+    $this->postJson("/api/v1/vehicle-models/{$model->id}/engines/{$engine->id}/vins", [
+        'vin' => 'JTDBT933X01109408',
+    ])
+        ->assertCreated()
+        ->assertJsonPath('data.model_id', $model->id)
+        ->assertJsonPath('data.engine_id', $engine->id)
+        ->assertJsonPath('data.chassis_id', null);
+
+    $this->getJson("/api/v1/vehicle-models/{$model->id}/engines/{$engine->id}/vins")
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.vin', 'JTDBT933X01109408');
+});
+
+it('keeps same engine code isolated by model in model-engine vin scope', function () {
+    $make = VehicleMake::create(['name' => 'Model Scope Make']);
+    $modelA = VehicleModel::create(['make_id' => $make->id, 'name' => 'YARIS', 'year_from' => 2000, 'year_to' => 2005, 'generation' => 'P10']);
+    $modelB = VehicleModel::create(['make_id' => $make->id, 'name' => 'YARIS', 'year_from' => 2006, 'year_to' => 2013, 'generation' => 'P90']);
+    $engineA = VehicleEngine::create(['model_id' => $modelA->id, 'engine_code' => '1NZFE']);
+    $engineB = VehicleEngine::create(['model_id' => $modelB->id, 'engine_code' => '1NZFE']);
+
+    $this->postJson("/api/v1/vehicle-models/{$modelA->id}/engines/{$engineA->id}/vins", [
+        'vin' => 'VINMODELASCOPE001',
+    ])->assertCreated();
+
+    $this->postJson("/api/v1/vehicle-models/{$modelB->id}/engines/{$engineB->id}/vins", [
+        'vin' => 'VINMODELBSCOP001',
+    ])->assertCreated();
+
+    $this->getJson("/api/v1/vehicle-models/{$modelA->id}/engines/{$engineA->id}/vins")
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.vin', 'VINMODELASCOPE001');
+
+    $this->getJson("/api/v1/vehicle-models/{$modelB->id}/engines/{$engineB->id}/vins")
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.vin', 'VINMODELBSCOP001');
+});
+
+it('allows same vin in model-engine and chassis-exact scopes', function () {
+    $make = VehicleMake::create(['name' => 'Mixed Scope Make']);
+    $model = VehicleModel::create(['make_id' => $make->id, 'name' => 'YARIS', 'year_from' => 2006, 'year_to' => 2013]);
+    $engine = VehicleEngine::create(['model_id' => $model->id, 'engine_code' => '1NZFE']);
+    $chassis = VehicleChassis::create(['model_id' => $model->id, 'code' => 'P90', 'name' => 'P90']);
+    $model->chassis()->syncWithoutDetaching([$chassis->id]);
+
+    $this->postJson("/api/v1/vehicle-models/{$model->id}/engines/{$engine->id}/vins", [
+        'vin' => 'JTDBT933X01109408',
+    ])->assertCreated();
+
+    $this->postJson("/api/v1/vehicle-models/{$model->id}/chassis/{$chassis->id}/engines/{$engine->id}/vins", [
+        'vin' => 'JTDBT933X01109408',
+    ])->assertCreated();
+
+    $this->assertDatabaseHas('vehicle_vins', [
+        'model_id' => $model->id,
+        'chassis_id' => null,
+        'engine_id' => $engine->id,
+        'vin' => 'JTDBT933X01109408',
+    ]);
+
+    $this->assertDatabaseHas('vehicle_vins', [
+        'model_id' => $model->id,
+        'chassis_id' => $chassis->id,
+        'engine_id' => $engine->id,
+        'vin' => 'JTDBT933X01109408',
+    ]);
+});
+
+it('moves scoped vin between real chassis for the same model and engine', function () {
+    $make = VehicleMake::create(['name' => 'Move Vin Make']);
+    $model = VehicleModel::create(['make_id' => $make->id, 'name' => 'YARIS', 'year_from' => 2006, 'year_to' => 2013]);
+    $engine = VehicleEngine::create(['model_id' => $model->id, 'engine_code' => '1NZFE']);
+    $sourceChassis = VehicleChassis::create(['model_id' => $model->id, 'code' => 'P10', 'name' => 'P10']);
+    $realChassis = VehicleChassis::create(['model_id' => $model->id, 'code' => 'P90', 'name' => 'P90']);
+    $model->chassis()->syncWithoutDetaching([$sourceChassis->id, $realChassis->id]);
+
+    $vin = VehicleVin::create([
+        'model_id' => $model->id,
+        'chassis_id' => $sourceChassis->id,
+        'engine_id' => $engine->id,
+        'vin' => 'JTDBT933X01109408',
+    ]);
+
+    $this->patchJson("/api/v1/vehicle-models/{$model->id}/chassis/{$sourceChassis->id}/engines/{$engine->id}/vins/{$vin->id}", [
+        'target_chassis_id' => $realChassis->id,
+    ])
+        ->assertOk()
+        ->assertJsonPath('data.chassis_id', $realChassis->id);
+
+    $this->assertDatabaseHas('vehicle_vins', [
+        'id' => $vin->id,
+        'model_id' => $model->id,
+        'chassis_id' => $realChassis->id,
+        'engine_id' => $engine->id,
+        'vin' => 'JTDBT933X01109408',
+    ]);
 });

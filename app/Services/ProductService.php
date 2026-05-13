@@ -9,6 +9,8 @@ use App\Models\ProductVariant;
 use App\Models\ProductVehicleCompatibility;
 use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
+use App\Models\VehicleMake;
+use App\Models\VehicleModel;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -407,9 +409,97 @@ class ProductService
         $product->alternatives()->sync($syncPayload);
     }
 
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function normalizeCompatibilityData(array $data): array
+    {
+        $compatibility = is_array($data['vehicle_compatibility'] ?? null)
+            ? $data['vehicle_compatibility']
+            : [];
+
+        if (array_is_list($compatibility)) {
+            $compatibility = [
+                'engines' => collect($compatibility)
+                    ->filter()
+                    ->map(fn ($engineId): array => ['engine_id' => (int) $engineId])
+                    ->values()
+                    ->all(),
+            ];
+        }
+
+        if (! empty($data['vehicle_chassis'])) {
+            $compatibility['chassis'] = collect($data['vehicle_chassis'])
+                ->filter()
+                ->map(fn ($chassisId): array => ['chassis_id' => (int) $chassisId])
+                ->values()
+                ->all();
+        }
+
+        if (! empty($data['vehicle_makes'])) {
+            $compatibility['makes'] = collect($data['vehicle_makes'])
+                ->filter()
+                ->map(fn ($makeId): array => ['make_id' => (int) $makeId])
+                ->values()
+                ->all();
+        }
+
+        if (! empty($data['vehicle_models'])) {
+            $compatibility['models'] = collect($data['vehicle_models'])
+                ->filter()
+                ->map(fn ($modelId): array => ['model_id' => (int) $modelId])
+                ->values()
+                ->all();
+        }
+
+        foreach (['all_engines', 'all_chassis', 'is_universal'] as $flag) {
+            if (array_key_exists($flag, $data)) {
+                $compatibility[$flag] = $data[$flag];
+            }
+        }
+
+        return array_filter($compatibility, fn (mixed $value): bool => $value !== null && $value !== [] && $value !== false);
+    }
+
     private function syncVehicleCompatibility(Product $product, array $compatibility): void
     {
         $product->vehicleCompatibility()->delete();
+
+        $makeIds = collect($compatibility['makes'] ?? [])
+            ->pluck('make_id')
+            ->merge($compatibility['make_ids'] ?? [])
+            ->merge($compatibility['vehicle_makes'] ?? [])
+            ->filter()
+            ->map(fn ($makeId) => (int) $makeId)
+            ->unique()
+            ->values();
+
+        foreach ($makeIds as $makeId) {
+            $product->vehicleCompatibility()->create([
+                'scope_type' => 'make',
+                'make_id' => $makeId,
+            ]);
+        }
+
+        $modelIds = collect($compatibility['models'] ?? [])
+            ->pluck('model_id')
+            ->merge($compatibility['model_ids'] ?? [])
+            ->merge($compatibility['vehicle_models'] ?? [])
+            ->filter()
+            ->map(fn ($modelId) => (int) $modelId)
+            ->unique()
+            ->values();
+
+        foreach ($modelIds as $modelId) {
+            $model = VehicleModel::query()->find($modelId);
+            $product->vehicleCompatibility()->create([
+                'scope_type' => 'model',
+                'make_id' => $model?->make_id,
+                'model_id' => $modelId,
+                'all_chassis' => true,
+            ]);
+        }
 
         $engineIds = collect($compatibility['engines'] ?? [])
             ->pluck('engine_id')
@@ -419,7 +509,11 @@ class ProductService
             ->values();
 
         foreach ($engineIds as $engineId) {
+            $engine = VehicleEngine::query()->with('model')->find($engineId);
             $product->vehicleCompatibility()->create([
+                'scope_type' => 'engine',
+                'make_id' => $engine?->model?->make_id,
+                'model_id' => $engine?->model_id,
                 'engine_id' => $engineId,
             ]);
         }
@@ -432,19 +526,25 @@ class ProductService
             ->values();
 
         foreach ($chassisIds as $chassisId) {
+            $chassis = VehicleChassis::query()->with('model')->find($chassisId);
             $product->vehicleCompatibility()->create([
+                'scope_type' => 'chassis',
+                'make_id' => $chassis?->model?->make_id,
+                'model_id' => $chassis?->model_id,
                 'chassis_id' => $chassisId,
             ]);
         }
 
         if ((bool) ($compatibility['allEngines'] ?? $compatibility['all_engines'] ?? false)) {
             $product->vehicleCompatibility()->create([
+                'scope_type' => 'universal',
                 'all_engines' => true,
             ]);
         }
 
         if ((bool) ($compatibility['allChassis'] ?? $compatibility['all_chassis'] ?? false)) {
             $product->vehicleCompatibility()->create([
+                'scope_type' => 'universal',
                 'all_chassis' => true,
             ]);
         }
@@ -599,10 +699,9 @@ class ProductService
             }
 
             // Assign vehicle compatibility
-            if (! empty($data['vehicle_compatibility'])) {
-                foreach ($data['vehicle_compatibility'] as $engineId) {
-                    $product->vehicleCompatibility()->firstOrCreate(['engine_id' => $engineId]);
-                }
+            $compatibilityPayload = $this->normalizeCompatibilityData($data);
+            if ($compatibilityPayload !== []) {
+                $this->syncVehicleCompatibility($product, $compatibilityPayload);
             }
 
             // Assign VINs
@@ -622,7 +721,7 @@ class ProductService
             }
 
             // Append vehicle/VIN info only for backend auto-generated names.
-            if ($nameWasAutoGenerated && (! empty($data['vehicle_compatibility']) || ! empty($data['vins']))) {
+            if ($nameWasAutoGenerated && ($compatibilityPayload !== [] || ! empty($data['vins']))) {
                 $this->updateProductNameWithVehicles($product);
             }
 
@@ -943,7 +1042,7 @@ class ProductService
                     $query->with(['alternatives', 'oemReferences']);
                     break;
                 case 'compatibility':
-                    $query->with('vehicleCompatibility.engine.model.make', 'vehicleCompatibility.chassis.model.make');
+                    $query->with('vehicleCompatibility.make', 'vehicleCompatibility.model.make', 'vehicleCompatibility.engine.model.make', 'vehicleCompatibility.chassis.model.make');
                     break;
                 case 'vins':
                     $query->with('vins');
@@ -1094,10 +1193,63 @@ class ProductService
         return "{$make->name} {$model->name}{$yearRange}";
     }
 
+    private function formatVehicleScopeLabel(ProductVehicleCompatibility $compatibility, bool $isEnginePart): ?string
+    {
+        if ($compatibility->scope_type === 'make') {
+            return $compatibility->make?->name;
+        }
+
+        if ($compatibility->scope_type === 'model') {
+            $model = $compatibility->model;
+            $make = $model?->make ?? $compatibility->make;
+
+            return ($make && $model) ? "{$make->name} {$model->name}" : null;
+        }
+
+        if ($compatibility->scope_type === 'universal') {
+            return 'Universal';
+        }
+
+        return $this->formatVehicleLabel($compatibility->engine, $compatibility->chassis, $isEnginePart);
+    }
+
     private function compatibilityVehicleLabels(Product $product, bool $isEnginePart, ?array $draftCompatibility = null): Collection
     {
         if ($draftCompatibility !== null) {
             $labels = collect();
+
+            $makeIds = collect($draftCompatibility['makes'] ?? [])
+                ->pluck('make_id')
+                ->filter()
+                ->map(fn ($makeId) => (int) $makeId)
+                ->unique()
+                ->values();
+
+            if ($makeIds->isNotEmpty()) {
+                VehicleMake::query()
+                    ->whereIn('id', $makeIds->all())
+                    ->pluck('name')
+                    ->each(fn (string $name) => $labels->push($name));
+            }
+
+            $modelIds = collect($draftCompatibility['models'] ?? [])
+                ->pluck('model_id')
+                ->filter()
+                ->map(fn ($modelId) => (int) $modelId)
+                ->unique()
+                ->values();
+
+            if ($modelIds->isNotEmpty()) {
+                VehicleModel::query()
+                    ->with('make')
+                    ->whereIn('id', $modelIds->all())
+                    ->get()
+                    ->each(function (VehicleModel $model) use ($labels): void {
+                        if ($model->make) {
+                            $labels->push("{$model->make->name} {$model->name}");
+                        }
+                    });
+            }
 
             $engineIds = collect($draftCompatibility['engines'] ?? [])
                 ->pluck('engine_id')
@@ -1144,13 +1296,9 @@ class ProductService
 
         return ProductVehicleCompatibility::query()
             ->where('product_id', $product->id)
-            ->with(['engine.model.make', 'chassis.model.make'])
+            ->with(['make', 'model.make', 'engine.model.make', 'chassis.model.make'])
             ->get()
-            ->map(fn (ProductVehicleCompatibility $compatibility) => $this->formatVehicleLabel(
-                $compatibility->engine,
-                $compatibility->chassis,
-                $isEnginePart,
-            ))
+            ->map(fn (ProductVehicleCompatibility $compatibility) => $this->formatVehicleScopeLabel($compatibility, $isEnginePart))
             ->filter()
             ->values();
     }
@@ -1584,6 +1732,9 @@ class ProductService
 
             foreach ($source->vehicleCompatibility as $compatibility) {
                 $duplicatedProduct->vehicleCompatibility()->create([
+                    'scope_type' => $compatibility->scope_type,
+                    'make_id' => $compatibility->make_id,
+                    'model_id' => $compatibility->model_id,
                     'engine_id' => $compatibility->engine_id,
                     'chassis_id' => $compatibility->chassis_id,
                     'notes' => $compatibility->notes,

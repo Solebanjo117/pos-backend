@@ -21,6 +21,7 @@ class CategoryImport extends BaseImport
             ['key' => 'itbm_porcentaje', 'label' => 'ITBM %', 'type' => 'number'],
             ['key' => 'prioridad', 'label' => 'Prioridad', 'type' => 'number'],
             ['key' => 'precio_minimo_sugerido', 'label' => 'Precio Minimo Sugerido', 'type' => 'number'],
+            ['key' => 'upsale_path', 'label' => 'Path Upsale', 'type' => 'text'],
             ['key' => 'atributos_default', 'label' => 'Atributos Default', 'type' => 'text'],
         ];
     }
@@ -39,6 +40,7 @@ class CategoryImport extends BaseImport
             'itbm_porcentaje' => 7,
             'prioridad' => 10,
             'precio_minimo_sugerido' => '',
+            'upsale_path' => 'motor/encendido',
             'atributos_default' => 'posicion:requerido,largo:15cm',
         ];
     }
@@ -62,6 +64,7 @@ class CategoryImport extends BaseImport
             'itbm_porcentaje', 'itbm_percent', 'itbm_percentage' => 'itbm_porcentaje',
             'prioridad', 'priority' => 'prioridad',
             'precio_minimo_sugerido', 'min_suggested_price', 'precio_minimo' => 'precio_minimo_sugerido',
+            'upsale_path', 'path_upsale', 'categoria_upsale', 'category_upsale' => 'upsale_path',
             'atributos_default', 'default_attributes', 'attributes' => 'atributos_default',
             default => $header,
         };
@@ -140,6 +143,7 @@ class CategoryImport extends BaseImport
             'itbm_percent' => $this->parseMoney($row['itbm_porcentaje'] ?? null),
             'priority' => $this->parseInteger($row['prioridad'] ?? null),
             'min_suggested_price' => $this->parseMoney($row['precio_minimo_sugerido'] ?? null),
+            'upsale_path' => $this->nullIfEmpty($row['upsale_path'] ?? null),
         ];
 
         if ($slug !== null) {

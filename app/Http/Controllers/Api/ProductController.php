@@ -866,14 +866,25 @@ class ProductController extends Controller
     {
         // Get compatibility records with chassis data
         $compatibility = ProductVehicleCompatibility::where('product_id', $product->id)
-            ->with(['engine.model.make', 'chassis.model.make'])
+            ->with(['make', 'model.make', 'engine.model.make', 'chassis.model.make'])
             ->get()
             ->map(function ($comp) {
+                $makeName = $comp->make?->name
+                    ?? $comp->model?->make?->name
+                    ?? $comp->engine?->model?->make?->name
+                    ?? $comp->chassis?->model?->make?->name;
+                $modelName = $comp->model?->name
+                    ?? $comp->engine?->model?->name
+                    ?? $comp->chassis?->model?->name;
+
                 $entry = [
                     'id' => $comp->id,
-                    'make' => $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
-                    'model' => $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
-                    'year_range' => $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
+                    'scope_type' => $comp->scope_type,
+                    'make_id' => $comp->make_id,
+                    'model_id' => $comp->model_id,
+                    'make' => $makeName,
+                    'model' => $modelName,
+                    'year_range' => $comp->model?->year_range ?? $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
                     'engine' => $comp->engine?->full_description,
                     'chassis' => null,
                     'all_engines' => (bool) $comp->all_engines,

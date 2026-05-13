@@ -1,0 +1,43 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreAccountReceiptRequest;
+use App\Models\Customer;
+use App\Services\AccountLedgerService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+
+class AccountsReceivableController extends Controller
+{
+    public function __construct(
+        private AccountLedgerService $accountLedgerService
+    ) {}
+
+    public function index(Request $request): JsonResponse
+    {
+        return response()->json($this->accountLedgerService->receivablesSummary(
+            $request->only(['search', 'per_page', 'page'])
+        ));
+    }
+
+    public function statement(Customer $customer): JsonResponse
+    {
+        return response()->json([
+            'data' => $this->accountLedgerService->customerStatement($customer),
+        ]);
+    }
+
+    public function storeReceipt(StoreAccountReceiptRequest $request, Customer $customer): JsonResponse
+    {
+        try {
+            return response()->json([
+                'message' => 'Cobro registrado exitosamente.',
+                'data' => $this->accountLedgerService->recordCustomerReceipt($customer, $request->validated()),
+            ], 201);
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+    }
+}

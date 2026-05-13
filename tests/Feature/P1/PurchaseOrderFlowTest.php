@@ -166,3 +166,73 @@ it('recalculates line taxes when updating a draft purchase order', function () {
         ->and((int) $order->items[0]->tax_rate)->toBe(0)
         ->and((float) $order->items[0]->tax_amount)->toBe(0.0);
 });
+
+it('respects manual tax_amount when explicitly provided per line', function () {
+    [$buyer, $warehouse, $supplier, $product] = purchaseOrderBuyerContext();
+
+    $response = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'items' => [
+            [
+                'product_id' => $product->id,
+                'quantity_ordered' => 2,
+                'unit_cost' => 50,
+                'tax_amount' => 5.00, // Manual override instead of auto 7% = 7.00
+            ],
+        ],
+    ]);
+
+    $response->assertCreated();
+
+    $order = PurchaseOrder::with('items')->findOrFail($response->json('data.id'));
+
+    // subtotal = 2 * 1 * 50 = 100
+    expect((float) $order->items[0]->subtotal)->toBe(100.0)
+        // Manual tax_amount kept as 5.00 (not auto 7.00)
+        ->and((float) $order->items[0]->tax_amount)->toBe(5.0)
+        ->and((float) $order->tax_amount)->toBe(5.0)
+        // total = 100 + 5 = 105 (no shipping, no misc)
+        ->and((float) $order->total)->toBe(105.0);
+});
+
+it('includes misc_cost per line in purchase order totals', function () {
+    [$buyer, $warehouse, $supplier, $firstProduct, $secondProduct] = purchaseOrderBuyerContext();
+
+    $response = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'items' => [
+            [
+                'product_id' => $firstProduct->id,
+                'quantity_ordered' => 1,
+                'unit_cost' => 100,
+                'tax_amount' => 7.00,
+                'misc_cost' => 10.00,
+            ],
+            [
+                'product_id' => $secondProduct->id,
+                'quantity_ordered' => 2,
+                'unit_cost' => 50,
+                'tax_amount' => 0.00,
+                'misc_cost' => 5.00,
+            ],
+        ],
+    ]);
+
+    $response->assertCreated();
+
+    $order = PurchaseOrder::with('items')->findOrFail($response->json('data.id'));
+
+    // item1: subtotal=100, tax=7, misc=10, line_total=117
+    // item2: subtotal=100, tax=0, misc=5, line_total=105
+    expect((float) $order->subtotal)->toBe(200.0)
+        ->and((float) $order->tax_amount)->toBe(7.0)
+        // PO header total = subtotal + tax + misc_sum = 200 + 7 + 15 = 222
+        ->and((float) $order->total)->toBe(222.0)
+        ->and((float) $order->items[0]->misc_cost)->toBe(10.0)
+        ->and((float) $order->items[1]->misc_cost)->toBe(5.0)
+        // Accessor total on each item
+        ->and((float) $order->items[0]->total)->toBe(117.0)
+        ->and((float) $order->items[1]->total)->toBe(105.0);
+});

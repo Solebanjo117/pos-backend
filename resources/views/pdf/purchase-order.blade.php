@@ -266,7 +266,7 @@
         ];
         $supplier = $purchaseOrder->supplier;
         $warehouse = $purchaseOrder->warehouse;
-        $itemColumnCount = ($isWorksheet ? 8 : 11) + ($supplier ? 0 : 1);
+        $itemColumnCount = ($isWorksheet ? 7 : 11) + ($supplier ? 0 : 1);
     @endphp
 
     <div class="header">
@@ -355,15 +355,13 @@
                     <th style="width: 95px;">Proveedor</th>
                 @endif
                 <th>Articulo</th>
-                <th style="width: 48px;" class="text-right">Cant.</th>
-                <th style="width: 48px;" class="text-right">Und/Paq</th>
+                <th style="width: 45px;" class="text-right">QTY</th>
                 @if($isWorksheet)
                     <th style="width: 120px;">Observaciones</th>
                 @else
                     <th style="width: 70px;" class="text-right">Costo</th>
-                    <th style="width: 78px;" class="text-right">Subtotal</th>
-                    <th style="width: 45px;" class="text-right">ITBM %</th>
                     <th style="width: 65px;" class="text-right">ITBM</th>
+                    <th style="width: 65px;" class="text-right">Misc</th>
                     <th style="width: 78px;" class="text-right">Total</th>
                 @endif
             </tr>
@@ -376,7 +374,8 @@
                     $brandName = $variant?->brand?->name;
                     $lineSubtotal = (float) ($item->subtotal ?? ((float) $item->quantity_ordered * (float) ($item->units_per_package ?? 1) * (float) $item->unit_cost));
                     $lineTaxAmount = (float) ($item->tax_amount ?? 0);
-                    $lineTotal = (float) ($item->total ?? ($lineSubtotal + $lineTaxAmount));
+                    $lineMiscCost = (float) ($item->misc_cost ?? 0);
+                    $lineTotal = (float) ($item->total ?? ($lineSubtotal + $lineTaxAmount + $lineMiscCost));
                 @endphp
                 <tr>
                     @if($isWorksheet)
@@ -395,14 +394,12 @@
                         @endif
                     </td>
                     <td class="text-right mono">{{ number_format((float) $item->quantity_ordered, 0) }}</td>
-                    <td class="text-right mono">{{ number_format((float) ($item->units_per_package ?? 1), 0) }}</td>
                     @if($isWorksheet)
                         <td></td>
                     @else
                         <td class="text-right mono">${{ number_format((float) $item->unit_cost, 2) }}</td>
-                        <td class="text-right mono">${{ number_format($lineSubtotal, 2) }}</td>
-                        <td class="text-right mono">{{ number_format((float) ($item->tax_rate ?? 7), 0) }}%</td>
                         <td class="text-right mono">${{ number_format($lineTaxAmount, 2) }}</td>
+                        <td class="text-right mono">${{ number_format($lineMiscCost, 2) }}</td>
                         <td class="text-right mono">${{ number_format($lineTotal, 2) }}</td>
                     @endif
                 </tr>
@@ -422,8 +419,15 @@
             </div>
             @if((float) $purchaseOrder->tax_amount > 0)
                 <div class="total-row">
-                    <div class="total-label">Impuesto</div>
+                    <div class="total-label">ITBM</div>
                     <div class="total-value">${{ number_format((float) $purchaseOrder->tax_amount, 2) }}</div>
+                </div>
+            @endif
+            @php $miscSum = $purchaseOrder->items->sum(fn($i) => (float) ($i->misc_cost ?? 0)); @endphp
+            @if($miscSum > 0)
+                <div class="total-row">
+                    <div class="total-label">Misc</div>
+                    <div class="total-value">${{ number_format($miscSum, 2) }}</div>
                 </div>
             @endif
             @if((float) $purchaseOrder->shipping_cost > 0)

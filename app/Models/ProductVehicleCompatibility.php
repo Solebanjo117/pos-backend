@@ -14,6 +14,9 @@ class ProductVehicleCompatibility extends Model
 
     protected $fillable = [
         'product_id',
+        'scope_type',
+        'make_id',
+        'model_id',
         'engine_id',
         'chassis_id',
         'notes',
@@ -23,7 +26,9 @@ class ProductVehicleCompatibility extends Model
 
     protected $casts = [
         'product_id' => 'integer',
-        'engine_id'  => 'integer',
+        'make_id' => 'integer',
+        'model_id' => 'integer',
+        'engine_id' => 'integer',
         'chassis_id' => 'integer',
         'all_engines' => 'boolean',
         'all_chassis' => 'boolean',
@@ -43,6 +48,16 @@ class ProductVehicleCompatibility extends Model
     public function engine(): BelongsTo
     {
         return $this->belongsTo(VehicleEngine::class, 'engine_id');
+    }
+
+    public function make(): BelongsTo
+    {
+        return $this->belongsTo(VehicleMake::class, 'make_id');
+    }
+
+    public function model(): BelongsTo
+    {
+        return $this->belongsTo(VehicleModel::class, 'model_id');
     }
 
     /**

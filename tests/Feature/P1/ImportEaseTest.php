@@ -10,9 +10,10 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\Supplier;
+use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
-use App\Models\VehicleMake;
 use App\Models\VehicleModel;
+use App\Models\VehicleVin;
 use App\Services\ProductService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -218,4 +219,134 @@ it('imports vehicle engine metadata with closed fuel catalog normalization', fun
         ->and($engine->fuel_type)->toBe('Gasoline')
         ->and($engine->displacement)->toBe('1.5L')
         ->and($engine->aspiration)->toBe('Natural');
+});
+
+it('imports multiple vehicle vins scoped to model chassis and engine', function () {
+    $import = new VehicleImport;
+
+    $import->execute([
+        [
+            '__row' => 2,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2006-2013',
+            'generation' => 'P90',
+            'code' => 'P90',
+            'engine' => '2NZFE',
+            'displacement' => '1.3L',
+            'fuel_type' => 'Gasoline',
+            'vin' => "JTDKW923900008116\nJTDKW923705134932",
+        ],
+    ]);
+
+    expect($import->successCount)->toBe(1)
+        ->and($import->errorCount)->toBe(0);
+
+    $model = VehicleModel::where('name', 'YARIS')->firstOrFail();
+    $chassis = VehicleChassis::where('code', 'P90')->firstOrFail();
+    $engine = VehicleEngine::where('engine_code', '2NZFE')->firstOrFail();
+
+    expect(VehicleVin::where('model_id', $model->id)
+        ->where('chassis_id', $chassis->id)
+        ->where('engine_id', $engine->id)
+        ->count())->toBe(2);
+
+    $import->execute([
+        [
+            '__row' => 3,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2006-2013',
+            'generation' => 'P90',
+            'code' => 'P90',
+            'engine' => '2NZFE',
+            'fuel_type' => 'Gasoline',
+            'vin' => 'JTDKW923900008116',
+        ],
+    ]);
+
+    expect(VehicleVin::where('model_id', $model->id)
+        ->where('chassis_id', $chassis->id)
+        ->where('engine_id', $engine->id)
+        ->count())->toBe(2);
+});
+
+it('imports vehicle vins without code using null chassis scope', function () {
+    $import = new VehicleImport;
+
+    $import->execute([
+        [
+            '__row' => 2,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2006-2013',
+            'engine' => '1NZFE',
+            'fuel_type' => 'Gasoline',
+            'vin' => 'JTDBT933X01109408',
+        ],
+    ]);
+
+    expect($import->successCount)->toBe(1)
+        ->and($import->errorCount)->toBe(0);
+
+    $model = VehicleModel::where('name', 'YARIS')->firstOrFail();
+    $engine = VehicleEngine::where('engine_code', '1NZFE')->firstOrFail();
+
+    expect(VehicleVin::where('model_id', $model->id)
+        ->whereNull('chassis_id')
+        ->where('engine_id', $engine->id)
+        ->where('vin', 'JTDBT933X01109408')
+        ->exists())->toBeTrue();
+
+    $import->execute([
+        [
+            '__row' => 3,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2006-2013',
+            'engine' => '1NZFE',
+            'fuel_type' => 'Gasoline',
+            'vin' => 'JTDBT933X01109408',
+        ],
+    ]);
+
+    expect(VehicleChassis::where('model_id', $model->id)
+        ->whereRaw('LOWER(code) = ?', ['sin_codigo'])
+        ->count())->toBe(0)
+        ->and(VehicleVin::where('model_id', $model->id)
+            ->whereNull('chassis_id')
+            ->where('engine_id', $engine->id)
+            ->count())->toBe(1);
+});
+
+it('keeps same make and model separated by chassis code during vehicle import', function () {
+    $import = new VehicleImport;
+
+    $import->execute([
+        [
+            '__row' => 2,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2000-2005',
+            'generation' => 'P10',
+            'code' => 'P10',
+            'engine' => '1NZFE',
+            'fuel_type' => 'Gasoline',
+        ],
+        [
+            '__row' => 3,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'year' => '2006-2013',
+            'generation' => 'P90',
+            'code' => 'P90',
+            'engine' => '1NZFE',
+            'fuel_type' => 'Gasoline',
+        ],
+    ]);
+
+    expect($import->successCount)->toBe(2)
+        ->and(VehicleModel::where('name', 'YARIS')->count())->toBe(2)
+        ->and(VehicleModel::where('name', 'YARIS')->where('generation', 'P10')->exists())->toBeTrue()
+        ->and(VehicleModel::where('name', 'YARIS')->where('generation', 'P90')->exists())->toBeTrue();
 });

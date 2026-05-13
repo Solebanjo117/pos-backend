@@ -25,7 +25,7 @@ class VehicleImport extends BaseImport
             ['key' => 'model', 'label' => 'Modelo (MODEL)', 'type' => 'text', 'required' => true],
             ['key' => 'year', 'label' => 'Ano (YEAR)', 'type' => 'text', 'required' => true],
             ['key' => 'generation', 'label' => 'Generacion', 'type' => 'text'],
-            ['key' => 'code', 'label' => 'Chasis (CODE)', 'type' => 'text'],
+            ['key' => 'code', 'label' => 'Chasis (CODE, opcional)', 'type' => 'text'],
             ['key' => 'engine', 'label' => 'Motor (ENGINE)', 'type' => 'text'],
             ['key' => 'displacement', 'label' => 'Cilindrada', 'type' => 'text'],
             ['key' => 'fuel_type', 'label' => 'Combustible', 'type' => 'text'],
@@ -98,6 +98,17 @@ class VehicleImport extends BaseImport
             $errors[] = 'El codigo del motor no puede contener espacios.';
         }
 
+        $vinValues = $this->splitDelimitedValues($row['vin'] ?? null);
+        if ($vinValues !== [] && $engineCode === null) {
+            $errors[] = 'Para importar VINs se requiere el campo motor (ENGINE).';
+        }
+
+        foreach ($vinValues as $vin) {
+            if (mb_strlen($vin) > 40) {
+                $errors[] = "El VIN '{$vin}' no puede tener mas de 40 caracteres.";
+            }
+        }
+
         try {
             $this->normalizeFuelType($row['fuel_type'] ?? null);
         } catch (\RuntimeException $e) {
@@ -113,9 +124,12 @@ class VehicleImport extends BaseImport
         [$yearFrom, $yearTo] = $this->parseYearRangeFromRow($row);
 
         $modelName = trim($row['model']);
+        $generation = $this->nullIfEmpty($row['generation'] ?? null) ?? $this->nullIfEmpty($row['code'] ?? null);
         $model = VehicleModel::query()
             ->where('make_id', $makeId)
             ->whereRaw('LOWER(name) = ?', [mb_strtolower($modelName)])
+            ->when($generation, fn ($query) => $query->whereRaw('LOWER(generation) = ?', [mb_strtolower($generation)]))
+            ->when(! $generation && $yearFrom !== null, fn ($query) => $query->where('year_from', $yearFrom)->where('year_to', $yearTo ?? $yearFrom))
             ->first();
 
         $modelData = [
@@ -123,7 +137,7 @@ class VehicleImport extends BaseImport
             'name' => $modelName,
             'year_from' => $yearFrom,
             'year_to' => $yearTo ?? $yearFrom,
-            'generation' => $this->nullIfEmpty($row['generation'] ?? null),
+            'generation' => $generation,
         ];
 
         if ($model) {
@@ -136,6 +150,10 @@ class VehicleImport extends BaseImport
         $chassis = null;
         if ($chassisCode) {
             $chassis = VehicleChassis::query()
+                ->where(function ($query) use ($model) {
+                    $query->where('model_id', $model->id)
+                        ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('vehicle_models.id', $model->id));
+                })
                 ->whereRaw('LOWER(code) = ?', [mb_strtolower($chassisCode)])
                 ->first();
 
@@ -157,7 +175,7 @@ class VehicleImport extends BaseImport
         if ($engineCode) {
             $normalizedEngineCode = strtoupper(trim($engineCode));
             $engine = VehicleEngine::query()
-                ->where(function ($query) use ($model, $normalizedEngineCode) {
+                ->where(function ($query) use ($model) {
                     $query->where('model_id', $model->id)
                         ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('vehicle_models.id', $model->id));
                 })
@@ -183,15 +201,14 @@ class VehicleImport extends BaseImport
 
         $vinStr = $this->nullIfEmpty($row['vin'] ?? null);
         if ($vinStr) {
-            VehicleVin::firstOrCreate(
-                [
-                    'vin' => strtoupper(trim($vinStr)),
+            foreach ($this->splitDelimitedValues($vinStr) as $vinValue) {
+                VehicleVin::firstOrCreate([
                     'model_id' => $model->id,
-                ],
-                [
+                    'chassis_id' => $chassis?->id,
                     'engine_id' => $engine?->id,
-                ]
-            );
+                    'vin' => strtoupper(trim($vinValue)),
+                ]);
+            }
         }
 
         return $model;

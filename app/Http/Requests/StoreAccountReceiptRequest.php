@@ -1,0 +1,44 @@
+<?php
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class StoreAccountReceiptRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function rules(): array
+    {
+        return [
+            'amount' => ['required', 'numeric', 'min:0.01'],
+            'method' => ['required', 'string', 'max:50'],
+            'reference_number' => ['nullable', 'string', 'max:100'],
+            'notes' => ['nullable', 'string', 'max:500'],
+            'paid_at' => ['nullable', 'date'],
+            'applications' => ['nullable', 'array'],
+            'applications.*.document_id' => ['required_with:applications', 'integer', 'min:1'],
+            'applications.*.amount' => ['required_with:applications', 'numeric', 'min:0.01'],
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'amount.required' => 'El monto es obligatorio.',
+            'amount.min' => 'El monto debe ser mayor a cero.',
+            'method.required' => 'El método de pago es obligatorio.',
+            'applications.*.document_id.required_with' => 'Cada aplicación requiere un documento.',
+            'applications.*.amount.required_with' => 'Cada aplicación requiere un monto.',
+        ];
+    }
+}

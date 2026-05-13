@@ -177,11 +177,14 @@ class ProductDetailResource extends JsonResource
                 $this->relationLoaded('vehicleCompatibility'),
                 fn () => $this->vehicleCompatibility->map(fn ($comp) => [
                     'id' => $comp->id,
+                    'scope_type' => $comp->scope_type,
+                    'make_id' => $comp->make_id,
+                    'model_id' => $comp->model_id,
                     'engine_id' => $comp->engine_id,
                     'chassis_id' => $comp->chassis_id,
-                    'make' => $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
-                    'model' => $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
-                    'year_range' => $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
+                    'make' => $comp->make?->name ?? $comp->model?->make?->name ?? $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
+                    'model' => $comp->model?->name ?? $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
+                    'year_range' => $comp->model?->year_range ?? $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
                     'engine' => $comp->engine?->full_description,
                     'chassis' => $comp->chassis ? [
                         'id' => $comp->chassis->id,

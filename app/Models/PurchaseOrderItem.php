@@ -23,6 +23,7 @@ class PurchaseOrderItem extends Model
         'subtotal',
         'tax_rate',
         'tax_amount',
+        'misc_cost',
         'status',
         'notes',
     ];
@@ -39,6 +40,7 @@ class PurchaseOrderItem extends Model
         'subtotal' => 'decimal:2',
         'tax_rate' => 'integer',
         'tax_amount' => 'decimal:2',
+        'misc_cost' => 'decimal:2',
     ];
 
     protected $appends = [
@@ -127,7 +129,10 @@ class PurchaseOrderItem extends Model
 
     public function getTotalAttribute(): float
     {
-        return round((float) $this->subtotal + (float) $this->tax_amount, 2);
+        return round(
+            (float) $this->subtotal + (float) $this->tax_amount + (float) ($this->misc_cost ?? 0),
+            2
+        );
     }
 
     /**
@@ -145,6 +150,12 @@ class PurchaseOrderItem extends Model
         $this->attributes['tax_rate'] = max(0, min(100, $parsed));
     }
 
+    /**
+     * Calculate line amounts. If tax_amount is set to null in the payload,
+     * it will be auto-calculated from tax_rate (default 7%). If a numeric
+     * value is explicitly provided, it is kept as-is (manual ITBM amount).
+     * misc_cost defaults to 0 when not present.
+     */
     private static function calculateLineAmounts(PurchaseOrderItem $item): void
     {
         $subtotal = (float) $item->quantity_ordered
@@ -152,8 +163,24 @@ class PurchaseOrderItem extends Model
             * (float) $item->unit_cost;
 
         $item->subtotal = round($subtotal, 2);
-        $item->tax_rate = $item->tax_rate ?? 7;
-        $item->tax_amount = round($item->subtotal * ((float) $item->tax_rate / 100), 2);
+
+        // Determine if tax_amount was provided as an explicit numeric value.
+        // The service passes null when no manual amount is given, so null means auto-calculate.
+        $rawTaxAmount = $item->attributes['tax_amount'] ?? null;
+
+        if ($rawTaxAmount !== null && $rawTaxAmount !== '') {
+            // Manual ITBM amount — keep it
+            $item->tax_amount = round(max(0, (float) $rawTaxAmount), 2);
+        } else {
+            // Auto-calculate from tax_rate
+            $item->tax_rate = $item->tax_rate ?? 7;
+            $item->tax_amount = round($item->subtotal * ((float) $item->tax_rate / 100), 2);
+        }
+
+        // misc_cost defaults to 0 when not set
+        if (! array_key_exists('misc_cost', $item->attributes)) {
+            $item->misc_cost = 0;
+        }
     }
 
     // ==================== BOOT ====================

@@ -24,6 +24,7 @@ class Category extends Model
         'default_margin_percent',
         'pricing_formula',
         'min_suggested_price',
+        'upsale_path',
         'applies_itbm',
         'itbm_percent',
     ];

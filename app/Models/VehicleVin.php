@@ -12,6 +12,7 @@ class VehicleVin extends Model
 
     protected $fillable = [
         'model_id',
+        'chassis_id',
         'engine_id',
         'vin',
         'notes',
@@ -19,6 +20,7 @@ class VehicleVin extends Model
 
     protected $casts = [
         'model_id' => 'integer',
+        'chassis_id' => 'integer',
         'engine_id' => 'integer',
     ];
 
@@ -30,5 +32,10 @@ class VehicleVin extends Model
     public function engine(): BelongsTo
     {
         return $this->belongsTo(VehicleEngine::class, 'engine_id');
+    }
+
+    public function chassis(): BelongsTo
+    {
+        return $this->belongsTo(VehicleChassis::class, 'chassis_id');
     }
 }

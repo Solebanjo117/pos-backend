@@ -176,7 +176,22 @@ class StoreProductRequest extends FormRequest
 
             // Vehicle Compatibility
             'vehicle_compatibility' => 'nullable|array',
-            'vehicle_compatibility.*' => 'integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.engines' => 'nullable|array',
+            'vehicle_compatibility.engines.*.engine_id' => 'required_with:vehicle_compatibility.engines|integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.chassis' => 'nullable|array',
+            'vehicle_compatibility.chassis.*.chassis_id' => 'required_with:vehicle_compatibility.chassis|integer|exists:vehicle_chassis,id',
+            'vehicle_compatibility.makes' => 'nullable|array',
+            'vehicle_compatibility.makes.*.make_id' => 'required_with:vehicle_compatibility.makes|integer|exists:vehicle_makes,id',
+            'vehicle_compatibility.models' => 'nullable|array',
+            'vehicle_compatibility.models.*.model_id' => 'required_with:vehicle_compatibility.models|integer|exists:vehicle_models,id',
+            'vehicle_chassis' => 'nullable|array',
+            'vehicle_chassis.*' => 'integer|exists:vehicle_chassis,id',
+            'vehicle_makes' => 'nullable|array',
+            'vehicle_makes.*' => 'integer|exists:vehicle_makes,id',
+            'vehicle_models' => 'nullable|array',
+            'vehicle_models.*' => 'integer|exists:vehicle_models,id',
+            'all_engines' => 'nullable|boolean',
+            'all_chassis' => 'nullable|boolean',
             'is_universal' => 'nullable|boolean',
 
             // VINs

@@ -38,6 +38,17 @@ Route::get('vehicle-models/{modelId}/vins', [VehicleVinController::class, 'index
 Route::post('vehicle-models/{modelId}/vins', [VehicleVinController::class, 'storeByModel'])->middleware('role:admin,manager');
 Route::delete('vehicle-models/{modelId}/vins/{vinId}', [VehicleVinController::class, 'destroyByModel'])->middleware('role:admin,manager');
 
+// Vehicle VINs scoped to model + engine (chassis optional)
+Route::get('vehicle-models/{modelId}/engines/{engineId}/vins', [VehicleVinController::class, 'indexByModelEngine']);
+Route::post('vehicle-models/{modelId}/engines/{engineId}/vins', [VehicleVinController::class, 'storeByModelEngine'])->middleware('role:admin,manager');
+Route::delete('vehicle-models/{modelId}/engines/{engineId}/vins/{vinId}', [VehicleVinController::class, 'destroyByModelEngine'])->middleware('role:admin,manager');
+
+// Vehicle VINs scoped to car + engine
+Route::get('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins', [VehicleVinController::class, 'indexByModelChassisEngine']);
+Route::post('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins', [VehicleVinController::class, 'storeByModelChassisEngine'])->middleware('role:admin,manager');
+Route::patch('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins/{vinId}', [VehicleVinController::class, 'moveScopedVin'])->middleware('role:admin,manager');
+Route::delete('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins/{vinId}', [VehicleVinController::class, 'destroyByModelChassisEngine'])->middleware('role:admin,manager');
+
 // Vehicle VINs legacy contract (nested under engines) - temporary compatibility
 Route::get('vehicle-engines/{engineId}/vins', [VehicleVinController::class, 'index']);
 Route::post('vehicle-engines/{engineId}/vins', [VehicleVinController::class, 'store'])->middleware('role:admin,manager');

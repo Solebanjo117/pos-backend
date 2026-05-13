@@ -161,11 +161,12 @@ class PurchaseOrder extends Model
      */
     public function calculateTotals(): void
     {
-        $items = $this->items()->get(['subtotal', 'tax_amount']);
+        $items = $this->items()->get(['subtotal', 'tax_amount', 'misc_cost']);
 
         $this->subtotal = round((float) $items->sum('subtotal'), 2);
         $this->tax_amount = round((float) $items->sum('tax_amount'), 2);
-        $this->total = $this->subtotal + $this->tax_amount + $this->shipping_cost;
+        $miscTotal = round((float) $items->sum('misc_cost'), 2);
+        $this->total = $this->subtotal + $this->tax_amount + $miscTotal + (float) ($this->shipping_cost ?? 0);
         $this->save();
     }
 

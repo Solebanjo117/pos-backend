@@ -53,6 +53,11 @@ class VehicleChassis extends Model
         return $this->hasMany(ProductVehicleCompatibility::class, 'chassis_id');
     }
 
+    public function vins(): HasMany
+    {
+        return $this->hasMany(VehicleVin::class, 'chassis_id');
+    }
+
     /**
      * Get the compatible products via pivots.
      */

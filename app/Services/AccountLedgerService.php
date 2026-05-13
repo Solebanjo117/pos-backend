@@ -1,0 +1,446 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\AccountLedgerEntry;
+use App\Models\AccountPaymentBatch;
+use App\Models\Customer;
+use App\Models\PurchaseOrder;
+use App\Models\SalesOrder;
+use App\Models\Supplier;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+class AccountLedgerService
+{
+    /**
+     * @return array<string, mixed>
+     */
+    public function receivablesSummary(array $filters = []): array
+    {
+        $query = Customer::query()
+            ->where('current_balance', '>', 0);
+
+        if (! empty($filters['search'])) {
+            $query->search($filters['search']);
+        }
+
+        $customers = $query->orderByDesc('current_balance')
+            ->paginate($filters['per_page'] ?? 50);
+
+        return [
+            'data' => $customers->getCollection()->map(fn (Customer $customer): array => [
+                'id' => $customer->id,
+                'code' => $customer->code,
+                'name' => $customer->name,
+                'email' => $customer->email,
+                'phone' => $customer->phone,
+                'current_balance' => (float) $customer->current_balance,
+                'credit_limit' => (float) $customer->credit_limit,
+                'available_credit' => $customer->getAvailableCredit(),
+                'open_documents_count' => $this->openSalesOrders($customer)->count(),
+            ])->values(),
+            'meta' => [
+                'current_page' => $customers->currentPage(),
+                'last_page' => $customers->lastPage(),
+                'per_page' => $customers->perPage(),
+                'total' => $customers->total(),
+            ],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function customerStatement(Customer $customer): array
+    {
+        $documents = $this->openSalesOrders($customer)
+            ->map(fn (SalesOrder $order): array => [
+                'id' => $order->id,
+                'document_type' => 'sales_order',
+                'document_number' => $order->order_number,
+                'date' => optional($order->date)->toDateString(),
+                'total' => (float) $order->total,
+                'amount_paid' => (float) $order->amount_paid,
+                'amount_due' => (float) $order->amount_due,
+                'payment_status' => $order->payment_status,
+            ])
+            ->values();
+
+        return [
+            'account' => [
+                'id' => $customer->id,
+                'type' => 'customer',
+                'name' => $customer->name,
+                'code' => $customer->code,
+                'current_balance' => (float) $customer->current_balance,
+                'credit_limit' => (float) $customer->credit_limit,
+                'available_credit' => $customer->getAvailableCredit(),
+            ],
+            'documents' => $documents,
+            'entries' => $this->ledgerEntries('customer', $customer->id),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    public function recordCustomerReceipt(Customer $customer, array $data): array
+    {
+        return DB::transaction(function () use ($customer, $data): array {
+            $amount = round((float) $data['amount'], 2);
+            $applications = $this->normalizeCustomerApplications($customer, $data['applications'] ?? [], $amount);
+            $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
+
+            if ($appliedTotal > $amount + 0.01) {
+                throw new \InvalidArgumentException('El monto aplicado excede el monto del recibo.');
+            }
+
+            $batch = $this->createPaymentBatch('customer', $customer->id, 'incoming', $amount, $data);
+
+            foreach ($applications as $application) {
+                $order = SalesOrder::with(['payments', 'customer'])->findOrFail($application['document_id']);
+                $order->addPayment(
+                    amount: (float) $application['amount'],
+                    method: $data['method'],
+                    notes: $data['notes'] ?? "Recibo {$batch->batch_number}",
+                    paidAt: $data['paid_at'] ?? now(),
+                );
+
+                $batch->applications()->create([
+                    'document_type' => 'sales_order',
+                    'document_id' => $order->id,
+                    'document_number' => $order->order_number,
+                    'amount' => $application['amount'],
+                ]);
+            }
+
+            $customer->refresh();
+            $entry = $this->createLedgerEntry([
+                'account_type' => 'customer',
+                'account_id' => $customer->id,
+                'movement_type' => 'receipt',
+                'payment_batch_id' => $batch->id,
+                'credit' => $amount,
+                'balance_after' => (float) $customer->current_balance,
+                'occurred_at' => $data['paid_at'] ?? now(),
+                'reference_number' => $data['reference_number'] ?? $batch->batch_number,
+                'notes' => $data['notes'] ?? null,
+            ]);
+
+            activity()
+                ->performedOn($customer)
+                ->withProperties(['batch_id' => $batch->id, 'ledger_entry_id' => $entry->id])
+                ->log('Cobro de cuenta por cobrar registrado');
+
+            return [
+                'batch' => $batch->load('applications'),
+                'ledger_entry' => $entry,
+                'statement' => $this->customerStatement($customer->fresh()),
+            ];
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function payablesSummary(array $filters = []): array
+    {
+        $suppliers = Supplier::whereHas('purchaseOrders')
+            ->get()
+            ->map(function (Supplier $supplier): array {
+                $orders = $this->openPurchaseOrders($supplier);
+                $totalOrdersAmount = $orders->sum('total');
+                $totalPaid = $orders->sum(fn (PurchaseOrder $order): float => (float) $order->amount_paid);
+                $totalDebt = max(0, (float) $totalOrdersAmount - (float) $totalPaid);
+
+                return [
+                    'id' => $supplier->id,
+                    'name' => $supplier->name,
+                    'email' => $supplier->email,
+                    'phone' => $supplier->phone,
+                    'pending_orders_count' => $orders->count(),
+                    'total_orders_amount' => round((float) $totalOrdersAmount, 2),
+                    'total_paid' => round((float) $totalPaid, 2),
+                    'total_debt' => round($totalDebt, 2),
+                ];
+            })
+            ->filter(fn (array $supplier): bool => $supplier['total_debt'] > 0);
+
+        if (! empty($filters['search'])) {
+            $search = Str::lower((string) $filters['search']);
+            $suppliers = $suppliers->filter(fn (array $supplier): bool => str_contains(Str::lower($supplier['name']), $search));
+        }
+
+        return ['data' => $suppliers->sortByDesc('total_debt')->values()];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function supplierStatement(Supplier $supplier): array
+    {
+        $documents = $this->openPurchaseOrders($supplier)
+            ->map(fn (PurchaseOrder $order): array => [
+                'id' => $order->id,
+                'document_type' => 'purchase_order',
+                'document_number' => $order->po_number,
+                'supplier_invoice_number' => $order->supplier_invoice_number,
+                'date' => optional($order->order_date)->toDateString(),
+                'total' => (float) $order->total,
+                'amount_paid' => (float) $order->amount_paid,
+                'amount_due' => (float) $order->amount_due,
+                'payment_status' => $order->payment_status,
+            ])
+            ->values();
+
+        return [
+            'account' => [
+                'id' => $supplier->id,
+                'type' => 'supplier',
+                'name' => $supplier->name,
+                'email' => $supplier->email,
+                'phone' => $supplier->phone,
+            ],
+            'documents' => $documents,
+            'entries' => $this->ledgerEntries('supplier', $supplier->id),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    public function recordSupplierPayment(Supplier $supplier, array $data): array
+    {
+        return DB::transaction(function () use ($supplier, $data): array {
+            $amount = round((float) $data['amount'], 2);
+            $applications = $this->normalizeSupplierApplications($supplier, $data['applications'] ?? [], $amount);
+            $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
+
+            if ($appliedTotal > $amount + 0.01) {
+                throw new \InvalidArgumentException('El monto aplicado excede el monto del pago.');
+            }
+
+            $batch = $this->createPaymentBatch('supplier', $supplier->id, 'outgoing', $amount, $data);
+
+            foreach ($applications as $application) {
+                $order = PurchaseOrder::with('payments')->findOrFail($application['document_id']);
+                $payment = $order->addPayment(
+                    (float) $application['amount'],
+                    $data['method'],
+                    $data['reference_number'] ?? $batch->batch_number,
+                    $data['notes'] ?? "Pago {$batch->batch_number}",
+                );
+
+                if (! empty($data['paid_at'])) {
+                    $payment->update(['paid_at' => $data['paid_at']]);
+                }
+
+                $batch->applications()->create([
+                    'document_type' => 'purchase_order',
+                    'document_id' => $order->id,
+                    'document_number' => $order->po_number,
+                    'amount' => $application['amount'],
+                ]);
+            }
+
+            $entry = $this->createLedgerEntry([
+                'account_type' => 'supplier',
+                'account_id' => $supplier->id,
+                'movement_type' => 'payment',
+                'payment_batch_id' => $batch->id,
+                'debit' => $amount,
+                'balance_after' => $this->supplierBalance($supplier),
+                'occurred_at' => $data['paid_at'] ?? now(),
+                'reference_number' => $data['reference_number'] ?? $batch->batch_number,
+                'notes' => $data['notes'] ?? null,
+            ]);
+
+            activity()
+                ->performedOn($supplier)
+                ->withProperties(['batch_id' => $batch->id, 'ledger_entry_id' => $entry->id])
+                ->log('Pago de cuenta por pagar registrado');
+
+            return [
+                'batch' => $batch->load('applications'),
+                'ledger_entry' => $entry,
+                'statement' => $this->supplierStatement($supplier->fresh()),
+            ];
+        });
+    }
+
+    private function createPaymentBatch(string $accountType, int $accountId, string $direction, float $amount, array $data): AccountPaymentBatch
+    {
+        return AccountPaymentBatch::create([
+            'account_type' => $accountType,
+            'account_id' => $accountId,
+            'direction' => $direction,
+            'batch_number' => $this->nextBatchNumber($accountType),
+            'amount' => $amount,
+            'method' => $data['method'],
+            'reference_number' => $data['reference_number'] ?? null,
+            'notes' => $data['notes'] ?? null,
+            'paid_at' => $data['paid_at'] ?? now(),
+            'created_by' => Auth::id(),
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $attributes
+     */
+    private function createLedgerEntry(array $attributes): AccountLedgerEntry
+    {
+        return AccountLedgerEntry::create(array_merge([
+            'debit' => 0,
+            'credit' => 0,
+            'created_by' => Auth::id(),
+        ], $attributes));
+    }
+
+    private function nextBatchNumber(string $accountType): string
+    {
+        $prefix = $accountType === 'customer' ? 'REC' : 'PAG';
+
+        return $prefix.'-'.now()->format('YmdHis').'-'.Str::upper(Str::random(4));
+    }
+
+    /**
+     * @return array<int, array{document_id: int, amount: float}>
+     */
+    private function normalizeCustomerApplications(Customer $customer, array $applications, float $amount): array
+    {
+        if (! empty($applications)) {
+            return collect($applications)
+                ->map(fn (array $application): array => [
+                    'document_id' => (int) $application['document_id'],
+                    'amount' => round((float) $application['amount'], 2),
+                ])
+                ->values()
+                ->all();
+        }
+
+        return $this->autoApplyDocuments($this->openSalesOrders($customer), $amount);
+    }
+
+    /**
+     * @return array<int, array{document_id: int, amount: float}>
+     */
+    private function normalizeSupplierApplications(Supplier $supplier, array $applications, float $amount): array
+    {
+        if (! empty($applications)) {
+            return collect($applications)
+                ->map(fn (array $application): array => [
+                    'document_id' => (int) $application['document_id'],
+                    'amount' => round((float) $application['amount'], 2),
+                ])
+                ->values()
+                ->all();
+        }
+
+        return $this->autoApplyDocuments($this->openPurchaseOrders($supplier), $amount);
+    }
+
+    /**
+     * @param  Collection<int, SalesOrder|PurchaseOrder>  $documents
+     * @return array<int, array{document_id: int, amount: float}>
+     */
+    private function autoApplyDocuments(Collection $documents, float $amount): array
+    {
+        $remaining = $amount;
+        $applications = [];
+
+        foreach ($documents as $document) {
+            if ($remaining <= 0) {
+                break;
+            }
+
+            $due = (float) $document->amount_due;
+            if ($due <= 0) {
+                continue;
+            }
+
+            $applied = round(min($due, $remaining), 2);
+            $applications[] = [
+                'document_id' => $document->id,
+                'amount' => $applied,
+            ];
+            $remaining = round($remaining - $applied, 2);
+        }
+
+        if (empty($applications)) {
+            throw new \InvalidArgumentException('No hay documentos pendientes para aplicar el pago.');
+        }
+
+        return $applications;
+    }
+
+    /**
+     * @return Collection<int, SalesOrder>
+     */
+    private function openSalesOrders(Customer $customer): Collection
+    {
+        return $customer->salesOrders()
+            ->with(['payments', 'returns'])
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->orderBy('date')
+            ->get()
+            ->filter(fn (SalesOrder $order): bool => (float) $order->amount_due > 0)
+            ->values();
+    }
+
+    /**
+     * @return Collection<int, PurchaseOrder>
+     */
+    private function openPurchaseOrders(Supplier $supplier): Collection
+    {
+        return $supplier->purchaseOrders()
+            ->with('payments')
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->where('status', '!=', 'cancelled')
+            ->orderBy('order_date')
+            ->get()
+            ->filter(fn (PurchaseOrder $order): bool => (float) $order->amount_due > 0)
+            ->values();
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function ledgerEntries(string $accountType, int $accountId): array
+    {
+        return AccountLedgerEntry::query()
+            ->with(['paymentBatch.applications', 'creator:id,name'])
+            ->where('account_type', $accountType)
+            ->where('account_id', $accountId)
+            ->orderByDesc('occurred_at')
+            ->limit(200)
+            ->get()
+            ->map(fn (AccountLedgerEntry $entry): array => [
+                'id' => $entry->id,
+                'movement_type' => $entry->movement_type,
+                'document_type' => $entry->document_type,
+                'document_id' => $entry->document_id,
+                'document_number' => $entry->document_number,
+                'batch_number' => $entry->paymentBatch?->batch_number,
+                'debit' => (float) $entry->debit,
+                'credit' => (float) $entry->credit,
+                'balance_after' => (float) $entry->balance_after,
+                'occurred_at' => $entry->occurred_at?->toISOString(),
+                'reference_number' => $entry->reference_number,
+                'notes' => $entry->notes,
+                'created_by' => $entry->creator?->name,
+                'applications' => $entry->paymentBatch?->applications ?? [],
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function supplierBalance(Supplier $supplier): float
+    {
+        return round((float) $this->openPurchaseOrders($supplier->fresh())->sum(fn (PurchaseOrder $order): float => (float) $order->amount_due), 2);
+    }
+}

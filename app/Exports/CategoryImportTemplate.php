@@ -21,6 +21,7 @@ class CategoryImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
             'itbm_porcentaje',
             'prioridad',
             'precio_minimo_sugerido',
+            'upsale_path',
             'atributos_default',
         ];
     }
@@ -28,8 +29,8 @@ class CategoryImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
     public function array(): array
     {
         return [
-            ['Frenos', 'frenos', 'Auto', 'Sistema de frenado', 30, 'costo * 1.3', 'si', 7, 10, '', 'posicion:requerido,largo:15cm'],
-            ['Filtros', 'filtros', 'Auto', 'Filtros de todo tipo', 25, 'costo * 1.25', 'si', 7, 20, '', 'tipo,medida'],
+            ['Frenos', 'frenos', 'Auto', 'Sistema de frenado', 30, 'costo * 1.3', 'si', 7, 10, '', 'frenos/pastillas', 'posicion:requerido,largo:15cm'],
+            ['Filtros', 'filtros', 'Auto', 'Filtros de todo tipo', 25, 'costo * 1.25', 'si', 7, 20, '', 'motor/filtros', 'tipo,medida'],
         ];
     }
 }
