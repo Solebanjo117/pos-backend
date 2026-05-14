@@ -28,6 +28,7 @@ class SalesOrderItem extends Model
         'notes',
         'is_custom_line',
         'custom_description',
+        'added_after_sale',
     ];
 
     protected $casts = [
@@ -41,6 +42,7 @@ class SalesOrderItem extends Model
         'subtotal' => 'decimal:2',
         'total' => 'decimal:2',
         'is_custom_line' => 'boolean',
+        'added_after_sale' => 'boolean',
     ];
 
     protected $appends = ['formatted_total', 'product_name', 'product_sku', 'warehouse_name', 'seller_name'];

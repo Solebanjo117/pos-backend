@@ -520,6 +520,8 @@ class SalesOrderController extends Controller
                 'discount_percent' => 'nullable|numeric|min:0|max:100',
                 'discount_amount' => 'nullable|numeric|min:0',
                 'tax_percent' => 'nullable|integer|min:0|max:100',
+                'seller_id' => 'nullable|exists:users,id',
+                'notes' => 'nullable|string|max:5000',
             ]);
 
             $item = $this->salesOrderService->updateItem($itemId, $validated);
@@ -629,6 +631,7 @@ class SalesOrderController extends Controller
                             'total' => $subtotal - $discount + $tax,
                             'is_custom_line' => true,
                             'custom_description' => $item['custom_description'],
+                            'added_after_sale' => true,
                         ]);
 
                         continue;
@@ -691,6 +694,7 @@ class SalesOrderController extends Controller
                             'discount_amount' => $discount,
                             'tax_amount' => $tax,
                             'total' => $subtotal - $discount + $tax,
+                            'added_after_sale' => true,
                         ]);
 
                         // Deduct available inventory only (never below 0)

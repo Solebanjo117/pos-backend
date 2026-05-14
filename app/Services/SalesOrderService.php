@@ -332,6 +332,7 @@ class SalesOrderService
                 'tax_percent' => $itemData['tax_percent'] ?? 0,
                 'is_custom_line' => $isCustomLine,
                 'custom_description' => $customDescription,
+                'added_after_sale' => $isConfirmed,
             ]);
 
             if ($isConfirmed) {
@@ -411,23 +412,74 @@ class SalesOrderService
      */
     public function updateItem(int $itemId, array $data): SalesOrderItem
     {
-        $item = SalesOrderItem::findOrFail($itemId);
-        $order = $item->salesOrder;
+        return DB::transaction(function () use ($itemId, $data) {
+            $item = SalesOrderItem::findOrFail($itemId);
+            $order = $item->salesOrder;
 
-        if (! $order->canBeEdited()) {
-            throw new \Exception('No se pueden editar items de una orden en estado '.$order->status);
+            $isPostSaleOrder = in_array($order->status, ['confirmed', 'processing', 'completed'], true);
+            if (! $order->canBeEdited() && (! $isPostSaleOrder || ! $item->added_after_sale)) {
+                throw new \Exception('No se pueden editar items de una orden en estado '.$order->status);
+            }
+
+            $oldTotal = (float) $item->total;
+
+            $item->update([
+                'quantity' => $data['quantity'] ?? $item->quantity,
+                'unit_price' => $data['unit_price'] ?? $item->unit_price,
+                'discount_percent' => $data['discount_percent'] ?? $item->discount_percent,
+                'discount_amount' => $data['discount_amount'] ?? $item->discount_amount,
+                'tax_percent' => $data['tax_percent'] ?? $item->tax_percent,
+                'seller_id' => array_key_exists('seller_id', $data) ? $data['seller_id'] : $item->seller_id,
+                'notes' => array_key_exists('notes', $data) ? $data['notes'] : $item->notes,
+            ]);
+
+            $freshItem = $item->fresh();
+
+            if ($isPostSaleOrder && $freshItem->added_after_sale) {
+                $this->applyPostSaleItemAdjustment($order->fresh(), (float) $freshItem->total - $oldTotal);
+            }
+
+            return $freshItem;
+        });
+    }
+
+    private function applyPostSaleItemAdjustment(SalesOrder $order, float $differenceAmount): void
+    {
+        $paid = $order->amount_paid;
+        if ($paid < $order->total && $paid > 0) {
+            $order->payment_status = 'partial';
+        } elseif ($paid <= 0) {
+            $order->payment_status = 'pending';
+        } else {
+            $order->payment_status = 'paid';
+        }
+        $order->save();
+
+        if (abs($differenceAmount) < 0.01 || ! $order->customer_id) {
+            return;
         }
 
-        $item->update([
-            'quantity' => $data['quantity'] ?? $item->quantity,
-            'unit_price' => $data['unit_price'] ?? $item->unit_price,
-            'discount_percent' => $data['discount_percent'] ?? $item->discount_percent,
-            'discount_amount' => $data['discount_amount'] ?? $item->discount_amount,
-            'tax_percent' => $data['tax_percent'] ?? $item->tax_percent,
-            'seller_id' => array_key_exists('seller_id', $data) ? $data['seller_id'] : $item->seller_id,
-        ]);
+        $customer = \App\Models\Customer::find($order->customer_id);
+        if (! $customer) {
+            return;
+        }
 
-        return $item->fresh();
+        $balanceBefore = (float) $customer->current_balance;
+        $customer->current_balance = $balanceBefore + $differenceAmount;
+        $customer->save();
+
+        \App\Models\CustomerTransaction::create([
+            'customer_id' => $customer->id,
+            'type' => 'sale',
+            'reference_type' => 'sales_order',
+            'reference_id' => $order->id,
+            'amount' => $differenceAmount,
+            'balance_before' => $balanceBefore,
+            'balance_after' => $customer->current_balance,
+            'description' => "Ajuste por edicion de producto agregado a venta {$order->order_number}",
+            'transaction_date' => now(),
+            'created_by' => \Illuminate\Support\Facades\Auth::id(),
+        ]);
     }
 
     /**

@@ -1,8 +1,8 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\PosSessionController;
 use App\Http\Controllers\Api\CashMovementController;
+use App\Http\Controllers\Api\PosSessionController;
+use Illuminate\Support\Facades\Route;
 
 Route::prefix('pos-sessions')->group(function () {
     Route::get('/current', [PosSessionController::class, 'current']);
@@ -16,6 +16,8 @@ Route::prefix('pos-sessions')->group(function () {
         ->middleware('role:admin,manager,cashier');
     Route::get('/current/movements', [CashMovementController::class, 'index']);
 
-    Route::get('/{posSession}', [PosSessionController::class, 'show']);
-    Route::get('/', [PosSessionController::class, 'index']); // History of sessions
+    Route::get('/{posSession}', [PosSessionController::class, 'show'])
+        ->middleware('role:admin,manager,cashier');
+    Route::get('/', [PosSessionController::class, 'index']) // History of sessions
+        ->middleware('role:admin,manager,cashier');
 });
