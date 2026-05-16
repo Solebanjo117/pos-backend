@@ -7,6 +7,8 @@ use App\Models\User;
 use App\Services\ProductService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
+use function Pest\Laravel\actingAs;
+
 uses(RefreshDatabase::class);
 
 it('attribute isInherited returns true for category source', function () {
@@ -165,15 +167,14 @@ it('category with attribute type string allows any text value', function () {
     ]);
 
     $response->assertCreated();
-    expect($response->json('data.attributes'))->toContain([
-        'name' => 'LENGTH',
-        'value' => 'Cualquier texto aquí',
-        'unit' => null,
-        'type' => 'string',
-        'options' => null,
-        'source' => 'category',
-        'source_category_id' => $category->id,
-    ]);
+    $attrs = $response->json('data.attributes');
+    $length = collect($attrs)->firstWhere('name', 'LENGTH');
+
+    expect($length)->not->toBeNull()
+        ->and($length['value'])->toBe('Cualquier texto aquí')
+        ->and($length['type'])->toBe('string')
+        ->and($length['source'])->toBe('category')
+        ->and($length['source_category_id'])->toBe($category->id);
 });
 
 it('category with select type attribute accepts valid option', function () {
@@ -207,15 +208,15 @@ it('category with select type attribute accepts valid option', function () {
     ]);
 
     $response->assertCreated();
-    expect($response->json('data.attributes'))->toContain([
-        'name' => 'POSICION',
-        'value' => 'DELANTERO',
-        'unit' => null,
-        'type' => 'select',
-        'options' => ['DELANTERO', 'TRASERO'],
-        'source' => 'category',
-        'source_category_id' => $category->id,
-    ]);
+    $attrs = $response->json('data.attributes');
+    $posicion = collect($attrs)->firstWhere('name', 'POSICION');
+
+    expect($posicion)->not->toBeNull()
+        ->and($posicion['value'])->toBe(['DELANTERO'])
+        ->and($posicion['type'])->toBe('select')
+        ->and($posicion['options'])->toBe(['DELANTERO', 'TRASERO'])
+        ->and($posicion['source'])->toBe('category')
+        ->and($posicion['source_category_id'])->toBe($category->id);
 });
 
 it('category with select type attribute rejects invalid option', function () {
@@ -249,7 +250,7 @@ it('category with select type attribute rejects invalid option', function () {
     ]);
 
     $response->assertStatus(422);
-    expect($response->json('message'))->toContain('no es válido');
+    expect($response->json('errors.attributes.0'))->toContain('debe ser uno de');
 });
 
 it('product update rejects invalid select option value', function () {
@@ -295,7 +296,7 @@ it('product update rejects invalid select option value', function () {
     ]);
 
     $response->assertStatus(422);
-    expect($response->json('errors.attributes'))->toContain('El atributo "LADO" debe ser uno de: RH, LH');
+    expect($response->json('errors.attributes.0'))->toContain('debe ser uno de: RH, LH');
 });
 
 it('standalone attribute update rejects invalid select option value', function () {

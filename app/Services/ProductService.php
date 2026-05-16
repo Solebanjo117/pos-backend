@@ -121,17 +121,11 @@ class ProductService
 
                     foreach ($valuesToCheck as $singleValue) {
                         if (! in_array($singleValue, $options, true)) {
-                            throw new \Illuminate\Validation\ValidationException(
-                                validator([], []),
-                                response()->json([
-                                    'message' => 'El valor "'.$singleValue.'" no es valido para el atributo "'.$attribute['name'].'"',
-                                    'errors' => [
-                                        'attributes' => [
-                                            'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options),
-                                        ],
-                                    ],
-                                ], 422)
-                            );
+                            throw \Illuminate\Validation\ValidationException::withMessages([
+                                'attributes' => [
+                                    'El atributo "'.$attribute['name'].'" debe ser uno de: '.implode(', ', $options).'. Valor recibido: "'.$singleValue.'"',
+                                ],
+                            ]);
                         }
                     }
                 }
