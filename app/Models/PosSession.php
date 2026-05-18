@@ -47,4 +47,14 @@ class PosSession extends Model
     {
         return $this->hasMany(CashMovement::class);
     }
+
+    public function purchaseOrderPayments()
+    {
+        return $this->hasMany(PurchaseOrderPayment::class);
+    }
+
+    public function accountPaymentBatches()
+    {
+        return $this->hasMany(AccountPaymentBatch::class);
+    }
 }

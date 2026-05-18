@@ -5,11 +5,12 @@ use App\Http\Controllers\Api\PosSessionController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('pos-sessions')->group(function () {
-    Route::get('/current', [PosSessionController::class, 'current']);
+    Route::get('/current', [PosSessionController::class, 'current'])
+        ->middleware('warehouse_context');
     Route::post('/open', [PosSessionController::class, 'open'])
-        ->middleware('role:admin,manager,cashier');
+        ->middleware(['role:admin,manager,cashier', 'warehouse_context']);
     Route::post('/close', [PosSessionController::class, 'close'])
-        ->middleware('role:admin,manager,cashier');
+        ->middleware(['role:admin,manager,cashier', 'warehouse_context']);
 
     // Cash movements for the current open session
     Route::post('/current/movements', [CashMovementController::class, 'store'])

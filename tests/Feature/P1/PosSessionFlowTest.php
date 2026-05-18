@@ -549,3 +549,139 @@ it('requires a note when closing totals have a difference', function () {
     $response->assertStatus(422)
         ->assertJsonValidationErrors('notes');
 });
+
+// ---------------------------------------------------------------------------
+// Multi-warehouse isolation tests
+// ---------------------------------------------------------------------------
+
+it('current returns only the session belonging to the effective warehouse', function () {
+    $warehouseA = Warehouse::create(['code' => 'WA-CURR', 'name' => 'Warehouse A Current']);
+    $warehouseB = Warehouse::create(['code' => 'WB-CURR', 'name' => 'Warehouse B Current']);
+
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouseB->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach([$warehouseA->id, $warehouseB->id]);
+
+    $sessionA = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseA->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $sessionB = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseB->id,
+        'opened_at' => now()->subMinutes(30),
+        'opening_amount' => 200,
+        'expected_amount' => 200,
+        'status' => 'open',
+    ]);
+
+    $response = $this->actingAs($cashier)->getJson('/api/v1/pos-sessions/current');
+
+    $response->assertOk();
+    expect($response->json('data.id'))->toBe($sessionB->id);
+    expect($response->json('data.warehouse_id'))->toBe($warehouseB->id);
+});
+
+it('open allows a session in warehouse B even when warehouse A already has an open session', function () {
+    $warehouseA = Warehouse::create(['code' => 'WA-OPEN', 'name' => 'Warehouse A Open']);
+    $warehouseB = Warehouse::create(['code' => 'WB-OPEN', 'name' => 'Warehouse B Open']);
+
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouseB->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach([$warehouseA->id, $warehouseB->id]);
+
+    // Pre-existing open session in warehouse A
+    PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseA->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    // Open a session in warehouse B (effective warehouse for this cashier)
+    $response = $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/open', [
+        'opening_amount' => 50,
+    ]);
+
+    $response->assertCreated();
+    expect($response->json('data.warehouse_id'))->toBe($warehouseB->id);
+
+    // Warehouse A session must remain open
+    expect(
+        PosSession::where('warehouse_id', $warehouseA->id)->where('status', 'open')->exists()
+    )->toBeTrue();
+});
+
+it('close only closes the session of the effective warehouse and leaves the other branch open', function () {
+    $warehouseA = Warehouse::create(['code' => 'WA-CLOSE', 'name' => 'Warehouse A Close']);
+    $warehouseB = Warehouse::create(['code' => 'WB-CLOSE', 'name' => 'Warehouse B Close']);
+
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouseB->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach([$warehouseA->id, $warehouseB->id]);
+
+    $sessionA = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseA->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $sessionB = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseB->id,
+        'opened_at' => now()->subMinutes(30),
+        'opening_amount' => 200,
+        'expected_amount' => 200,
+        'status' => 'open',
+    ]);
+
+    $response = $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/close', [
+        'closing_amount' => 200,
+    ]);
+
+    $response->assertOk();
+
+    // Session B (effective warehouse) must be closed
+    expect($sessionB->fresh()->status)->toBe('closed');
+
+    // Session A (other branch) must remain open
+    expect($sessionA->fresh()->status)->toBe('open');
+});
+
+it('open returns 422 when the user has no effective warehouse context', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'current_warehouse_id' => null,
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/pos-sessions/open', [
+        'opening_amount' => 100,
+    ]);
+
+    // Admin with no current_warehouse_id and no warehouse_id in the request:
+    // The middleware cannot resolve an effective warehouse, so it passes through
+    // without injecting warehouse_id. OpenPosSessionRequest then fails validation
+    // with a 422 — no fallback to an arbitrary branch is allowed.
+    $response->assertUnprocessable()
+        ->assertJsonValidationErrors('warehouse_id');
+});

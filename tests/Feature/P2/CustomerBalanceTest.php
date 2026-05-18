@@ -22,7 +22,7 @@ function setupCustomerBalanceTest(): array
     $warehouse = Warehouse::create([
         'name' => 'Test Warehouse',
         'code' => 'TST',
-        'status' => 'active'
+        'status' => 'active',
     ]);
 
     $user = User::factory()->create([
@@ -33,7 +33,7 @@ function setupCustomerBalanceTest(): array
     $user->warehouses()->attach($warehouse->id);
 
     $customer = Customer::create([
-        'code' => 'CUST-' . uniqid(),
+        'code' => 'CUST-'.uniqid(),
         'name' => 'Test Customer',
         'credit_limit' => 5000,
         'current_balance' => 0,
@@ -134,16 +134,10 @@ it('venta pagada completamente no genera cargo al balance', function () {
         ->assertStatus(201);
 
     $customer->refresh();
-    // Balance: 0 (payment) - 100 (cash) = -100, confirm loads 0 (fully paid), final: -100 + 0 = -100
-    // Actually payment reduces balance, so: 0 - 100 = -100, then confirm doesn't add sale charge
-    // But wait, we need to check the actual balance
-    expect((float) $customer->current_balance)->toBe(-100.0); // -100 means they paid us 100
+    expect((float) $customer->current_balance)->toBe(0.0);
 
     $transactions = CustomerTransaction::where('customer_id', $customer->id)->get();
-    // Should only have 1 transaction (payment), no sale transaction since fully paid
-    expect($transactions)->toHaveCount(1);
-    expect($transactions->first()->type)->toBe('payment');
-    expect((float) $transactions->first()->amount)->toBe(100.0);
+    expect($transactions)->toHaveCount(0);
 });
 
 it('venta con pago parcial carga solo el saldo pendiente', function () {
@@ -171,20 +165,15 @@ it('venta con pago parcial carga solo el saldo pendiente', function () {
         ->assertStatus(201);
 
     $customer->refresh();
-    // Balance: 0 (payment) - 40 (cash) = -40, confirm loads 60 (what's pending)
-    // Final: -40 + 60 = 20 (client owes 20)
-    expect((float) $customer->current_balance)->toBe(20.0);
+    expect((float) $customer->current_balance)->toBe(60.0);
 
     $transactions = CustomerTransaction::where('customer_id', $customer->id)
         ->orderBy('created_at')
         ->get();
 
-    // Should have 2 transactions: payment (40) + sale (60)
-    expect($transactions)->toHaveCount(2);
-    expect($transactions[0]->type)->toBe('payment');
-    expect((float) $transactions[0]->amount)->toBe(40.0);
-    expect($transactions[1]->type)->toBe('sale');
-    expect((float) $transactions[1]->amount)->toBe(60.0); // Only pending amount
+    expect($transactions)->toHaveCount(1);
+    expect($transactions[0]->type)->toBe('sale');
+    expect((float) $transactions[0]->amount)->toBe(60.0);
 });
 
 it('venta con store_credit no genera deuda incorrecta', function () {

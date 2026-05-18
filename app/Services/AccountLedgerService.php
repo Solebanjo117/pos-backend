@@ -4,8 +4,11 @@ namespace App\Services;
 
 use App\Models\AccountLedgerEntry;
 use App\Models\AccountPaymentBatch;
+use App\Models\CashMovement;
 use App\Models\Customer;
+use App\Models\PosSession;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\Supplier;
 use Illuminate\Database\Eloquent\Collection;
@@ -15,6 +18,8 @@ use Illuminate\Support\Str;
 
 class AccountLedgerService
 {
+    private const REAL_PAYMENT_METHODS = ['cash', 'card', 'transfer', 'other'];
+
     /**
      * @return array<string, mixed>
      */
@@ -94,12 +99,19 @@ class AccountLedgerService
             $amount = round((float) $data['amount'], 2);
             $applications = $this->normalizeCustomerApplications($customer, $data['applications'] ?? [], $amount);
             $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
+            $session = $this->openSessionForCurrentWarehouse();
+
+            if (! $session) {
+                throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar cobros.');
+            }
 
             if ($appliedTotal > $amount + 0.01) {
                 throw new \InvalidArgumentException('El monto aplicado excede el monto del recibo.');
             }
 
-            $batch = $this->createPaymentBatch('customer', $customer->id, 'incoming', $amount, $data);
+            $batch = $this->createPaymentBatch('customer', $customer->id, 'incoming', $amount, array_merge($data, [
+                'pos_session_id' => $session->id,
+            ]));
 
             foreach ($applications as $application) {
                 $order = SalesOrder::with(['payments', 'customer'])->findOrFail($application['document_id']);
@@ -220,12 +232,38 @@ class AccountLedgerService
             $amount = round((float) $data['amount'], 2);
             $applications = $this->normalizeSupplierApplications($supplier, $data['applications'] ?? [], $amount);
             $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
+            $session = $this->openSessionForSupplierApplications($applications);
 
             if ($appliedTotal > $amount + 0.01) {
                 throw new \InvalidArgumentException('El monto aplicado excede el monto del pago.');
             }
 
-            $batch = $this->createPaymentBatch('supplier', $supplier->id, 'outgoing', $amount, $data);
+            if (! $session) {
+                throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar pagos de compra.');
+            }
+
+            $cashMovement = null;
+            if (($data['method'] ?? null) === 'cash') {
+                $cashReason = 'Pago proveedor '.$supplier->name;
+                if (count($applications) === 1) {
+                    $cashOrder = PurchaseOrder::query()->find($applications[0]['document_id']);
+                    $cashReason = $cashOrder ? 'Pago OC '.$cashOrder->po_number : $cashReason;
+                }
+
+                $cashMovement = CashMovement::create([
+                    'pos_session_id' => $session->id,
+                    'user_id' => Auth::id(),
+                    'type' => 'out',
+                    'amount' => $amount,
+                    'reason' => $cashReason,
+                    'notes' => $data['notes'] ?? null,
+                ]);
+            }
+
+            $batch = $this->createPaymentBatch('supplier', $supplier->id, 'outgoing', $amount, array_merge($data, [
+                'pos_session_id' => $session->id,
+                'cash_movement_id' => $cashMovement?->id,
+            ]));
 
             foreach ($applications as $application) {
                 $order = PurchaseOrder::with('payments')->findOrFail($application['document_id']);
@@ -239,6 +277,11 @@ class AccountLedgerService
                 if (! empty($data['paid_at'])) {
                     $payment->update(['paid_at' => $data['paid_at']]);
                 }
+
+                $payment->update([
+                    'pos_session_id' => $session->id,
+                    'cash_movement_id' => $cashMovement?->id,
+                ]);
 
                 $batch->applications()->create([
                     'document_type' => 'purchase_order',
@@ -273,11 +316,68 @@ class AccountLedgerService
         });
     }
 
+    public function reverseSupplierPaymentForPurchaseOrderPayment(PurchaseOrder $purchaseOrder, PurchaseOrderPayment $payment): void
+    {
+        DB::transaction(function () use ($purchaseOrder, $payment): void {
+            $batch = AccountPaymentBatch::query()
+                ->where('account_type', 'supplier')
+                ->where('account_id', $purchaseOrder->supplier_id)
+                ->where('direction', 'outgoing')
+                ->where('method', $payment->method)
+                ->where('amount', $payment->amount)
+                ->whereHas('applications', function ($query) use ($purchaseOrder, $payment): void {
+                    $query->where('document_type', 'purchase_order')
+                        ->where('document_id', $purchaseOrder->id)
+                        ->where('amount', $payment->amount);
+                })
+                ->latest('id')
+                ->first();
+
+            if (! $batch) {
+                $payment->cashMovement?->delete();
+                $payment->delete();
+                $purchaseOrder->recalculatePaymentStatus();
+
+                return;
+            }
+
+            if ($batch->applications()->count() > 1) {
+                throw new \InvalidArgumentException('Este pago pertenece a una aplicacion multiple. Reversa el pago desde credito compra.');
+            }
+
+            if ($batch->posSession && $batch->posSession->status !== 'open') {
+                throw new \InvalidArgumentException('No se puede reversar un pago ligado a una caja cerrada.');
+            }
+
+            if ($batch->cashMovement?->posSession && $batch->cashMovement->posSession->status !== 'open') {
+                throw new \InvalidArgumentException('No se puede reversar un movimiento de una caja cerrada.');
+            }
+
+            $batch->ledgerEntries()->delete();
+            $batch->applications()->delete();
+            $batch->cashMovement?->delete();
+            $payment->delete();
+            $batch->delete();
+            $purchaseOrder->recalculatePaymentStatus();
+
+            activity()
+                ->performedOn($purchaseOrder)
+                ->withProperties(['payment_id' => $payment->id, 'batch_id' => $batch->id])
+                ->log('Pago de cuenta por pagar reversado');
+        });
+    }
+
     private function createPaymentBatch(string $accountType, int $accountId, string $direction, float $amount, array $data): AccountPaymentBatch
     {
+        if (! in_array((string) ($data['method'] ?? ''), self::REAL_PAYMENT_METHODS, true)) {
+            throw new \InvalidArgumentException('El metodo debe ser un pago real.');
+        }
+
         return AccountPaymentBatch::create([
             'account_type' => $accountType,
             'account_id' => $accountId,
+            'pos_session_id' => $data['pos_session_id'] ?? null,
+            'cash_movement_id' => $data['cash_movement_id'] ?? null,
             'direction' => $direction,
             'batch_number' => $this->nextBatchNumber($accountType),
             'amount' => $amount,
@@ -287,6 +387,45 @@ class AccountLedgerService
             'paid_at' => $data['paid_at'] ?? now(),
             'created_by' => Auth::id(),
         ]);
+    }
+
+    private function openSessionForCurrentWarehouse(): ?PosSession
+    {
+        $warehouseId = Auth::user()?->current_warehouse_id;
+
+        if (! $warehouseId) {
+            return null;
+        }
+
+        return PosSession::query()
+            ->where('user_id', Auth::id())
+            ->where('warehouse_id', $warehouseId)
+            ->where('status', 'open')
+            ->latest()
+            ->first();
+    }
+
+    /**
+     * @param  array<int, array{document_id: int, amount: float}>  $applications
+     */
+    private function openSessionForSupplierApplications(array $applications): ?PosSession
+    {
+        $warehouseIds = PurchaseOrder::query()
+            ->whereIn('id', collect($applications)->pluck('document_id')->all())
+            ->pluck('warehouse_id')
+            ->unique()
+            ->values();
+
+        if ($warehouseIds->count() !== 1) {
+            return null;
+        }
+
+        return PosSession::query()
+            ->where('user_id', Auth::id())
+            ->where('warehouse_id', $warehouseIds->first())
+            ->where('status', 'open')
+            ->latest()
+            ->first();
     }
 
     /**

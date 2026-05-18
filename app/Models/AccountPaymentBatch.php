@@ -14,6 +14,8 @@ class AccountPaymentBatch extends Model
     protected $fillable = [
         'account_type',
         'account_id',
+        'pos_session_id',
+        'cash_movement_id',
         'direction',
         'batch_number',
         'amount',
@@ -42,5 +44,15 @@ class AccountPaymentBatch extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function posSession(): BelongsTo
+    {
+        return $this->belongsTo(PosSession::class);
+    }
+
+    public function cashMovement(): BelongsTo
+    {
+        return $this->belongsTo(CashMovement::class);
     }
 }

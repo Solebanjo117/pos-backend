@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ClosePosSessionRequest;
+use App\Http\Requests\CurrentPosSessionRequest;
+use App\Http\Requests\OpenPosSessionRequest;
 use App\Models\PosSession;
 use App\Services\PosSessionReconciliationService;
 use Illuminate\Http\Request;
@@ -16,24 +18,19 @@ class PosSessionController extends Controller
     ) {}
 
     /**
-     * Get the current open session for the authenticated user.
+     * Get the current open session for the authenticated user in the effective warehouse.
      */
-    public function current(Request $request)
+    public function current(CurrentPosSessionRequest $request)
     {
-        $userId = $request->input('user_id') ?? Auth::id();
-        $warehouseId = $request->input('warehouse_id');
+        $userId = Auth::id();
+        $warehouseId = $request->integer('warehouse_id');
 
-        if (! $userId) {
-            return response()->json(['message' => 'No autorizado. Se requiere user_id en la peticion.'], 401);
-        }
+        $session = PosSession::where('user_id', $userId)
+            ->where('status', 'open')
+            ->where('warehouse_id', $warehouseId)
+            ->latest()
+            ->first();
 
-        $query = PosSession::where('user_id', $userId)->where('status', 'open');
-
-        if ($warehouseId) {
-            $query->where('warehouse_id', $warehouseId);
-        }
-
-        $session = $query->latest()->first();
         $summary = null;
 
         if ($session) {
@@ -51,33 +48,21 @@ class PosSessionController extends Controller
     }
 
     /**
-     * Open a new session.
+     * Open a new session for the authenticated user in the effective warehouse.
      */
-    public function open(Request $request)
+    public function open(OpenPosSessionRequest $request)
     {
-        $userId = $request->input('user_id') ?? Auth::id();
+        $userId = Auth::id();
+        $warehouseId = $request->integer('warehouse_id');
 
-        if (! $userId) {
-            return response()->json(['message' => 'No autorizado. Se requiere user_id en la peticion.'], 401);
-        }
-
-        $request->validate([
-            'opening_amount' => 'required|numeric|min:0',
-            'warehouse_id' => 'nullable|integer|exists:warehouses,id',
-        ]);
-
-        $warehouseId = $request->input('warehouse_id');
-
-        $existingQuery = PosSession::where('user_id', $userId)->where('status', 'open');
-        if ($warehouseId) {
-            $existingQuery->where('warehouse_id', $warehouseId);
-        }
-
-        $existing = $existingQuery->first();
+        $existing = PosSession::where('user_id', $userId)
+            ->where('status', 'open')
+            ->where('warehouse_id', $warehouseId)
+            ->first();
 
         if ($existing) {
             return response()->json([
-                'message' => 'Ya existe una sesion abierta para este usuario'.($warehouseId ? ' en esta sucursal.' : '.'),
+                'message' => 'Ya existe una sesion abierta para este usuario en esta sucursal.',
                 'data' => $existing,
             ], 400);
         }
@@ -98,23 +83,21 @@ class PosSessionController extends Controller
     }
 
     /**
-     * Close the current session.
+     * Close the open session for the authenticated user in the effective warehouse.
      */
     public function close(ClosePosSessionRequest $request)
     {
-        $userId = $request->input('user_id') ?? Auth::id();
-
-        if (! $userId) {
-            return response()->json(['message' => 'No autorizado. Se requiere user_id en la peticion.'], 401);
-        }
+        $userId = Auth::id();
+        $warehouseId = $request->integer('warehouse_id');
 
         $session = PosSession::where('user_id', $userId)
             ->where('status', 'open')
+            ->where('warehouse_id', $warehouseId)
             ->first();
 
         if (! $session) {
             return response()->json([
-                'message' => 'No hay una sesion abierta activa.',
+                'message' => 'No hay una sesion abierta activa para esta sucursal.',
             ], 404);
         }
 
@@ -145,11 +128,15 @@ class PosSessionController extends Controller
             'status' => 'closed',
             'notes' => $request->notes,
         ]);
+        $session->closing_details = $closingDetails;
+
+        $sessionData = $session->toArray();
+        $sessionData['closing_details'] = $closingDetails;
 
         return response()->json([
             'message' => 'Sesion de caja cerrada correctamente',
-            'data' => $session,
-        ]);
+            'data' => $sessionData,
+        ], 200, [], JSON_PRESERVE_ZERO_FRACTION);
     }
 
     /**
@@ -221,10 +208,76 @@ class PosSessionController extends Controller
 
         $posSession->closing_details = $closingDetails;
 
+        $purchasePayments = \App\Models\PurchaseOrderPayment::query()
+            ->where('pos_session_id', $posSession->id)
+            ->with(['purchaseOrder:id,po_number,supplier_id,total', 'purchaseOrder.supplier:id,name', 'user:id,name'])
+            ->orderBy('paid_at', 'asc')
+            ->orderBy('id', 'asc')
+            ->get()
+            ->map(fn (\App\Models\PurchaseOrderPayment $payment): array => [
+                'id' => $payment->id,
+                'purchase_order_id' => $payment->purchase_order_id,
+                'pos_session_id' => $payment->pos_session_id,
+                'cash_movement_id' => $payment->cash_movement_id,
+                'user_id' => $payment->user_id,
+                'amount' => $payment->amount,
+                'method' => $payment->method,
+                'reference_number' => $payment->reference_number,
+                'notes' => $payment->notes,
+                'paid_at' => $payment->paid_at,
+                'created_at' => $payment->created_at,
+                'updated_at' => $payment->updated_at,
+                'purchase_order' => $payment->purchaseOrder ? [
+                    'id' => $payment->purchaseOrder->id,
+                    'po_number' => $payment->purchaseOrder->po_number,
+                    'total' => $payment->purchaseOrder->total,
+                    'supplier' => $payment->purchaseOrder->supplier ? [
+                        'id' => $payment->purchaseOrder->supplier->id,
+                        'name' => $payment->purchaseOrder->supplier->name,
+                    ] : null,
+                ] : null,
+                'user' => $payment->user ? [
+                    'id' => $payment->user->id,
+                    'name' => $payment->user->name,
+                ] : null,
+            ]);
+
+        $accountPayments = \App\Models\AccountPaymentBatch::query()
+            ->where('pos_session_id', $posSession->id)
+            ->with(['applications', 'creator:id,name'])
+            ->orderBy('paid_at', 'asc')
+            ->orderBy('id', 'asc')
+            ->get()
+            ->map(fn (\App\Models\AccountPaymentBatch $batch): array => [
+                'id' => $batch->id,
+                'account_type' => $batch->account_type,
+                'account_id' => $batch->account_id,
+                'direction' => $batch->direction,
+                'batch_number' => $batch->batch_number,
+                'amount' => $batch->amount,
+                'method' => $batch->method,
+                'reference_number' => $batch->reference_number,
+                'notes' => $batch->notes,
+                'paid_at' => $batch->paid_at,
+                'created_at' => $batch->created_at,
+                'creator' => $batch->creator ? [
+                    'id' => $batch->creator->id,
+                    'name' => $batch->creator->name,
+                ] : null,
+                'applications' => $batch->applications->map(fn ($application): array => [
+                    'document_type' => $application->document_type,
+                    'document_id' => $application->document_id,
+                    'document_number' => $application->document_number,
+                    'amount' => $application->amount,
+                ])->values(),
+            ]);
+
         return response()->json([
             'data' => $posSession,
             'sales_orders' => $salesOrders,
             'cash_movements' => $posSession->cashMovements,
+            'purchase_payments' => $purchasePayments,
+            'account_payments' => $accountPayments,
         ]);
     }
 }

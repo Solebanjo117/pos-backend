@@ -12,6 +12,8 @@ class PurchaseOrderPayment extends Model
 
     protected $fillable = [
         'purchase_order_id',
+        'pos_session_id',
+        'cash_movement_id',
         'user_id',
         'amount',
         'method',
@@ -21,7 +23,7 @@ class PurchaseOrderPayment extends Model
     ];
 
     protected $casts = [
-        'amount'  => 'decimal:2',
+        'amount' => 'decimal:2',
         'paid_at' => 'datetime',
     ];
 
@@ -34,6 +36,16 @@ class PurchaseOrderPayment extends Model
         return $this->belongsTo(PurchaseOrder::class);
     }
 
+    public function posSession(): BelongsTo
+    {
+        return $this->belongsTo(PosSession::class);
+    }
+
+    public function cashMovement(): BelongsTo
+    {
+        return $this->belongsTo(CashMovement::class);
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
@@ -43,7 +55,7 @@ class PurchaseOrderPayment extends Model
 
     public function getFormattedAmountAttribute(): string
     {
-        return '$' . number_format($this->amount, 2);
+        return '$'.number_format($this->amount, 2);
     }
 
     public function getMethodLabelAttribute(): string

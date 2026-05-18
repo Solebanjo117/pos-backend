@@ -37,6 +37,15 @@ class AccountsReceivableController extends Controller
                 'data' => $this->accountLedgerService->recordCustomerReceipt($customer, $request->validated()),
             ], 201);
         } catch (\InvalidArgumentException $exception) {
+            if (str_contains($exception->getMessage(), 'sesion de caja')) {
+                return response()->json([
+                    'message' => $exception->getMessage(),
+                    'errors' => [
+                        'pos_session_id' => [$exception->getMessage()],
+                    ],
+                ], 422);
+            }
+
             return response()->json(['message' => $exception->getMessage()], 422);
         }
     }

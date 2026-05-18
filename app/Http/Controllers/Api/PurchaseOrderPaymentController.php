@@ -3,15 +3,15 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StorePurchaseOrderPaymentRequest;
 use App\Models\PurchaseOrder;
-use App\Services\AccountLedgerService;
+use App\Services\PurchaseOrderPaymentService;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 
 class PurchaseOrderPaymentController extends Controller
 {
     public function __construct(
-        private AccountLedgerService $accountLedgerService
+        private PurchaseOrderPaymentService $purchaseOrderPaymentService
     ) {}
 
     /**
@@ -37,50 +37,33 @@ class PurchaseOrderPaymentController extends Controller
     /**
      * Register a new payment against a purchase order.
      */
-    public function store(Request $request, int $poId): JsonResponse
+    public function store(StorePurchaseOrderPaymentRequest $request, int $poId): JsonResponse
     {
         $po = PurchaseOrder::with('payments')->findOrFail($poId);
+        $validated = $request->validated();
 
-        $request->validate([
-            'amount' => 'required|numeric|min:0.01',
-            'method' => 'required|in:cash,card,transfer,other',
-            'reference_number' => 'nullable|string|max:100',
-            'notes' => 'nullable|string|max:500',
-        ]);
-
-        $amount = (float) $request->amount;
-        $amountDue = $po->amount_due;
-
-        if ($amount > $amountDue + 0.01) {
+        try {
+            $payment = $this->purchaseOrderPaymentService->registerPayment($po, $validated);
+        } catch (\InvalidArgumentException $exception) {
             return response()->json([
-                'message' => "El monto del pago ($amount) excede la deuda pendiente ($amountDue).",
+                'message' => $exception->getMessage(),
+                'errors' => [
+                    'payment' => [$exception->getMessage()],
+                ],
             ], 422);
         }
 
-        if ($po->supplier) {
-            $this->accountLedgerService->recordSupplierPayment($po->supplier, [
-                'amount' => $amount,
-                'method' => $request->method,
-                'reference_number' => $request->reference_number,
-                'notes' => $request->notes,
-                'applications' => [
-                    [
-                        'document_id' => $po->id,
-                        'amount' => $amount,
-                    ],
-                ],
-            ]);
-            $payment = $po->payments()->latest('id')->first();
-        } else {
-            $payment = $po->addPayment(
-                $amount,
-                $request->method,
-                $request->reference_number,
-                $request->notes
-            );
-        }
-
         $po->refresh();
+
+        if (! $payment) {
+            return response()->json([
+                'message' => 'La compra queda como cuenta por pagar; no se registra salida inmediata de caja.',
+                'payment' => null,
+                'amount_paid' => $po->amount_paid,
+                'amount_due' => $po->amount_due,
+                'payment_status' => $po->payment_status,
+            ]);
+        }
 
         return response()->json([
             'message' => 'Pago registrado exitosamente.',
@@ -99,8 +82,17 @@ class PurchaseOrderPaymentController extends Controller
         $po = PurchaseOrder::findOrFail($poId);
         $payment = $po->payments()->findOrFail($paymentId);
 
-        $payment->delete();
-        $po->recalculatePaymentStatus();
+        try {
+            $this->purchaseOrderPaymentService->deletePayment($po, $payment);
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+                'errors' => [
+                    'payment' => [$exception->getMessage()],
+                ],
+            ], 422);
+        }
+
         $po->refresh();
 
         return response()->json([

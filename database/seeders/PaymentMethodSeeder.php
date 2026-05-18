@@ -37,12 +37,20 @@ class PaymentMethodSeeder extends Seeder
                 'sort_order' => 3,
             ],
             [
+                'name' => 'Otro',
+                'code' => 'other',
+                'is_system' => true,
+                'requires_reference' => false,
+                'requires_cash_count' => false,
+                'sort_order' => 4,
+            ],
+            [
                 'name' => 'Crédito',
                 'code' => 'credit',
                 'is_system' => true,
                 'requires_reference' => false,
                 'requires_cash_count' => false,
-                'sort_order' => 4,
+                'sort_order' => 5,
             ],
             [
                 'name' => 'Saldo a Favor',
@@ -50,7 +58,15 @@ class PaymentMethodSeeder extends Seeder
                 'is_system' => true,
                 'requires_reference' => false,
                 'requires_cash_count' => false,
-                'sort_order' => 5,
+                'sort_order' => 6,
+            ],
+            [
+                'name' => 'Crédito proveedor',
+                'code' => 'supplier_credit',
+                'is_system' => true,
+                'requires_reference' => false,
+                'requires_cash_count' => false,
+                'sort_order' => 7,
             ],
         ];
 

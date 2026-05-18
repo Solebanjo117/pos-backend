@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\CashMovement;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
+use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
 use Illuminate\Support\Carbon;
@@ -89,7 +90,7 @@ class PosSessionReconciliationService
             $query->where('paid_at', '<=', $until);
         }
 
-        return $query
+        $salesPayments = $query
             ->selectRaw('method, SUM(CASE WHEN amount >= 0 THEN amount ELSE 0 END) as payments, SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END) as withdrawals')
             ->groupBy('method')
             ->get()
@@ -100,6 +101,26 @@ class PosSessionReconciliationService
                 ],
             ])
             ->all();
+
+        $purchaseWithdrawals = PurchaseOrderPayment::query()
+            ->where('pos_session_id', $session->id)
+            ->where(function ($query): void {
+                $query->where('method', '!=', 'cash')
+                    ->orWhereNull('cash_movement_id');
+            })
+            ->selectRaw('method, SUM(amount) as withdrawals')
+            ->groupBy('method')
+            ->get();
+
+        foreach ($purchaseWithdrawals as $payment) {
+            $method = $payment->method;
+            $salesPayments[$method] ??= ['payments' => 0.0, 'withdrawals' => 0.0];
+            $salesPayments[$method]['withdrawals'] = $this->money(
+                (float) $salesPayments[$method]['withdrawals'] - (float) $payment->withdrawals
+            );
+        }
+
+        return $salesPayments;
     }
 
     private function cashMovementTotal(PosSession $session, string $type): float
