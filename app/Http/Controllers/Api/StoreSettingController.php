@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Models\Setting;
 use App\Services\PricingFormulaService;
@@ -26,7 +27,7 @@ class StoreSettingController extends Controller
             ->orWhere('group', 'sku')
             ->get(['*']);
 
-        $map = $settings->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]);
+        $map = $settings->mapWithKeys(fn ($s) => [$s->key => $s->getTypedValue()]);
 
         return response()->json(['data' => $map]);
     }
@@ -54,14 +55,14 @@ class StoreSettingController extends Controller
 
         foreach ($allowed as $key) {
             if ($request->has($key)) {
-                $group = match(true) {
+                $group = match (true) {
                     in_array($key, ['pricing_formula', 'price_rounding_increment']) => 'pricing',
                     str_starts_with($key, 'modules_') => 'modules',
                     str_starts_with($key, 'quote_') || $key === 'require_stock_for_quotes' => 'quotes',
                     $key === 'sku_format' => 'sku',
                     default => 'store',
                 };
-                $type = match(true) {
+                $type = match (true) {
                     in_array($key, ['quote_expiration_days', 'store_tax_rate', 'price_rounding_increment']) => 'number',
                     in_array($key, ['modules_work_orders_enabled', 'require_stock_for_quotes']) => 'boolean',
                     $key === 'sku_format' => 'json',
@@ -77,7 +78,7 @@ class StoreSettingController extends Controller
 
         return response()->json([
             'message' => 'Configuración guardada correctamente',
-            'data'    => Setting::whereIn('group', ['store', 'pricing', 'quotes', 'modules', 'sku'])->get(['*'])->mapWithKeys(fn($s) => [$s->key => $s->getTypedValue()]),
+            'data' => Setting::whereIn('group', ['store', 'pricing', 'quotes', 'modules', 'sku'])->get(['*'])->mapWithKeys(fn ($s) => [$s->key => $s->getTypedValue()]),
         ]);
     }
 
@@ -99,13 +100,13 @@ class StoreSettingController extends Controller
         }
 
         $path = $request->file('logo')->store('store', 'public');
-        $url  = asset('storage/' . $path);
+        $url = asset('storage/'.$path);
 
         Setting::set('store_logo_url', $url, 'string', 'store');
 
         return response()->json([
-            'message'   => 'Logo actualizado correctamente',
-            'logo_url'  => $url,
+            'message' => 'Logo actualizado correctamente',
+            'logo_url' => $url,
         ]);
     }
 
@@ -118,15 +119,15 @@ class StoreSettingController extends Controller
         $this->normalizeIntegerPercentField($request, 'tax_rate');
 
         $request->validate([
-            'formula'  => 'required|string|max:255',
-            'cost'     => 'required|numeric|min:0',
+            'formula' => 'required|string|max:255',
+            'cost' => 'required|numeric|min:0',
             'tax_rate' => 'nullable|integer|min:0|max:100',
         ]);
 
         $result = $this->formulaService->preview(
             $request->input('formula'),
             (float) $request->input('cost'),
-            (float) $request->input('tax_rate', Setting::get('store_tax_rate', 7.0))
+            (float) TaxRateHelper::resolve($request->input('tax_rate'))
         );
 
         return response()->json($result);
@@ -145,7 +146,7 @@ class StoreSettingController extends Controller
 
     private function normalizeIntegerPercentField(Request $request, string $field): void
     {
-        if (!$request->has($field)) {
+        if (! $request->has($field)) {
             return;
         }
 

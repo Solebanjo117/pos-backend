@@ -2,9 +2,14 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\ProductVariantFifoHistoryRequest;
+use App\Http\Resources\InventoryMovementResource;
+use App\Models\InventoryLot;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\InventoryFifoHistoryService;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,7 +17,8 @@ use Illuminate\Http\Request;
 class ProductVariantController extends Controller
 {
     public function __construct(
-        private readonly ProductService $productService
+        private readonly ProductService $productService,
+        private readonly InventoryFifoHistoryService $fifoHistoryService,
     ) {}
 
     /**
@@ -170,6 +176,17 @@ class ProductVariantController extends Controller
                 $pricing->save();
             }
 
+            $variant->loadMissing('pricing');
+            foreach ($variant->inventory()->get() as $inventory) {
+                app(\App\Services\InventoryFifoService::class)->ensureOpeningLotForInventory(
+                    $product->id,
+                    $variant->id,
+                    (int) $inventory->warehouse_id,
+                    (int) $inventory->quantity_available,
+                    (float) ($variant->pricing?->cost_total ?? 0)
+                );
+            }
+
             \DB::commit();
 
             return response()->json([
@@ -199,7 +216,7 @@ class ProductVariantController extends Controller
         $this->normalizePricingTaxRates($request);
 
         $validated = $request->validate([
-            'brand_id' => 'required|exists:brands,id',
+            'brand_id' => 'sometimes|exists:brands,id',
             'sku' => [
                 'nullable',
                 'string',
@@ -275,6 +292,57 @@ class ProductVariantController extends Controller
         ]);
     }
 
+    public function fifoHistory(ProductVariantFifoHistoryRequest $request, Product $product, ProductVariant $variant): JsonResponse
+    {
+        if ($variant->product_id !== $product->id) {
+            return response()->json(['message' => 'Variante no corresponde al producto'], 404);
+        }
+
+        $history = $this->fifoHistoryService->forVariant($product, $variant, $request->validated());
+
+        return response()->json([
+            'data' => [
+                'summary' => $history['summary'],
+                'lots' => $history['lots']->map(fn (InventoryLot $lot) => [
+                    'id' => $lot->id,
+                    'warehouse_id' => $lot->warehouse_id,
+                    'warehouse' => $lot->warehouse ? [
+                        'id' => $lot->warehouse->id,
+                        'name' => $lot->warehouse->name,
+                        'code' => $lot->warehouse->code,
+                    ] : null,
+                    'source_type' => $lot->source_type,
+                    'source_id' => $lot->source_id,
+                    'source_movement_id' => $lot->source_movement_id,
+                    'batch_number' => $lot->batch_number,
+                    'received_quantity' => (int) $lot->received_quantity,
+                    'quantity_available' => (int) $lot->quantity_available,
+                    'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+                    'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+                    'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+                    'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+                    'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+                    'received_at' => $lot->received_at?->toIso8601String(),
+                ])->values(),
+                'purchase_movements' => $history['purchase_movements']->map(fn ($movement) => [
+                    ...((new InventoryMovementResource($movement))->resolve($request)),
+                    'fifo_lots' => $movement->sourceLots->map(fn (InventoryLot $lot) => [
+                        'lot_id' => $lot->id,
+                        'quantity' => (int) $lot->received_quantity,
+                        'quantity_available' => (int) $lot->quantity_available,
+                        'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+                        'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+                        'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+                        'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+                        'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+                        'received_at' => $lot->received_at?->toIso8601String(),
+                    ])->values(),
+                ])->values(),
+                'sale_movements' => InventoryMovementResource::collection($history['sale_movements'])->resolve($request),
+            ],
+        ]);
+    }
+
     private function normalizePricingTaxRates(Request $request): void
     {
         $pricing = $request->input('pricing');
@@ -290,6 +358,13 @@ class ProductVariantController extends Controller
         $legacyTaxRate = $this->normalizePercentValue($pricing['tax_rate'] ?? null);
         $saleTaxRate = $this->normalizePercentValue($pricing['sale_tax_rate'] ?? null);
         $costTaxRate = $this->normalizePercentValue($pricing['cost_tax_rate'] ?? null);
+
+        if ($request->isMethod('post') && ! $hasLegacyTaxRate && ! $hasSaleTaxRate) {
+            $pricing['tax_rate'] = TaxRateHelper::defaultRate();
+            $pricing['sale_tax_rate'] = TaxRateHelper::defaultRate();
+            $legacyTaxRate = TaxRateHelper::defaultRate();
+            $saleTaxRate = TaxRateHelper::defaultRate();
+        }
 
         if ($hasLegacyTaxRate) {
             $pricing['tax_rate'] = $legacyTaxRate;
@@ -310,6 +385,10 @@ class ProductVariantController extends Controller
 
         if ($hasCostTaxRate) {
             $pricing['cost_tax_rate'] = $costTaxRate;
+        }
+
+        if (! $hasCostTaxRate && array_key_exists('sale_tax_rate', $pricing)) {
+            $pricing['cost_tax_rate'] = $pricing['sale_tax_rate'];
         }
 
         $pricing = $this->normalizePricingCostBreakdown($pricing);

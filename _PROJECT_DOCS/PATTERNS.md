@@ -1446,4 +1446,20 @@ NO aplicar cuando:
 
 ---
 
+## 18. Patrón: Tasa de impuesto por defecto
+
+Toda lógica nueva o refactorizada que necesite la tasa de ITBM por defecto debe resolverla desde la configuración de tienda (`/settings/store`) y reutilizar un helper centralizado. No usar literales `7`, `7.0` ni `0.07` en pantallas, servicios, modelos o imports.
+
+**Backend:**
+- Resolver la tasa desde `Setting::get('store_tax_rate', 7)` dentro de un helper compartido.
+- Mantener `7` solo como fallback final cuando la configuración no exista.
+- Reutilizar el helper en ventas, cotizaciones, órdenes de compra, productos, categorías, inventario, lista de abastecimiento e imports.
+
+**Frontend:**
+- Resolver la tasa desde `useStoreSettings()` mediante un helper compartido.
+- Mantener el helper como fuente única para formularios y cálculos automáticos de ITBM.
+- No repetir defaults fijos en OC, productos/variantes, categorías, POS, inventario o supply list.
+
+---
+
 **Última actualización:** 2026-03-26

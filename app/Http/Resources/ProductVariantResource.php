@@ -71,6 +71,11 @@ class ProductVariantResource extends JsonResource
                     'quantity_available' => $inv->quantity_available,
                     'quantity_reserved' => $inv->quantity_reserved ?? 0,
                     'reorder_point' => $inv->reorder_point,
+                    'fifo_cost_current' => app(\App\Services\InventoryFifoService::class)->currentFifoCost(
+                        (int) $this->product_id,
+                        (int) $this->id,
+                        (int) $inv->warehouse_id
+                    ),
                 ])
             ),
 

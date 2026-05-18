@@ -453,6 +453,13 @@ class ProductService
             }
         }
 
+        // Preserve model_id for scoping all_engines / all_chassis to a specific model.
+        if (! empty($compatibility['model_id'])) {
+            // Already set from structured payload.
+        } elseif (! empty($data['model_id'])) {
+            $compatibility['model_id'] = (int) $data['model_id'];
+        }
+
         return array_filter($compatibility, fn (mixed $value): bool => $value !== null && $value !== [] && $value !== false);
     }
 
@@ -503,10 +510,10 @@ class ProductService
             ->values();
 
         foreach ($engineIds as $engineId) {
-            $engine = VehicleEngine::query()->with('model')->find($engineId);
+            $engine = VehicleEngine::query()->with(['make', 'model.make'])->find($engineId);
             $product->vehicleCompatibility()->create([
                 'scope_type' => 'engine',
-                'make_id' => $engine?->model?->make_id,
+                'make_id' => $engine?->make_id ?? $engine?->model?->make_id,
                 'model_id' => $engine?->model_id,
                 'engine_id' => $engineId,
             ]);
@@ -529,16 +536,27 @@ class ProductService
             ]);
         }
 
+        $scopedModelId = isset($compatibility['model_id']) ? (int) $compatibility['model_id'] : null;
+        $scopedMakeId = null;
+        if ($scopedModelId) {
+            $scopedModel = VehicleModel::query()->find($scopedModelId);
+            $scopedMakeId = $scopedModel?->make_id;
+        }
+
         if ((bool) ($compatibility['allEngines'] ?? $compatibility['all_engines'] ?? false)) {
             $product->vehicleCompatibility()->create([
-                'scope_type' => 'universal',
+                'scope_type' => $scopedModelId ? 'model' : 'universal',
+                'make_id' => $scopedMakeId,
+                'model_id' => $scopedModelId,
                 'all_engines' => true,
             ]);
         }
 
         if ((bool) ($compatibility['allChassis'] ?? $compatibility['all_chassis'] ?? false)) {
             $product->vehicleCompatibility()->create([
-                'scope_type' => 'universal',
+                'scope_type' => $scopedModelId ? 'model' : 'universal',
+                'make_id' => $scopedMakeId,
+                'model_id' => $scopedModelId,
                 'all_chassis' => true,
             ]);
         }
@@ -673,7 +691,20 @@ class ProductService
                 if (isset($data['initial_inventory'])) {
                     foreach ($data['initial_inventory'] as $inventoryData) {
                         $inventoryData['product_id'] = $product->id;
-                        $variant->inventory()->create($inventoryData);
+                        if (array_key_exists('stock_available', $inventoryData) && ! array_key_exists('quantity_available', $inventoryData)) {
+                            $inventoryData['quantity_available'] = $inventoryData['stock_available'];
+                            unset($inventoryData['stock_available']);
+                        }
+                        $inventory = $variant->inventory()->create($inventoryData);
+                        $variant->loadMissing('pricing');
+
+                        app(InventoryFifoService::class)->ensureOpeningLotForInventory(
+                            $product->id,
+                            $variant->id,
+                            (int) $inventory->warehouse_id,
+                            (int) $inventory->quantity_available,
+                            (float) ($variant->pricing?->cost_total ?? 0)
+                        );
                     }
                 }
             }

@@ -5,9 +5,9 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class ProductVariant extends Model
@@ -64,6 +64,11 @@ class ProductVariant extends Model
         return $this->hasMany(ProductInventory::class, 'variant_id');
     }
 
+    public function inventoryLots(): HasMany
+    {
+        return $this->hasMany(InventoryLot::class, 'variant_id');
+    }
+
     /**
      * Get the suppliers for this variant
      */
@@ -99,6 +104,7 @@ class ProductVariant extends Model
     {
         $productName = $this->product?->name ?? 'Producto';
         $brandName = $this->brand?->name ?? 'Sin marca';
+
         return "{$productName} - {$brandName}";
     }
 
@@ -110,6 +116,7 @@ class ProductVariant extends Model
         if ($this->relationLoaded('inventory')) {
             return $this->inventory->sum('quantity_available');
         }
+
         return $this->inventory()->sum('quantity_available');
     }
 

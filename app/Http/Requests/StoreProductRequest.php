@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Helpers\TaxRateHelper;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreProductRequest extends FormRequest
@@ -18,7 +19,7 @@ class StoreProductRequest extends FormRequest
         $saleTaxRate = $this->normalizePercentValue($pricing['sale_tax_rate'] ?? null);
         $costTaxRate = $this->normalizePercentValue($pricing['cost_tax_rate'] ?? null);
 
-        $effectiveSaleTaxRate = $saleTaxRate ?? $legacyTaxRate;
+        $effectiveSaleTaxRate = $saleTaxRate ?? $legacyTaxRate ?? TaxRateHelper::defaultRate();
         $effectiveCostTaxRate = $costTaxRate ?? $legacyTaxRate ?? $effectiveSaleTaxRate;
 
         if ($effectiveSaleTaxRate !== null) {
@@ -184,6 +185,9 @@ class StoreProductRequest extends FormRequest
             'vehicle_compatibility.makes.*.make_id' => 'required_with:vehicle_compatibility.makes|integer|exists:vehicle_makes,id',
             'vehicle_compatibility.models' => 'nullable|array',
             'vehicle_compatibility.models.*.model_id' => 'required_with:vehicle_compatibility.models|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.all_engines' => 'nullable|boolean',
+            'vehicle_compatibility.all_chassis' => 'nullable|boolean',
+            'vehicle_compatibility.model_id' => 'nullable|integer|exists:vehicle_models,id',
             'vehicle_chassis' => 'nullable|array',
             'vehicle_chassis.*' => 'integer|exists:vehicle_chassis,id',
             'vehicle_makes' => 'nullable|array',

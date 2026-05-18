@@ -221,6 +221,31 @@ it('imports vehicle engine metadata with closed fuel catalog normalization', fun
         ->and($engine->aspiration)->toBe('Natural');
 });
 
+it('imports vehicle engines with internal spaces using normal engine code normalization', function () {
+    $import = new VehicleImport;
+
+    $import->execute([
+        [
+            '__row' => 2,
+            'make' => 'HYUNDAI',
+            'model' => 'ACCENT',
+            'year' => '2012-2017',
+            'generation' => 'RB',
+            'code' => 'RB',
+            'engine' => "Gamma   G4\tFA",
+            'displacement' => '1.4L',
+            'fuel_type' => 'Gasoline',
+        ],
+    ]);
+
+    expect($import->successCount)->toBe(1)
+        ->and($import->errorCount)->toBe(0);
+
+    $engine = VehicleEngine::where('engine_code', 'GAMMA G4 FA')->firstOrFail();
+
+    expect($engine->displacement)->toBe('1.4L');
+});
+
 it('imports multiple vehicle vins scoped to model chassis and engine', function () {
     $import = new VehicleImport;
 

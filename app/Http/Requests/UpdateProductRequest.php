@@ -181,6 +181,9 @@ class UpdateProductRequest extends FormRequest
             'vehicle_compatibility.allEngines' => 'sometimes|boolean',
             'vehicle_compatibility.allChassis' => 'sometimes|boolean',
             'vehicle_compatibility.isUniversal' => 'sometimes|boolean',
+            'vehicle_compatibility.all_engines' => 'sometimes|boolean',
+            'vehicle_compatibility.all_chassis' => 'sometimes|boolean',
+            'vehicle_compatibility.model_id' => 'sometimes|integer|exists:vehicle_models,id',
 
             // Pricing (all optional for update)
             'pricing' => 'sometimes|array',

@@ -2,6 +2,7 @@
 
 namespace App\Imports;
 
+use App\Helpers\TaxRateHelper;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
@@ -320,21 +321,32 @@ class ProductImport extends BaseImport
                     continue;
                 }
 
-                $variant->inventory()->create([
+                $inventory = $variant->inventory()->create([
                     'product_id' => $product->id,
                     'warehouse_id' => (int) $inventoryData['warehouse_id'],
                     'quantity_available' => (int) ($inventoryData['stock_available'] ?? 0),
                     'reorder_point' => (int) ($inventoryData['reorder_point'] ?? 0),
                     'reorder_quantity' => (int) ($inventoryData['reorder_quantity'] ?? 0),
                 ]);
+
+                $variant->loadMissing('pricing');
+                app(\App\Services\InventoryFifoService::class)->ensureOpeningLotForInventory(
+                    $product->id,
+                    $variant->id,
+                    (int) $inventoryData['warehouse_id'],
+                    (int) $inventory->quantity_available,
+                    (float) ($variant->pricing?->cost_total ?? 0)
+                );
             }
         }
     }
 
     private function buildVariantPricingPayload(int $productId, int $variantId, array $pricingData): array
     {
-        $saleTaxRate = (int) ($pricingData['sale_tax_rate'] ?? $pricingData['tax_rate'] ?? 7);
-        $costTaxRate = (int) ($pricingData['cost_tax_rate'] ?? $saleTaxRate);
+        $saleTaxRate = TaxRateHelper::resolve($pricingData['sale_tax_rate'] ?? $pricingData['tax_rate'] ?? null);
+        $costTaxRate = array_key_exists('cost_tax_rate', $pricingData)
+            ? TaxRateHelper::resolve($pricingData['cost_tax_rate'])
+            : $saleTaxRate;
         $costBase = $this->parseMoney($pricingData['cost_base'] ?? null);
         $costMiscellaneous = $this->parseMoney($pricingData['cost_miscellaneous'] ?? null) ?? 0;
         $legacyCost = $this->parseMoney($pricingData['cost'] ?? null);

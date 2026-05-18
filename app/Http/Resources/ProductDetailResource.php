@@ -222,6 +222,11 @@ class ProductDetailResource extends JsonResource
                                 'stock_on_order' => 0, // Placeholder as column missing in Model
                                 'reorder_point' => (int) $inv->reorder_point,
                                 'needs_reorder' => $inv->quantity_available <= $inv->reorder_point,
+                                'fifo_cost_current' => app(\App\Services\InventoryFifoService::class)->currentFifoCost(
+                                    (int) $variant->product_id,
+                                    (int) $variant->id,
+                                    (int) $inv->warehouse_id
+                                ),
                             ];
                         });
                     })->values();

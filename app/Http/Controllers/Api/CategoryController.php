@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Models\CategoryMedia;
@@ -96,6 +97,8 @@ class CategoryController extends Controller
             $validated['default_attributes'] = $this->normalizeDefaultAttributes($validated['default_attributes']);
         }
 
+        $validated['itbm_percent'] = TaxRateHelper::resolve($validated['itbm_percent'] ?? null);
+
         $category = Category::create($validated);
 
         return response()->json($category, 201);
@@ -148,6 +151,10 @@ class CategoryController extends Controller
         // Normalizar y validar default_attributes
         if (isset($validated['default_attributes'])) {
             $validated['default_attributes'] = $this->normalizeDefaultAttributes($validated['default_attributes']);
+        }
+
+        if (array_key_exists('itbm_percent', $validated)) {
+            $validated['itbm_percent'] = TaxRateHelper::resolve($validated['itbm_percent']);
         }
 
         $category->update($validated);
@@ -224,7 +231,7 @@ class CategoryController extends Controller
             $data['formula'],
             (float) $data['costo'],
             (bool) ($data['applies_itbm'] ?? false),
-            (float) ($data['itbm_percent'] ?? 7)
+            (float) TaxRateHelper::resolve($data['itbm_percent'] ?? null)
         );
 
         if ($price === null) {
