@@ -2,9 +2,8 @@
 
 namespace App\Services;
 
-use App\Models\InventoryMovement;
+use App\Helpers\TaxRateHelper;
 use App\Models\ProductBatch;
-use App\Models\ProductInventory;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
@@ -130,7 +129,7 @@ class PurchaseOrderService
                         'quantity_ordered' => $itemData['quantity_ordered'],
                         'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
-                        'tax_rate' => $itemData['tax_rate'] ?? 7,
+                        'tax_rate' => TaxRateHelper::resolve($itemData['tax_rate'] ?? null),
                         'tax_amount' => isset($itemData['tax_amount']) ? (float) $itemData['tax_amount'] : null,
                         'misc_cost' => (float) ($itemData['misc_cost'] ?? 0),
                         'notes' => $itemData['notes'] ?? null,
@@ -243,7 +242,7 @@ class PurchaseOrderService
                     'current_stock' => $item['current_stock'] ?? null,
                     'suggested_quantity' => max(1, (int) ($item['suggested_quantity'] ?? 1)),
                     'unit_cost' => (float) ($item['unit_cost'] ?? 0),
-                    'tax_rate' => 7,
+                    'tax_rate' => TaxRateHelper::defaultRate(),
                     'tax_amount' => null,
                     'misc_cost' => 0,
                     'notes' => 'Stock bajo: actual '.($item['current_stock'] ?? 0).' / minimo '.($item['reorder_point'] ?? 0),
@@ -280,7 +279,7 @@ class PurchaseOrderService
                 'current_stock' => $item->stock_added_qty,
                 'suggested_quantity' => max(1, (int) ceil((float) $item->quantity_needed)),
                 'unit_cost' => (float) ($item->unit_cost ?? 0),
-                'tax_rate' => (int) ($item->tax_rate ?? 7),
+                'tax_rate' => TaxRateHelper::resolve($item->tax_rate ?? null),
                 'tax_amount' => null,
                 'misc_cost' => 0,
                 'notes' => $item->notes ?: 'Desde OC diaria',
@@ -387,7 +386,7 @@ class PurchaseOrderService
                         'pre_stock_applied_qty' => min($existingPreApplied, max(0, $orderedQty)),
                         'units_per_package' => $itemData['units_per_package'] ?? 1,
                         'unit_cost' => $itemData['unit_cost'],
-                        'tax_rate' => $itemData['tax_rate'] ?? 7,
+                        'tax_rate' => TaxRateHelper::resolve($itemData['tax_rate'] ?? null),
                         'tax_amount' => isset($itemData['tax_amount']) ? (float) $itemData['tax_amount'] : null,
                         'misc_cost' => (float) ($itemData['misc_cost'] ?? 0),
                         'notes' => $itemData['notes'] ?? null,
@@ -449,7 +448,7 @@ class PurchaseOrderService
                     'quantity_ordered' => $item->quantity_ordered,
                     'units_per_package' => $item->units_per_package ?? 1,
                     'unit_cost' => $item->unit_cost,
-                    'tax_rate' => $item->tax_rate ?? 7,
+                    'tax_rate' => TaxRateHelper::resolve($item->tax_rate ?? null),
                     'tax_amount' => (float) ($item->tax_amount ?? 0),
                     'misc_cost' => (float) ($item->misc_cost ?? 0),
                     'notes' => $item->notes,
@@ -520,56 +519,26 @@ class PurchaseOrderService
                 // Calculate actual units received (packages × units per package)
                 $actualUnits = $qtyToReceive * ($item->units_per_package ?? 1);
 
-                // Create inventory movement (entry)
-                $movementData = [
+                $lineUnits = max(1, (int) $item->quantity_ordered * (int) ($item->units_per_package ?? 1));
+                $receivedRatio = $actualUnits / $lineUnits;
+
+                app(InventoryFifoService::class)->receiveStock([
+                    'product_id' => $productId,
+                    'variant_id' => $variantId,
                     'warehouse_id' => $po->warehouse_id,
-                    'movement_type' => 'in',
                     'quantity' => $actualUnits,
+                    'unit_cost_base' => (float) $item->unit_cost,
+                    'tax_amount' => round((float) $item->tax_amount * $receivedRatio, 4),
+                    'misc_cost' => round((float) ($item->misc_cost ?? 0) * $receivedRatio, 4),
                     'reference_type' => 'purchase_order',
                     'reference_id' => $po->id,
-                    'notes' => "Recepción PO {$po->po_number}",
+                    'source_type' => 'purchase_order',
+                    'source_id' => $item->id,
+                    'notes' => "RecepciÃ³n PO {$po->po_number}",
                     'user_id' => Auth::id(),
-                    'date' => now(),
-                ];
-
-                if ($useVariant) {
-                    $movementData['variant_id'] = $variantId;
-                    $movementData['product_id'] = $productId; // Keep for backwards compatibility
-                } else {
-                    $movementData['product_id'] = $productId;
-                }
-
-                InventoryMovement::create($movementData);
-
-                // Update inventory (variant or product)
-                if ($useVariant) {
-                    // Update variant inventory
-                    $inventory = ProductInventory::firstOrCreate(
-                        [
-                            'variant_id' => $variantId,
-                            'warehouse_id' => $po->warehouse_id,
-                        ],
-                        [
-                            'product_id' => $productId,
-                            'quantity_available' => 0,
-                            'quantity_reserved' => 0,
-                            'reorder_point' => 10,
-                            'reorder_quantity' => 50,
-                        ]
-                    );
-                } else {
-                    // Fallback to product inventory (old behavior)
-                    $inventory = ProductInventory::firstOrCreate(
-                        [
-                            'product_id' => $productId,
-                            'warehouse_id' => $po->warehouse_id,
-                        ],
-                        ['quantity_available' => 0, 'quantity_reserved' => 0, 'reorder_point' => 10, 'reorder_quantity' => 50]
-                    );
-                }
-
-                $inventory->quantity_available += $actualUnits;
-                $inventory->save();
+                    'supplier_id' => $item->supplier_id ?? $po->supplier_id,
+                    'batch_number' => $received['batch_number'] ?? null,
+                ]);
 
                 // Handle batch tracking if enabled
                 if ($item->product && $item->product->batch_tracking && ! empty($received['batch_number'])) {
@@ -690,51 +659,10 @@ class PurchaseOrderService
             if ($po->status === 'partial') {
                 foreach ($po->items as $item) {
                     if ($item->quantity_received > 0) {
-                        $useVariant = ! empty($item->variant_id);
-                        $productId = $item->product_id;
-                        $variantId = $item->variant_id;
-
-                        // Create reverse movement
-                        $movementData = [
-                            'warehouse_id' => $po->warehouse_id,
-                            'movement_type' => 'out',
-                            'quantity' => $item->quantity_received,
-                            'reference_type' => 'purchase_order_cancelled',
-                            'reference_id' => $po->id,
+                        app(InventoryFifoService::class)->reversePurchaseReceipt($po, $item, [
                             'notes' => "Cancelación PO {$po->po_number}",
                             'user_id' => Auth::id(),
-                            'date' => now(),
-                        ];
-
-                        if ($useVariant) {
-                            $movementData['variant_id'] = $variantId;
-                            $movementData['product_id'] = $productId;
-                        } else {
-                            $movementData['product_id'] = $productId;
-                        }
-
-                        InventoryMovement::create($movementData);
-
-                        // Revert stock (variant or product)
-                        if ($useVariant) {
-                            $inventory = ProductInventory::where('variant_id', $variantId)
-                                ->where('warehouse_id', $po->warehouse_id)
-                                ->first();
-                        } else {
-                            $inventory = ProductInventory::where('product_id', $productId)
-                                ->where('warehouse_id', $po->warehouse_id)
-                                ->first();
-                        }
-
-                        if ($inventory) {
-                            // R28: Validate stock before reverting purchase receipt
-                            if ($inventory->quantity_available < $item->quantity_received) {
-                                $productName = $item->product->name ?? "ID:{$productId}";
-                                throw new \Exception("No se puede cancelar la OC: stock insuficiente para revertir la recepción de {$productName}. Disponible: {$inventory->quantity_available}, Recibido originalmente: {$item->quantity_received}. Revise el inventario.");
-                            }
-                            $inventory->quantity_available -= $item->quantity_received;
-                            $inventory->save();
-                        }
+                        ]);
                     }
                 }
             }
@@ -865,47 +793,30 @@ class PurchaseOrderService
                 'quantity_ordered' => $quantity,
                 'quantity_received' => $quantity, // Immediately received
                 'unit_cost' => $unitCost,
-                'tax_rate' => $data['tax_rate'] ?? 7,
+                'tax_rate' => TaxRateHelper::resolve($data['tax_rate'] ?? null),
                 'status' => 'received',
                 'notes' => $data['notes'] ?? null,
             ]);
 
-            // Create inventory movement (entry)
             $useVariant = ! empty($variantId);
-            $movementData = [
+            app(InventoryFifoService::class)->receiveStock([
+                'product_id' => $productId,
+                'variant_id' => $variantId,
                 'warehouse_id' => $warehouseId,
-                'movement_type' => 'in',
                 'quantity' => $quantity,
+                'unit_cost_base' => (float) $unitCost,
+                'tax_amount' => (float) ($item->tax_amount ?? 0),
+                'misc_cost' => (float) ($item->misc_cost ?? 0),
                 'reference_type' => 'purchase_order',
                 'reference_id' => $dailyPO->id,
-                'reason' => 'Quick Purchase - Recepción inmediata',
-                'notes' => "Recepción rápida - Item #{$item->id}",
+                'source_type' => 'purchase_order',
+                'source_id' => $item->id,
+                'reason' => 'Quick Purchase - RecepciÃ³n inmediata',
+                'notes' => "RecepciÃ³n rÃ¡pida - Item #{$item->id}",
                 'user_id' => Auth::id(),
-            ];
-
-            if ($useVariant) {
-                $movementData['variant_id'] = $variantId;
-                $movementData['product_id'] = $productId;
-            } else {
-                $movementData['product_id'] = $productId;
-            }
-
-            InventoryMovement::create($movementData);
-
-            // Update inventory
-            if ($useVariant) {
-                $inventory = ProductInventory::firstOrCreate(
-                    ['variant_id' => $variantId, 'warehouse_id' => $warehouseId],
-                    ['product_id' => $productId, 'quantity_available' => 0, 'quantity_reserved' => 0, 'reorder_point' => 10, 'reorder_quantity' => 50]
-                );
-            } else {
-                $inventory = ProductInventory::firstOrCreate(
-                    ['product_id' => $productId, 'warehouse_id' => $warehouseId],
-                    ['quantity_available' => 0, 'quantity_reserved' => 0, 'reorder_point' => 10, 'reorder_quantity' => 50]
-                );
-            }
-            $inventory->quantity_available += $quantity;
-            $inventory->save();
+                'supplier_id' => $supplierId,
+                'batch_number' => $data['batch_number'] ?? null,
+            ]);
 
             // Handle batch tracking if applicable
             $product = \App\Models\Product::find($productId);
@@ -972,7 +883,7 @@ class PurchaseOrderService
                     'product_id' => $itemData['product_id'] ?? null,
                     'quantity' => $itemData['quantity_ordered'] ?? $itemData['quantity'],
                     'unit_cost' => $itemData['unit_cost'],
-                    'tax_rate' => $itemData['tax_rate'] ?? 7,
+                    'tax_rate' => TaxRateHelper::resolve($itemData['tax_rate'] ?? null),
                     'sale_price' => $itemData['sale_price'] ?? null,
                     'batch_number' => $itemData['batch_number'] ?? null,
                     'expiry_date' => $itemData['expiry_date'] ?? null,

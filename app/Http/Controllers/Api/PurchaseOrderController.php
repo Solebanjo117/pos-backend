@@ -418,7 +418,7 @@ class PurchaseOrderController extends Controller
         $orders = PurchaseOrder::with(['supplier', 'items.product'])
             ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
             ->whereIn('status', ['sent', 'partial'])
-            ->orderByRaw('expected_date is null, expected_date asc')
+            ->orderBy('order_date', 'asc')
             ->orderBy('created_at', 'asc')
             ->get();
 

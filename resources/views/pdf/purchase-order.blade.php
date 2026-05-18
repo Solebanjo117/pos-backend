@@ -324,8 +324,6 @@
             <div class="info-cell">
                 <div class="info-label">Almacen destino</div>
                 <div class="info-value">{{ $warehouse?->name ?? '-' }}</div>
-                <div class="info-label" style="margin-top: 8px;">Fecha esperada</div>
-                <div class="info-value">{{ optional($purchaseOrder->expected_date)->format('d/m/Y') ?? '-' }}</div>
             </div>
         </div>
         <div class="info-row">

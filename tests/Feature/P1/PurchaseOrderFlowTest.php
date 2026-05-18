@@ -2,6 +2,8 @@
 
 use App\Models\Product;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
+use App\Models\Setting;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
@@ -61,6 +63,72 @@ function purchaseOrderBuyerContext(): array
     return [$buyer, $warehouse, $supplier, $firstProduct, $secondProduct];
 }
 
+it('lists pending receipt orders without ordering by expected date', function () {
+    [$buyer, $warehouse, $supplier] = purchaseOrderBuyerContext();
+
+    $first = PurchaseOrder::create([
+        'po_number' => 'PO-PENDING-FIRST',
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $buyer->id,
+        'status' => 'sent',
+        'order_date' => '2026-05-10',
+        'expected_date' => '2026-06-01',
+        'subtotal' => 0,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 0,
+    ]);
+
+    $second = PurchaseOrder::create([
+        'po_number' => 'PO-PENDING-SECOND',
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $buyer->id,
+        'status' => 'sent',
+        'order_date' => '2026-05-11',
+        'expected_date' => '2026-05-01',
+        'subtotal' => 0,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 0,
+    ]);
+
+    $response = $this->actingAs($buyer)
+        ->getJson('/api/v1/purchase-orders/pending-receipt');
+
+    $response->assertOk()
+        ->assertJsonPath('data.0.id', $first->id)
+        ->assertJsonPath('data.1.id', $second->id);
+});
+
+it('does not render expected date in purchase order PDF view', function () {
+    [$buyer, $warehouse, $supplier] = purchaseOrderBuyerContext();
+
+    $order = PurchaseOrder::create([
+        'po_number' => 'PO-PDF-NO-EXPECTED',
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $buyer->id,
+        'status' => 'sent',
+        'order_date' => '2026-05-10',
+        'expected_date' => '2026-06-01',
+        'subtotal' => 0,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 0,
+    ])->load(['supplier', 'warehouse', 'items']);
+
+    $html = view('pdf.purchase-order', [
+        'purchaseOrder' => $order,
+        'mode' => 'standard',
+        'store_name' => 'HermeX POS',
+    ])->render();
+
+    expect($html)->not->toContain('Fecha esperada')
+        ->and($html)->not->toContain('01/06/2026');
+});
+
 it('calculates purchase order item taxes and header totals from line tax rates', function () {
     [$buyer, $warehouse, $supplier, $firstProduct, $secondProduct] = purchaseOrderBuyerContext();
 
@@ -99,8 +167,9 @@ it('calculates purchase order item taxes and header totals from line tax rates',
         ->and((float) $order->items[1]->tax_amount)->toBe(0.0);
 });
 
-it('defaults purchase order item tax rate to seven percent', function () {
+it('defaults purchase order item tax rate to store tax rate', function () {
     [$buyer, $warehouse, $supplier, $product] = purchaseOrderBuyerContext();
+    Setting::set('store_tax_rate', 10, 'number', 'store');
 
     $response = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
         'supplier_id' => $supplier->id,
@@ -118,10 +187,37 @@ it('defaults purchase order item tax rate to seven percent', function () {
 
     $order = PurchaseOrder::with('items')->findOrFail($response->json('data.id'));
 
-    expect((int) $order->items[0]->tax_rate)->toBe(7)
-        ->and((float) $order->items[0]->tax_amount)->toBe(1.4)
-        ->and((float) $order->tax_amount)->toBe(1.4)
-        ->and((float) $order->total)->toBe(21.4);
+    expect((int) $order->items[0]->tax_rate)->toBe(10)
+        ->and((float) $order->items[0]->tax_amount)->toBe(2.0)
+        ->and((float) $order->tax_amount)->toBe(2.0)
+        ->and((float) $order->total)->toBe(22.0);
+});
+
+it('preserves explicit zero tax rate as exempt for purchase order items', function () {
+    [$buyer, $warehouse, $supplier, $product] = purchaseOrderBuyerContext();
+    Setting::set('store_tax_rate', 10, 'number', 'store');
+
+    $response = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'items' => [
+            [
+                'product_id' => $product->id,
+                'quantity_ordered' => 2,
+                'unit_cost' => 10,
+                'tax_rate' => 0,
+            ],
+        ],
+    ]);
+
+    $response->assertCreated();
+
+    $order = PurchaseOrder::with('items')->findOrFail($response->json('data.id'));
+
+    expect((int) $order->items[0]->tax_rate)->toBe(0)
+        ->and((float) $order->items[0]->tax_amount)->toBe(0.0)
+        ->and((float) $order->tax_amount)->toBe(0.0)
+        ->and((float) $order->total)->toBe(20.0);
 });
 
 it('recalculates line taxes when updating a draft purchase order', function () {
@@ -194,6 +290,88 @@ it('respects manual tax_amount when explicitly provided per line', function () {
         ->and((float) $order->tax_amount)->toBe(5.0)
         // total = 100 + 5 = 105 (no shipping, no misc)
         ->and((float) $order->total)->toBe(105.0);
+});
+
+it('filters purchase orders by supplier in header and daily order items', function () {
+    [$buyer, $warehouse, $supplier, $firstProduct, $secondProduct] = purchaseOrderBuyerContext();
+
+    $otherSupplier = Supplier::create([
+        'name' => 'Proveedor Externo',
+        'email' => 'proveedor-externo-'.fake()->unique()->numberBetween(1000, 9999).'@example.test',
+    ]);
+
+    $headerOrder = PurchaseOrder::create([
+        'po_number' => 'PO-SUPPLIER-HEADER',
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $buyer->id,
+        'status' => 'received',
+        'payment_status' => 'pending',
+        'order_date' => now()->toDateString(),
+        'subtotal' => 10,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 10,
+    ]);
+
+    $dailyOrder = PurchaseOrder::create([
+        'po_number' => 'PO-SUPPLIER-ITEM',
+        'supplier_id' => null,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $buyer->id,
+        'status' => 'open',
+        'payment_status' => 'pending',
+        'order_date' => now()->toDateString(),
+        'subtotal' => 15,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 15,
+    ]);
+
+    PurchaseOrderItem::create([
+        'purchase_order_id' => $dailyOrder->id,
+        'supplier_id' => $supplier->id,
+        'product_id' => $firstProduct->id,
+        'quantity_ordered' => 1,
+        'units_per_package' => 1,
+        'unit_cost' => 15,
+        'tax_rate' => 0,
+    ]);
+
+    PurchaseOrder::create([
+        'po_number' => 'PO-SUPPLIER-OTHER',
+        'supplier_id' => $otherSupplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $buyer->id,
+        'status' => 'received',
+        'payment_status' => 'pending',
+        'order_date' => now()->toDateString(),
+        'subtotal' => 20,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 20,
+    ]);
+
+    PurchaseOrderItem::create([
+        'purchase_order_id' => $headerOrder->id,
+        'supplier_id' => $otherSupplier->id,
+        'product_id' => $secondProduct->id,
+        'quantity_ordered' => 1,
+        'units_per_package' => 1,
+        'unit_cost' => 20,
+        'tax_rate' => 0,
+    ]);
+
+    $response = $this->actingAs($buyer)
+        ->getJson("/api/v1/purchase-orders?supplier_id={$supplier->id}");
+
+    $response->assertOk();
+
+    $numbers = collect($response->json('data'))->pluck('po_number');
+
+    expect($numbers)->toContain('PO-SUPPLIER-HEADER')
+        ->and($numbers)->toContain('PO-SUPPLIER-ITEM')
+        ->and($numbers)->not->toContain('PO-SUPPLIER-OTHER');
 });
 
 it('includes misc_cost per line in purchase order totals', function () {
