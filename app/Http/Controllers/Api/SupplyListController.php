@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
-use App\Models\InventoryMovement;
-use App\Models\ProductInventory;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
 use App\Models\SupplyListItem;
+use App\Services\InventoryFifoService;
 use App\Services\SmartReorderService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -97,46 +97,23 @@ class SupplyListController extends Controller
                 'quantity_needed' => $validated['quantity_needed'] ?? 1,
                 'stock_added_qty' => $stockToAdd,
                 'unit_cost' => $validated['unit_cost'] ?? 0,
-                'tax_rate' => $validated['tax_rate'] ?? 7,
+                'tax_rate' => TaxRateHelper::resolve($validated['tax_rate'] ?? null),
                 'sale_price' => $validated['sale_price'] ?? 0,
                 'notes' => $validated['notes'] ?? null,
             ]);
 
-            $inventoryLookup = [
-                'warehouse_id' => $warehouseId,
-                'variant_id' => $variantId,
-            ];
-
-            if ($variantId) {
-                $inventoryLookup['variant_id'] = $variantId;
-            } else {
-                $inventoryLookup['product_id'] = $productId;
-            }
-
-            $inventory = ProductInventory::firstOrCreate(
-                $inventoryLookup,
-                [
-                    'product_id' => $productId,
-                    'quantity_available' => 0,
-                    'quantity_reserved' => 0,
-                    'reorder_point' => 10,
-                    'reorder_quantity' => 50,
-                ]
-            );
-
-            $inventory->quantity_available += $stockToAdd;
-            $inventory->last_restocked_at = now();
-            $inventory->save();
-
-            InventoryMovement::create([
-                'movement_type' => 'in',
+            app(InventoryFifoService::class)->receiveStock([
                 'reason' => 'Ingreso desde lista de abastecimiento',
                 'product_id' => $productId,
                 'variant_id' => $variantId,
                 'warehouse_id' => $warehouseId,
                 'quantity' => $stockToAdd,
+                'unit_cost_base' => (float) ($validated['unit_cost'] ?? 0),
+                'landed_unit_cost' => (float) ($validated['unit_cost'] ?? 0),
                 'reference_type' => 'supply_list',
                 'reference_id' => $item->id,
+                'source_type' => 'supply_list',
+                'source_id' => $item->id,
                 'notes' => 'Stock preaplicado desde OC diaria',
                 'user_id' => Auth::id(),
                 'supplier_id' => $validated['supplier_id'] ?? null,
@@ -278,7 +255,7 @@ class SupplyListController extends Controller
                         'quantity_ordered' => $orderedQty,
                         'pre_stock_applied_qty' => $preAppliedQty,
                         'unit_cost' => $supplyItem->unit_cost ?? 0,
-                        'tax_rate' => $supplyItem->tax_rate ?? 7,
+                        'tax_rate' => TaxRateHelper::resolve($supplyItem->tax_rate ?? null),
                         'notes' => $supplyItem->notes,
                     ]);
                 }
@@ -360,7 +337,7 @@ class SupplyListController extends Controller
                         'quantity_needed' => $item['suggested_quantity'] ?? 1,
                         'stock_added_qty' => 0,
                         'unit_cost' => $item['unit_cost'] ?? 0,
-                        'tax_rate' => 7,
+                        'tax_rate' => TaxRateHelper::defaultRate(),
                         'sale_price' => 0,
                         'notes' => 'Importado desde Stock Bajo - '.($item['warehouse_name'] ?? 'Almacen'),
                     ]);

@@ -46,7 +46,7 @@ class InventoryMovementResource extends JsonResource
             }),
             'supplier' => $this->whenLoaded('supplier', function () {
                 return $this->supplier_id ? [
-                    'id'   => $this->supplier->id,
+                    'id' => $this->supplier->id,
                     'name' => $this->supplier->name,
                 ] : null;
             }),
@@ -57,6 +57,32 @@ class InventoryMovementResource extends JsonResource
                     'batch_number' => $this->productBatch->batch_number,
                     'expiry_date' => $this->productBatch->expiry_date?->toIso8601String(),
                 ];
+            }),
+            'fifo_allocations' => $this->whenLoaded('lotAllocations', function () {
+                return $this->lotAllocations->map(fn ($allocation) => [
+                    'lot_id' => $allocation->inventory_lot_id,
+                    'quantity' => (int) $allocation->quantity,
+                    'unit_cost' => (float) $allocation->unit_cost,
+                    'total_cost' => (float) $allocation->total_cost,
+                    'source_type' => $allocation->lot?->source_type,
+                    'source_id' => $allocation->lot?->source_id,
+                    'received_at' => $allocation->lot?->received_at?->toIso8601String(),
+                ])->values();
+            }),
+            'fifo_lots' => $this->whenLoaded('sourceLots', function () {
+                return $this->sourceLots->map(fn ($lot) => [
+                    'id' => $lot->id,
+                    'batch_number' => $lot->batch_number,
+                    'source_type' => $lot->source_type,
+                    'source_id' => $lot->source_id,
+                    'received_quantity' => (int) $lot->received_quantity,
+                    'quantity_available' => (int) $lot->quantity_available,
+                    'unit_cost_base' => (float) $lot->unit_cost_base,
+                    'tax_per_unit' => (float) $lot->tax_per_unit,
+                    'misc_per_unit' => (float) $lot->misc_per_unit,
+                    'landed_unit_cost' => (float) $lot->landed_unit_cost,
+                    'received_at' => $lot->received_at?->toIso8601String(),
+                ])->values();
             }),
             'variant' => $this->whenLoaded('variant', function () {
                 return $this->variant_id ? [

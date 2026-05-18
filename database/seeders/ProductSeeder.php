@@ -20,6 +20,7 @@ use App\Models\ProductVin;
 use App\Models\Supplier;
 use App\Models\VehicleEngine;
 use App\Models\Warehouse;
+use App\Services\InventoryFifoService;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -613,7 +614,7 @@ class ProductSeeder extends Seeder
             ]
         );
 
-        ProductPricing::query()->updateOrCreate(
+        $pricing = ProductPricing::query()->updateOrCreate(
             ['product_id' => $product->id, 'variant_id' => $variant->id],
             [
                 'cost_base' => $definition['price']['cost_base'],
@@ -649,7 +650,7 @@ class ProductSeeder extends Seeder
             $warehouse = $warehouses->get($inventory['warehouse'])
                 ?? ($inventory['warehouse'] === 1 ? $secondaryWarehouse : $mainWarehouse);
 
-            ProductInventory::query()->updateOrCreate(
+            $inventoryRecord = ProductInventory::query()->updateOrCreate(
                 [
                     'product_id' => $product->id,
                     'variant_id' => $variant->id,
@@ -663,6 +664,14 @@ class ProductSeeder extends Seeder
                     'location_in_warehouse' => $inventory['location'],
                     'last_restocked_at' => now()->subDays(10 + $inventory['warehouse']),
                 ]
+            );
+
+            app(InventoryFifoService::class)->ensureOpeningLotForInventory(
+                $product->id,
+                $variant->id,
+                $warehouse->id,
+                (int) $inventoryRecord->quantity_available,
+                (float) ($pricing->cost ?? $pricing->cost_base ?? 0)
             );
         }
 

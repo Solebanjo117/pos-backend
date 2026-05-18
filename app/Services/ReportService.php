@@ -2,11 +2,12 @@
 
 namespace App\Services;
 
+use App\Models\InventoryLot;
+use App\Models\InventoryMovement;
+use App\Models\OperationalExpense;
 use App\Models\Product;
 use App\Models\ProductInventory;
-use App\Models\InventoryMovement;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\DB;
 
 class ReportService
 {
@@ -23,17 +24,17 @@ class ReportService
         ])->select('product_inventory.*');
 
         // Apply filters
-        if (!empty($filters['warehouse_id'])) {
+        if (! empty($filters['warehouse_id'])) {
             $query->where('warehouse_id', $filters['warehouse_id']);
         }
 
-        if (!empty($filters['brand_id'])) {
+        if (! empty($filters['brand_id'])) {
             $query->whereHas('product.variants', function ($q) use ($filters) {
                 $q->where('brand_id', $filters['brand_id']);
             });
         }
-        
-        if (!empty($filters['category_id'])) {
+
+        if (! empty($filters['category_id'])) {
             $query->whereHas('product', function ($q) use ($filters) {
                 $q->where('category_id', $filters['category_id']);
             });
@@ -51,7 +52,7 @@ class ReportService
         $byWarehouse = $this->groupByWarehouse($inventory);
 
         // Filter by status if needed
-        if (!empty($filters['status'])) {
+        if (! empty($filters['status'])) {
             $inventory = $inventory->filter(function ($item) use ($filters) {
                 return $this->getStockStatus($item) === $filters['status'];
             })->values();
@@ -59,28 +60,32 @@ class ReportService
 
         // Format products
         $products = $inventory->map(function ($item) {
-            $defaultVariant = $item->product->defaultVariant;
-            $basePrice = $defaultVariant?->pricing?->base_price ?? 0;
+            $stockValue = $this->fifoStockValue($item);
 
             return [
-                'id'            => $item->product_id,
-                'sku'           => $item->product->sku_base ?? '',
-                'name'          => $item->product->name,
-                'brand'         => $defaultVariant?->brand?->name ?? 'Sin Marca',
-                'warehouse_id'  => $item->warehouse_id,
-                'warehouse'     => $item->warehouse?->name ?? '',
+                'id' => $item->product_id,
+                'sku' => $item->product->sku_base ?? '',
+                'name' => $item->product->name,
+                'brand' => $defaultVariant?->brand?->name ?? 'Sin Marca',
+                'warehouse_id' => $item->warehouse_id,
+                'warehouse' => $item->warehouse?->name ?? '',
                 'current_stock' => $item->quantity_available,
                 'reorder_point' => $item->reorder_point ?? 0,
-                'target_level'  => $item->reorder_quantity ?? 0,
-                'status'        => $this->getStockStatus($item),
-                'stock_value'   => round($item->quantity_available * $basePrice, 2),
+                'target_level' => $item->reorder_quantity ?? 0,
+                'status' => $this->getStockStatus($item),
+                'stock_value' => $stockValue,
+                'fifo_cost_current' => app(InventoryFifoService::class)->currentFifoCost(
+                    (int) $item->product_id,
+                    $item->variant_id ? (int) $item->variant_id : null,
+                    (int) $item->warehouse_id
+                ),
             ];
         });
 
         return [
-            'summary'      => $summary,
+            'summary' => $summary,
             'by_warehouse' => $byWarehouse,
-            'products'     => $products->values()->all(),
+            'products' => $products->values()->all(),
         ];
     }
 
@@ -89,26 +94,26 @@ class ReportService
      */
     public function generateMovementHistoryReport(array $filters): array
     {
-        $query = InventoryMovement::with(['product', 'warehouse', 'destinationWarehouse', 'user'])
+        $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'lotAllocations.lot'])
             ->whereBetween('created_at', [$filters['date_from'], $filters['date_to']]);
 
         // Apply filters
-        if (!empty($filters['product_id'])) {
+        if (! empty($filters['product_id'])) {
             $query->where('product_id', $filters['product_id']);
         }
 
-        if (!empty($filters['warehouse_id'])) {
+        if (! empty($filters['warehouse_id'])) {
             $query->where(function ($q) use ($filters) {
                 $q->where('warehouse_id', $filters['warehouse_id'])
-                  ->orWhere('destination_warehouse_id', $filters['warehouse_id']);
+                    ->orWhere('destination_warehouse_id', $filters['warehouse_id']);
             });
         }
 
-        if (!empty($filters['movement_type'])) {
+        if (! empty($filters['movement_type'])) {
             $query->where('movement_type', $filters['movement_type']);
         }
-        
-        if (!empty($filters['user_id'])) {
+
+        if (! empty($filters['user_id'])) {
             $query->where('user_id', $filters['user_id']);
         }
 
@@ -139,6 +144,17 @@ class ReportService
                 'reference_type' => $movement->reference_type,
                 'reference_id' => $movement->reference_id,
                 'user' => $movement->user?->name,
+                'variant_id' => $movement->variant_id,
+                'variant_sku' => $movement->variant?->sku,
+                'fifo_total_cost' => round((float) $movement->lotAllocations->sum('total_cost'), 2),
+                'fifo_allocations' => $movement->lotAllocations->map(fn ($allocation) => [
+                    'lot_id' => $allocation->inventory_lot_id,
+                    'quantity' => (int) $allocation->quantity,
+                    'unit_cost' => (float) $allocation->unit_cost,
+                    'total_cost' => (float) $allocation->total_cost,
+                    'source_type' => $allocation->lot?->source_type,
+                    'source_id' => $allocation->lot?->source_id,
+                ])->values()->all(),
             ];
         });
 
@@ -167,23 +183,22 @@ class ReportService
 
             match ($status) {
                 'critical' => $critical++,
-                'low'      => $low++,
-                'normal'   => $normal++,
-                'optimal'  => $optimal++,
-                default    => null,
+                'low' => $low++,
+                'normal' => $normal++,
+                'optimal' => $optimal++,
+                default => null,
             };
 
-            $basePrice = $item->product?->defaultVariant?->pricing?->base_price ?? 0;
-            $totalValue += $item->quantity_available * $basePrice;
+            $totalValue += $this->fifoStockValue($item);
         }
 
         return [
             'total_products' => $totalProducts,
             'critical_stock' => $critical,
-            'low_stock'      => $low,
-            'normal_stock'   => $normal,
-            'optimal_stock'  => $optimal,
-            'total_value'    => round($totalValue, 2),
+            'low_stock' => $low,
+            'normal_stock' => $normal,
+            'optimal_stock' => $optimal,
+            'total_value' => round($totalValue, 2),
         ];
     }
 
@@ -213,6 +228,22 @@ class ReportService
         }
 
         return 'normal';
+    }
+
+    private function fifoStockValue(ProductInventory $item): float
+    {
+        $lotValue = InventoryLot::query()
+            ->where('warehouse_id', $item->warehouse_id)
+            ->where('quantity_available', '>', 0)
+            ->when(
+                $item->variant_id,
+                fn ($query) => $query->where('variant_id', $item->variant_id),
+                fn ($query) => $query->where('product_id', $item->product_id)->whereNull('variant_id')
+            )
+            ->get()
+            ->sum(fn ($lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost);
+
+        return round((float) $lotValue, 2);
     }
 
     /**
@@ -319,7 +350,7 @@ class ReportService
 
         $query = \App\Models\SalesOrder::with(['items'])
             ->whereIn('status', ['confirmed', 'processing', 'completed'])
-            ->whereBetween('date', [$filters['date_from'] . ' 00:00:00', $filters['date_to'] . ' 23:59:59']);
+            ->whereBetween('date', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
 
         // Filter orders that have items in the given warehouse
         if ($warehouseId) {
@@ -334,12 +365,12 @@ class ReportService
         $totalCogs = 0;
         $totalTax = 0;
         $totalDiscounts = 0;
-        
+
         $timeline = [];
 
         foreach ($orders as $order) {
             $date = $order->date->format('Y-m-d');
-            if (!isset($timeline[$date])) {
+            if (! isset($timeline[$date])) {
                 $timeline[$date] = [
                     'date' => $date,
                     'revenue' => 0,
@@ -372,7 +403,7 @@ class ReportService
         }
 
         // Cash-basis: Fetch payments for the given period
-        $paymentsQuery = \App\Models\SalesOrderPayment::whereBetween('paid_at', [$filters['date_from'] . ' 00:00:00', $filters['date_to'] . ' 23:59:59']);
+        $paymentsQuery = \App\Models\SalesOrderPayment::whereBetween('paid_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
 
         if ($warehouseId) {
             $paymentsQuery->whereHas('salesOrder.items', function ($q) use ($warehouseId) {
@@ -384,8 +415,8 @@ class ReportService
 
         foreach ($payments as $payment) {
             $paymentDate = \Carbon\Carbon::parse($payment->paid_at)->format('Y-m-d');
-            
-            if (!isset($timeline[$paymentDate])) {
+
+            if (! isset($timeline[$paymentDate])) {
                 $timeline[$paymentDate] = [
                     'date' => $paymentDate,
                     'revenue' => 0,
@@ -401,7 +432,7 @@ class ReportService
 
         // Refunds: Approved SalesReturns in the date range
         $refundsQuery = \App\Models\SalesReturn::where('status', 'approved')
-            ->whereBetween('created_at', [$filters['date_from'] . ' 00:00:00', $filters['date_to'] . ' 23:59:59']);
+            ->whereBetween('created_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
 
         if ($warehouseId) {
             $refundsQuery->where('warehouse_id', $warehouseId);
@@ -409,12 +440,33 @@ class ReportService
 
         $totalRefunds = (float) $refundsQuery->sum('total_amount');
 
-        // Recalculate profit per timeline day
-        foreach ($timeline as &$dayData) {
-            $dayData['profit'] = $dayData['revenue'] - $dayData['cogs'];
+        $expenses = $this->financialOperationalExpenses($filters);
+        $totalOperationalExpenses = (float) $expenses['total'];
+
+        foreach ($expenses['timeline'] as $expenseDay) {
+            $date = $expenseDay['date'];
+            if (! isset($timeline[$date])) {
+                $timeline[$date] = [
+                    'date' => $date,
+                    'revenue' => 0,
+                    'cogs' => 0,
+                    'profit' => 0,
+                    'orders_count' => 0,
+                ];
+            }
+
+            $timeline[$date]['operational_expenses'] = $expenseDay['amount'];
         }
 
-        $netProfit = $totalRevenue - $totalCogs - $totalRefunds;
+        // Recalculate profit per timeline day
+        foreach ($timeline as &$dayData) {
+            $dayData['operational_expenses'] = $dayData['operational_expenses'] ?? 0;
+            $dayData['gross_profit'] = $dayData['revenue'] - $dayData['cogs'];
+            $dayData['profit'] = $dayData['gross_profit'] - $dayData['operational_expenses'];
+        }
+
+        $grossProfit = $totalRevenue - $totalCogs - $totalRefunds;
+        $netProfit = $grossProfit - $totalOperationalExpenses;
         $margin = $totalRevenue > 0 ? ($netProfit / $totalRevenue) * 100 : 0;
 
         return [
@@ -422,6 +474,8 @@ class ReportService
                 'total_revenue' => round($totalRevenue, 2),
                 'total_cogs' => round($totalCogs, 2),
                 'total_refunds' => round($totalRefunds, 2),
+                'total_operational_expenses' => round($totalOperationalExpenses, 2),
+                'gross_profit' => round($grossProfit, 2),
                 'net_profit' => round($netProfit, 2),
                 'margin_percentage' => round($margin, 2),
                 'total_tax' => round($totalTax, 2),
@@ -429,6 +483,53 @@ class ReportService
                 'orders_count' => $orders->count(),
             ],
             'timeline' => array_values($timeline),
+            'operational_expenses' => [
+                'total' => round($totalOperationalExpenses, 2),
+                'by_category' => $expenses['by_category'],
+                'timeline' => $expenses['timeline'],
+            ],
+        ];
+    }
+
+    private function financialOperationalExpenses(array $filters): array
+    {
+        $warehouseId = $filters['warehouse_id'] ?? null;
+
+        $query = OperationalExpense::query()
+            ->whereBetween('expense_date', [$filters['date_from'], $filters['date_to']]);
+
+        if ($warehouseId) {
+            $query->where(function ($query) use ($warehouseId): void {
+                $query->whereNull('warehouse_id')
+                    ->orWhere('warehouse_id', $warehouseId);
+            });
+        }
+
+        $expenses = $query->orderBy('expense_date')->get();
+
+        return [
+            'total' => round((float) $expenses->sum('amount'), 2),
+            'by_category' => $expenses
+                ->groupBy('category')
+                ->map(fn ($items, $category) => [
+                    'category' => $category,
+                    'label' => OperationalExpense::CATEGORIES[$category] ?? $category,
+                    'amount' => round((float) $items->sum('amount'), 2),
+                    'count' => $items->count(),
+                ])
+                ->sortBy('category')
+                ->values()
+                ->all(),
+            'timeline' => $expenses
+                ->groupBy(fn (OperationalExpense $expense) => $expense->expense_date->format('Y-m-d'))
+                ->map(fn ($items, $date) => [
+                    'date' => $date,
+                    'amount' => round((float) $items->sum('amount'), 2),
+                    'count' => $items->count(),
+                ])
+                ->sortBy('date')
+                ->values()
+                ->all(),
         ];
     }
 
@@ -443,7 +544,7 @@ class ReportService
 
         $query = \App\Models\SalesOrder::with(['items.product.defaultVariant.brand', 'items.variant.brand'])
             ->whereIn('status', ['confirmed', 'processing', 'completed'])
-            ->whereBetween('date', [$filters['date_from'] . ' 00:00:00', $filters['date_to'] . ' 23:59:59']);
+            ->whereBetween('date', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
 
         if ($warehouseId) {
             $query->whereHas('items', function ($q) use ($warehouseId) {
@@ -475,7 +576,7 @@ class ReportService
 
                 $key = $brandId ?? 'unknown';
 
-                if (!isset($brandsData[$key])) {
+                if (! isset($brandsData[$key])) {
                     $brandsData[$key] = [
                         'brand_id' => $brandId,
                         'brand_name' => $brandName,
@@ -503,6 +604,7 @@ class ReportService
             $data['cogs'] = round($data['cogs'], 2);
             $data['profit'] = round($data['profit'], 2);
             $data['margin'] = round($data['margin'], 2);
+
             return $data;
         })->sortByDesc('profit')->values()->all();
 
@@ -521,7 +623,7 @@ class ReportService
 
         $query = \App\Models\SalesOrder::with(['items.product.category'])
             ->whereIn('status', ['confirmed', 'processing', 'completed'])
-            ->whereBetween('date', [$filters['date_from'] . ' 00:00:00', $filters['date_to'] . ' 23:59:59']);
+            ->whereBetween('date', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
 
         if ($warehouseId) {
             $query->whereHas('items', function ($q) use ($warehouseId) {
@@ -544,7 +646,7 @@ class ReportService
 
                 $key = $categoryId ?? 'unknown';
 
-                if (!isset($categoriesData[$key])) {
+                if (! isset($categoriesData[$key])) {
                     $categoriesData[$key] = [
                         'category_id' => $categoryId,
                         'category_name' => $categoryName,
@@ -572,6 +674,7 @@ class ReportService
             $data['cogs'] = round($data['cogs'], 2);
             $data['profit'] = round($data['profit'], 2);
             $data['margin'] = round($data['margin'], 2);
+
             return $data;
         })->sortByDesc('profit')->values()->all();
 
@@ -591,8 +694,8 @@ class ReportService
         // 1. CASH DRAWER: PosSession opening balance
         // =========================================
         $openingAmount = (float) \App\Models\PosSession::whereBetween('opened_at', [$startOfDay, $endOfDay])
-            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
-            ->when($userId, fn($q) => $q->where('user_id', $userId))
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->when($userId, fn ($q) => $q->where('user_id', $userId))
             ->sum('opening_amount');
 
         // =========================================
@@ -600,7 +703,7 @@ class ReportService
         // =========================================
         $paymentsQuery = \App\Models\SalesOrderPayment::with('salesOrder')
             ->whereBetween('paid_at', [$startOfDay, $endOfDay]);
-            
+
         if ($warehouseId || $userId) {
             $paymentsQuery->whereHas('salesOrder', function ($q) use ($warehouseId, $userId) {
                 if ($userId) {
@@ -613,7 +716,7 @@ class ReportService
                 }
             });
         }
-        
+
         $payments = $paymentsQuery->get();
 
         // =========================================
@@ -622,17 +725,17 @@ class ReportService
         $ordersQuery = \App\Models\SalesOrder::with(['payments', 'items'])
             ->whereIn('status', ['confirmed', 'processing', 'completed'])
             ->whereBetween('created_at', [$startOfDay, $endOfDay]);
-            
+
         if ($userId) {
             $ordersQuery->where('user_id', $userId);
         }
-        
+
         if ($warehouseId) {
             $ordersQuery->whereHas('items', function ($q) use ($warehouseId) {
                 $q->where('warehouse_id', $warehouseId);
             });
         }
-        
+
         $ordersToday = $ordersQuery->get();
 
         // =========================================
@@ -680,7 +783,7 @@ class ReportService
             $summary['total_sales'] += $payment->amount;
 
             $method = $payment->method ?? 'unknown';
-            if (!isset($summary['by_payment_method'][$method])) {
+            if (! isset($summary['by_payment_method'][$method])) {
                 $summary['by_payment_method'][$method] = 0;
             }
             $summary['by_payment_method'][$method] += $payment->amount;
@@ -705,7 +808,7 @@ class ReportService
             if ($order->payment_status === 'paid' && $order->payments->isEmpty()) {
                 $summary['total_sales'] += $order->total;
                 $method = $order->payment_method ?? 'cash';
-                if (!isset($summary['by_payment_method'][$method])) {
+                if (! isset($summary['by_payment_method'][$method])) {
                     $summary['by_payment_method'][$method] = 0;
                 }
                 $summary['by_payment_method'][$method] += $order->total;
@@ -721,17 +824,17 @@ class ReportService
 
         // 5d. Cash drawer reconciliation
         $cashSales = $summary['by_payment_method']['cash'] ?? 0;
-        // For simplicity, assume all refunds could be in cash; 
+        // For simplicity, assume all refunds could be in cash;
         // if a refund_method field exists, this should be filtered.
         $cashRefunds = $totalRefunds;
 
         // Cash movements (retiros / ingresos extra) from sessions of the day
         $sessionIds = \App\Models\PosSession::whereBetween('opened_at', [$startOfDay, $endOfDay])
-            ->when($warehouseId, fn($q) => $q->where('warehouse_id', $warehouseId))
-            ->when($userId, fn($q) => $q->where('user_id', $userId))
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->when($userId, fn ($q) => $q->where('user_id', $userId))
             ->pluck('id');
 
-        $cashMovementsIn  = (float) \App\Models\CashMovement::whereIn('pos_session_id', $sessionIds)->where('type', 'in')->sum('amount');
+        $cashMovementsIn = (float) \App\Models\CashMovement::whereIn('pos_session_id', $sessionIds)->where('type', 'in')->sum('amount');
         $cashMovementsOut = (float) \App\Models\CashMovement::whereIn('pos_session_id', $sessionIds)->where('type', 'out')->sum('amount');
 
         $summary['cash_drawer']['cash_sales'] = round($cashSales, 2);

@@ -271,28 +271,21 @@ class SalesOrder extends Model
                 continue;
             }
 
-            InventoryMovement::create([
+            $fifoResult = app(\App\Services\InventoryFifoService::class)->consumeStock([
                 'product_id' => $item->product_id,
                 'variant_id' => $item->variant_id,
                 'warehouse_id' => $item->warehouse_id,
-                'movement_type' => 'out',
                 'quantity' => $quantityToDeduct,
                 'reference_type' => 'sale',
                 'reference_id' => $this->id,
+                'sales_order_item_id' => $item->id,
                 'notes' => "Venta - Orden {$this->order_number}",
                 'user_id' => Auth::id(),
-                'date' => now(),
+                'consume_reserved' => true,
             ]);
 
-            if ($inventory) {
-                $remaining = $quantityToDeduct;
-                if ($inventory->quantity_reserved > 0) {
-                    $fromReserved = min($remaining, $inventory->quantity_reserved);
-                    $inventory->quantity_reserved -= $fromReserved;
-                    $remaining -= $fromReserved;
-                }
-                $inventory->quantity_available = max(0, $inventory->quantity_available - $remaining);
-                $inventory->save();
+            if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
+                $item->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
             }
         }
 
@@ -455,46 +448,48 @@ class SalesOrder extends Model
             return false;
         }
 
-        // If order was confirmed, revert only the quantity actually deducted
+        // If order was confirmed, revert only the net quantity still outstanding.
+        // Outbound movements come in two flavours:
+        //   1. reference_type = 'sale', reference_id = order_id  (confirm-time deductions)
+        //   2. reference_type = 'post_sale_addition', reference_id = item_id  (post-sale adds)
+        // Items that were already removed via removeItem() are hard-deleted, so their
+        // IDs will NOT appear in $currentItemIds.  Their outbound movements are therefore
+        // automatically excluded, and their stock was already restored at removal time.
         if ($this->status === 'confirmed' || $this->status === 'processing') {
+            $currentItemIds = $this->items()->pluck('id')->all();
+
             $deductedMovements = InventoryMovement::query()
-                ->selectRaw('product_id, variant_id, warehouse_id, SUM(quantity) as quantity')
-                ->where('reference_type', 'sale')
-                ->where('reference_id', $this->id)
                 ->where('movement_type', 'out')
-                ->groupBy('product_id', 'variant_id', 'warehouse_id')
+                ->where(function ($q) use ($currentItemIds) {
+                    // Original confirm deductions
+                    $q->where(function ($q2) {
+                        $q2->where('reference_type', 'sale')
+                            ->where('reference_id', $this->id);
+                    });
+                    // Post-sale additions still present on the order
+                    if (! empty($currentItemIds)) {
+                        $q->orWhere(function ($q2) use ($currentItemIds) {
+                            $q2->where('reference_type', 'post_sale_addition')
+                                ->whereIn('reference_id', $currentItemIds);
+                        });
+                    }
+                })
                 ->get();
 
             foreach ($deductedMovements as $movement) {
-                $actualDeducted = (int) $movement->quantity;
-                if ($actualDeducted <= 0) {
+                $netToRestore = (int) $movement->quantity;
+
+                if ($netToRestore <= 0) {
                     continue;
                 }
 
-                InventoryMovement::create([
-                    'product_id' => $movement->product_id,
-                    'variant_id' => $movement->variant_id,
-                    'warehouse_id' => $movement->warehouse_id,
-                    'movement_type' => 'in',
-                    'quantity' => $actualDeducted,
+                app(\App\Services\InventoryFifoService::class)->restoreFromOutboundMovement($movement, [
                     'reference_type' => 'sale_cancelled',
                     'reference_id' => $this->id,
-                    'notes' => "Cancelación de orden {$this->order_number}",
+                    'notes' => "CancelaciÃ³n de orden {$this->order_number}",
                     'user_id' => Auth::id(),
-                    'date' => now(),
                 ]);
 
-                $query = ProductInventory::where('warehouse_id', $movement->warehouse_id);
-                if ($movement->variant_id) {
-                    $query->where('variant_id', $movement->variant_id);
-                } else {
-                    $query->where('product_id', $movement->product_id);
-                }
-                $inventory = $query->first();
-                if ($inventory) {
-                    $inventory->quantity_available += $actualDeducted;
-                    $inventory->save();
-                }
             }
         }
 

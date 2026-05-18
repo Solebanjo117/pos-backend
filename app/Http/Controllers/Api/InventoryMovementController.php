@@ -56,7 +56,7 @@ class InventoryMovementController extends Controller
     public function show(int $id): JsonResponse
     {
         $movement = $this->movementService->getMovementById($id);
-        
+
         return response()->json([
             'data' => new InventoryMovementResource($movement),
         ]);
@@ -86,16 +86,16 @@ class InventoryMovementController extends Controller
      */
     public function storeBulkInbound(Request $request): JsonResponse
     {
-        $request->validate([
-            'items'                   => 'required|array|min:1',
-            'items.*.product_id'      => 'required|exists:products,id',
-            'items.*.warehouse_id'    => 'required|exists:warehouses,id',
-            'items.*.quantity'        => 'required|numeric|min:0.01',
-            'items.*.supplier_id'     => 'nullable|integer|exists:suppliers,id',
+        $validated = $request->validate([
+            'items' => 'required|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.warehouse_id' => 'required|exists:warehouses,id',
+            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.supplier_id' => 'nullable|integer|exists:suppliers,id',
         ]);
 
         try {
-            $movements = $this->movementService->recordBulkInbound($request->input('items'));
+            $movements = $this->movementService->recordBulkInbound($validated['items']);
 
             return response()->json([
                 'message' => 'Entrada masiva de inventario registrada exitosamente.',
@@ -113,7 +113,7 @@ class InventoryMovementController extends Controller
      */
     public function storeBulkOutbound(Request $request): JsonResponse
     {
-        $request->validate([
+        $validated = $request->validate([
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.warehouse_id' => 'required|exists:warehouses,id',
@@ -122,7 +122,7 @@ class InventoryMovementController extends Controller
         ]);
 
         try {
-            $movements = $this->movementService->recordBulkOutbound($request->input('items'));
+            $movements = $this->movementService->recordBulkOutbound($validated['items']);
 
             return response()->json([
                 'message' => 'Salida masiva de inventario registrada exitosamente.',

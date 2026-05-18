@@ -3,10 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\InventoryLot;
 use App\Models\ProductBatch;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class BatchInventoryController extends Controller
 {
@@ -15,14 +15,18 @@ class BatchInventoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        if ($request->boolean('fifo')) {
+            return $this->fifoLots($request);
+        }
+
         // Start with ProductBatch and join warehouse_batches to get quantities
         $query = ProductBatch::with(['product.pricing'])
             ->select('product_batches.*')
             ->join('warehouse_batches', 'product_batches.id', '=', 'warehouse_batches.product_batch_id')
             ->where('warehouse_batches.quantity', '>', 0)
-            ->groupBy('product_batches.id', 'product_batches.product_id', 'product_batches.batch_number', 
-                      'product_batches.expiry_date', 'product_batches.manufacturing_date', 
-                      'product_batches.cost', 'product_batches.created_at', 'product_batches.updated_at');
+            ->groupBy('product_batches.id', 'product_batches.product_id', 'product_batches.batch_number',
+                'product_batches.expiry_date', 'product_batches.manufacturing_date',
+                'product_batches.cost', 'product_batches.created_at', 'product_batches.updated_at');
 
         // Filter by Warehouse
         if ($request->has('warehouse_id')) {
@@ -34,10 +38,10 @@ class BatchInventoryController extends Controller
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('product_batches.batch_number', 'ilike', "%{$search}%")
-                  ->orWhereHas('product', function ($q2) use ($search) {
-                      $q2->where('name', 'ilike', "%{$search}%")
-                         ->orWhere('sku_base', 'ilike', "%{$search}%");
-                  });
+                    ->orWhereHas('product', function ($q2) use ($search) {
+                        $q2->where('name', 'ilike', "%{$search}%")
+                            ->orWhere('sku_base', 'ilike', "%{$search}%");
+                    });
             });
         }
 
@@ -48,7 +52,7 @@ class BatchInventoryController extends Controller
                 $query->whereDate('product_batches.expiry_date', '<', $now);
             } elseif ($request->expiry_status === 'expiring_soon') {
                 $query->whereDate('product_batches.expiry_date', '>=', $now)
-                      ->whereDate('product_batches.expiry_date', '<=', $now->copy()->addDays(30));
+                    ->whereDate('product_batches.expiry_date', '<=', $now->copy()->addDays(30));
             }
         }
 
@@ -63,13 +67,13 @@ class BatchInventoryController extends Controller
                 $warehouseQuery = $batch->warehouseBatches()
                     ->with('warehouse')
                     ->where('quantity', '>', 0);
-                
+
                 if ($request->has('warehouse_id')) {
                     $warehouseQuery->where('warehouse_id', $request->warehouse_id);
                 }
-                
+
                 $warehouseBatches = $warehouseQuery->get();
-                
+
                 // Get pricing from product's default pricing
                 $pricing = $batch->product->pricing;
 
@@ -79,7 +83,7 @@ class BatchInventoryController extends Controller
                     'product_sku' => $batch->product->sku_base,
                     'base_price' => $pricing ? (float) $pricing->base_price : null,
                     'total_quantity' => $warehouseBatches->sum('quantity'),
-                    'warehouses' => $warehouseBatches->map(fn($wb) => [
+                    'warehouses' => $warehouseBatches->map(fn ($wb) => [
                         'warehouse_id' => $wb->warehouse_id,
                         'warehouse_name' => $wb->warehouse->name,
                         'quantity' => $wb->quantity,
@@ -119,6 +123,70 @@ class BatchInventoryController extends Controller
         ]);
     }
 
+    private function fifoLots(Request $request): JsonResponse
+    {
+        $query = InventoryLot::query()
+            ->with(['product', 'variant.brand', 'warehouse'])
+            ->where('quantity_available', '>', 0);
+
+        if ($request->has('warehouse_id')) {
+            $query->where('warehouse_id', $request->warehouse_id);
+        }
+
+        if ($request->has('search')) {
+            $search = $request->search;
+            $query->where(function ($query) use ($search): void {
+                $query->where('batch_number', 'like', "%{$search}%")
+                    ->orWhereHas('product', function ($productQuery) use ($search): void {
+                        $productQuery->where('name', 'like', "%{$search}%")
+                            ->orWhere('sku_base', 'like', "%{$search}%");
+                    })
+                    ->orWhereHas('variant', function ($variantQuery) use ($search): void {
+                        $variantQuery->where('sku', 'like', "%{$search}%")
+                            ->orWhereHas('brand', fn ($brandQuery) => $brandQuery->where('name', 'like', "%{$search}%"));
+                    });
+            });
+        }
+
+        $perPage = min((int) $request->input('per_page', 20), 100);
+        $lots = $query
+            ->orderBy('received_at')
+            ->orderBy('id')
+            ->paginate($perPage);
+
+        return response()->json([
+            'data' => $lots->map(fn (InventoryLot $lot): array => [
+                'id' => $lot->id,
+                'product_id' => $lot->product_id,
+                'variant_id' => $lot->variant_id,
+                'warehouse_id' => $lot->warehouse_id,
+                'product_name' => $lot->product?->name,
+                'product_sku' => $lot->product?->sku_base,
+                'variant_sku' => $lot->variant?->sku,
+                'brand' => $lot->variant?->brand?->name ?? 'N/A',
+                'warehouse_name' => $lot->warehouse?->name,
+                'source_type' => $lot->source_type,
+                'source_id' => $lot->source_id,
+                'source_movement_id' => $lot->source_movement_id,
+                'batch_number' => $lot->batch_number,
+                'received_quantity' => (int) $lot->received_quantity,
+                'quantity_available' => (int) $lot->quantity_available,
+                'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+                'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+                'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+                'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+                'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+                'received_at' => $lot->received_at?->toIso8601String(),
+            ]),
+            'meta' => [
+                'current_page' => $lots->currentPage(),
+                'last_page' => $lots->lastPage(),
+                'per_page' => $lots->perPage(),
+                'total' => $lots->total(),
+            ],
+        ]);
+    }
+
     /**
      * Update the notes for all product batches that share the same batch_number.
      * PUT /api/inventory/batches/{batch_number}/notes
@@ -126,11 +194,11 @@ class BatchInventoryController extends Controller
     public function updateNotes(Request $request, string $batchNumber): JsonResponse
     {
         $request->validate([
-            'notes' => 'nullable|string'
+            'notes' => 'nullable|string',
         ]);
 
         $updated = ProductBatch::where('batch_number', $batchNumber)->update([
-            'notes' => $request->notes
+            'notes' => $request->notes,
         ]);
 
         if ($updated === 0) {

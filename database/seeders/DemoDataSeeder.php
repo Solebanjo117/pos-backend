@@ -2,26 +2,28 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
-use App\Models\User;
+use App\Helpers\TaxRateHelper;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
-use App\Models\ProductVariant;
-use App\Models\ProductInventory;
+use App\Models\InventoryMovement;
+use App\Models\PosSession;
 use App\Models\ProductBatch;
-use App\Models\WarehouseBatch;
-use App\Models\Warehouse;
+use App\Models\ProductInventory;
+use App\Models\ProductVariant;
+use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
+use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
 use App\Models\SalesQuote;
 use App\Models\SalesQuoteItem;
-use App\Models\PosSession;
-use App\Models\PurchaseOrder;
-use App\Models\PurchaseOrderItem;
-use App\Models\PurchaseOrderPayment;
-use App\Models\InventoryMovement;
 use App\Models\Supplier;
+use App\Models\User;
+use App\Models\Warehouse;
+use App\Models\WarehouseBatch;
+use App\Services\InventoryFifoService;
+use Illuminate\Database\Seeder;
 
 class DemoDataSeeder extends Seeder
 {
@@ -66,12 +68,14 @@ class DemoDataSeeder extends Seeder
         $warehouses = Warehouse::where('status', 'active')->get();
         if ($warehouses->isEmpty()) {
             $this->command->error('❌ No hay almacenes activos.');
+
             return;
         }
 
         $variants = ProductVariant::with(['pricing', 'product'])->whereNull('deleted_at')->get();
         if ($variants->isEmpty()) {
             $this->command->error('❌ No hay variantes de productos.');
+
             return;
         }
 
@@ -88,25 +92,22 @@ class DemoDataSeeder extends Seeder
         User::query()->update(['current_warehouse_id' => $warehouses->first()->id]);
 
         // ── 4. INVENTORY ACROSS ALL WAREHOUSES ──
-        $this->command->info('📦 Distribuyendo inventario en ' . $warehouses->count() . ' almacenes...');
+        $this->command->info('📦 Distribuyendo inventario en '.$warehouses->count().' almacenes...');
         foreach ($warehouses as $warehouse) {
             foreach ($variants as $variant) {
                 $qty = rand(20, 150);
-                ProductInventory::firstOrCreate(
+                $inventory = ProductInventory::firstOrCreate(
                     ['variant_id' => $variant->id, 'warehouse_id' => $warehouse->id, 'product_id' => $variant->product_id],
                     ['quantity_available' => $qty, 'quantity_reserved' => 0, 'reorder_point' => 10, 'reorder_quantity' => 30]
                 );
 
-                InventoryMovement::create([
-                    'product_id' => $variant->product_id,
-                    'variant_id' => $variant->id,
-                    'warehouse_id' => $warehouse->id,
-                    'movement_type' => 'in',
-                    'quantity' => $qty,
-                    'reference_type' => 'initial_stock',
-                    'notes' => "Stock inicial - {$warehouse->name}",
-                    'user_id' => $admin->id,
-                ]);
+                app(InventoryFifoService::class)->ensureOpeningLotForInventory(
+                    $variant->product_id,
+                    $variant->id,
+                    $warehouse->id,
+                    (int) $inventory->quantity_available,
+                    (float) ($variant->pricing->first()?->cost ?? $variant->pricing->first()?->cost_base ?? 0)
+                );
             }
         }
         $this->command->info('✅ Inventario distribuido en todos los almacenes');
@@ -121,7 +122,7 @@ class DemoDataSeeder extends Seeder
             for ($b = 0; $b < $numBatches; $b++) {
                 $mfgDate = now()->subMonths(rand(1, 12));
                 $expiryDate = $mfgDate->copy()->addMonths(rand(6, 24));
-                $batchNumber = 'LOT-' . strtoupper(substr($variant->sku, 0, 4)) . '-' . $mfgDate->format('Ym') . '-' . str_pad($b + 1, 2, '0', STR_PAD_LEFT);
+                $batchNumber = 'LOT-'.strtoupper(substr($variant->sku, 0, 4)).'-'.$mfgDate->format('Ym').'-'.str_pad($b + 1, 2, '0', STR_PAD_LEFT);
 
                 $batch = ProductBatch::firstOrCreate(
                     ['product_id' => $variant->product_id, 'batch_number' => $batchNumber],
@@ -152,7 +153,7 @@ class DemoDataSeeder extends Seeder
                 $batchCount++;
             }
         }
-        $this->command->info("✅ {$batchCount} lotes creados para " . $batchProducts->count() . " productos");
+        $this->command->info("✅ {$batchCount} lotes creados para ".$batchProducts->count().' productos');
 
         // ── 6. POS SESSIONS & SALES ORDERS (últimos 7 días, all warehouses) ──
         $this->command->info('🛒 Creando ventas y sesiones POS...');
@@ -175,7 +176,7 @@ class DemoDataSeeder extends Seeder
                     'closing_amount' => 0,
                     'expected_amount' => 0,
                     'status' => 'closed',
-                    'notes' => "Sesión {$warehouse->name} - " . $date->format('d/m/Y'),
+                    'notes' => "Sesión {$warehouse->name} - ".$date->format('d/m/Y'),
                 ]);
 
                 // 2-4 orders per session
@@ -258,28 +259,35 @@ class DemoDataSeeder extends Seeder
                             'created_by' => $sessionUser->id,
                         ]);
                     } else {
-                        SalesOrderPayment::create(['sales_order_id' => $order->id, 'amount' => $total, 'method' => $selectedMethod, 'notes' => 'Pago POS' . ($selectedMethod === 'card' ? ' [visa]' : ''), 'paid_at' => $paidAt, 'created_by' => $sessionUser->id]);
-                        if ($selectedMethod === 'cash') $sessionCash += $total;
-                        if ($selectedMethod === 'card') $sessionCard += $total;
-                        if ($selectedMethod === 'transfer') $sessionTransfer += $total;
+                        SalesOrderPayment::create(['sales_order_id' => $order->id, 'amount' => $total, 'method' => $selectedMethod, 'notes' => 'Pago POS'.($selectedMethod === 'card' ? ' [visa]' : ''), 'paid_at' => $paidAt, 'created_by' => $sessionUser->id]);
+                        if ($selectedMethod === 'cash') {
+                            $sessionCash += $total;
+                        }
+                        if ($selectedMethod === 'card') {
+                            $sessionCard += $total;
+                        }
+                        if ($selectedMethod === 'transfer') {
+                            $sessionTransfer += $total;
+                        }
                     }
 
-                    // Deduct inventory
                     foreach ($order->items as $item) {
-                        $inv = ProductInventory::where('variant_id', $item->variant_id)->where('warehouse_id', $warehouse->id)->first();
-                        if ($inv) $inv->decrement('quantity_available', $item->quantity);
-
-                        InventoryMovement::create([
+                        $fifoResult = app(InventoryFifoService::class)->consumeStock([
                             'product_id' => $item->product_id,
                             'variant_id' => $item->variant_id,
                             'warehouse_id' => $warehouse->id,
-                            'movement_type' => 'out',
                             'quantity' => $item->quantity,
                             'reference_type' => 'sale',
                             'reference_id' => $order->id,
+                            'sales_order_item_id' => $item->id,
                             'notes' => "Venta {$order->order_number}",
                             'user_id' => $sessionUser->id,
+                            'strict' => false,
                         ]);
+
+                        if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
+                            $item->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
+                        }
                     }
 
                     $allOrders[] = $order;
@@ -301,7 +309,7 @@ class DemoDataSeeder extends Seeder
                 ]);
             }
         }
-        $this->command->info('✅ ' . count($allOrders) . ' órdenes en ' . ($warehouses->count() * 7) . ' sesiones POS');
+        $this->command->info('✅ '.count($allOrders).' órdenes en '.($warehouses->count() * 7).' sesiones POS');
 
         // ── 7. OPEN SESSION TODAY (each warehouse) ──
         foreach ($warehouses as $whIdx => $warehouse) {
@@ -313,7 +321,7 @@ class DemoDataSeeder extends Seeder
                 'status' => 'open',
             ]);
         }
-        $this->command->info('✅ ' . $warehouses->count() . ' sesiones POS abiertas (hoy)');
+        $this->command->info('✅ '.$warehouses->count().' sesiones POS abiertas (hoy)');
 
         // ── 8. SALES QUOTES ──
         foreach ($warehouses->take(3) as $warehouse) {
@@ -384,7 +392,7 @@ class DemoDataSeeder extends Seeder
                         $lineTotal = $cost * $qty;
                         $subtotal += $lineTotal;
 
-                        PurchaseOrderItem::create([
+                        $poItem = PurchaseOrderItem::create([
                             'purchase_order_id' => $po->id,
                             'product_id' => $variant->product_id,
                             'variant_id' => $variant->id,
@@ -395,37 +403,34 @@ class DemoDataSeeder extends Seeder
                         ]);
 
                         if ($qtyReceived > 0) {
-                            $inv = ProductInventory::firstOrCreate(
-                                ['variant_id' => $variant->id, 'warehouse_id' => $warehouse->id, 'product_id' => $variant->product_id],
-                                ['quantity_available' => 0, 'quantity_reserved' => 0, 'reorder_point' => 5, 'reorder_quantity' => 20]
-                            );
-                            $inv->increment('quantity_available', $qtyReceived);
-
-                            InventoryMovement::create([
+                            app(InventoryFifoService::class)->receiveStock([
                                 'product_id' => $variant->product_id,
                                 'variant_id' => $variant->id,
                                 'warehouse_id' => $warehouse->id,
-                                'movement_type' => 'in',
                                 'quantity' => $qtyReceived,
-                                'reference_type' => 'purchase',
+                                'unit_cost_base' => $cost,
+                                'landed_unit_cost' => $cost,
+                                'reference_type' => 'purchase_order',
                                 'reference_id' => $po->id,
+                                'source_type' => 'purchase_order',
+                                'source_id' => $poItem->id,
                                 'notes' => "Recepción OC {$po->po_number}",
                                 'user_id' => $admin->id,
                             ]);
                         }
                     }
 
-                    $taxAmount = round($subtotal * 0.07, 2);
+                    $taxAmount = TaxRateHelper::amount($subtotal);
                     $po->update(['subtotal' => $subtotal, 'tax_amount' => $taxAmount, 'total' => $subtotal + $taxAmount + (float) $po->shipping_cost]);
 
                     if ($po->payment_status === 'paid') {
-                        PurchaseOrderPayment::create(['purchase_order_id' => $po->id, 'amount' => (float) $po->total, 'method' => 'transfer', 'reference_number' => 'TRF-' . rand(10000, 99999), 'notes' => 'Pago completo', 'paid_at' => $po->received_date ?? now(), 'user_id' => $admin->id]);
+                        PurchaseOrderPayment::create(['purchase_order_id' => $po->id, 'amount' => (float) $po->total, 'method' => 'transfer', 'reference_number' => 'TRF-'.rand(10000, 99999), 'notes' => 'Pago completo', 'paid_at' => $po->received_date ?? now(), 'user_id' => $admin->id]);
                     } elseif ($po->payment_status === 'partial') {
-                        PurchaseOrderPayment::create(['purchase_order_id' => $po->id, 'amount' => round((float) $po->total * 0.5, 2), 'method' => 'transfer', 'reference_number' => 'TRF-' . rand(10000, 99999), 'notes' => 'Anticipo 50%', 'paid_at' => $po->order_date, 'user_id' => $admin->id]);
+                        PurchaseOrderPayment::create(['purchase_order_id' => $po->id, 'amount' => round((float) $po->total * 0.5, 2), 'method' => 'transfer', 'reference_number' => 'TRF-'.rand(10000, 99999), 'notes' => 'Anticipo 50%', 'paid_at' => $po->order_date, 'user_id' => $admin->id]);
                     }
                 }
             }
-            $this->command->info('✅ ' . ($warehouses->count() * 2) . ' órdenes de compra creadas');
+            $this->command->info('✅ '.($warehouses->count() * 2).' órdenes de compra creadas');
         }
 
         // ── 10. ENSURE CUSTOMER DEBTS ──
@@ -444,7 +449,7 @@ class DemoDataSeeder extends Seeder
                     'amount' => $debtAmount,
                     'balance_before' => $balanceBefore,
                     'balance_after' => $dc->current_balance,
-                    'description' => "Saldo pendiente de ventas anteriores",
+                    'description' => 'Saldo pendiente de ventas anteriores',
                     'transaction_date' => now()->subDays(rand(3, 10)),
                     'created_by' => $admin->id,
                 ]);
@@ -464,7 +469,7 @@ class DemoDataSeeder extends Seeder
             'amount' => $partialPayment,
             'balance_before' => $balanceBefore,
             'balance_after' => $dc->current_balance,
-            'description' => "Abono parcial en efectivo",
+            'description' => 'Abono parcial en efectivo',
             'transaction_date' => now()->subDays(1),
             'created_by' => $admin->id,
         ]);
@@ -473,18 +478,18 @@ class DemoDataSeeder extends Seeder
         // ── SUMMARY ──
         $this->command->info('');
         $this->command->info('📊 Resumen de datos de demostración:');
-        $this->command->info("   Almacenes: " . $warehouses->count());
-        $this->command->info("   Usuarios: " . User::count());
-        $this->command->info("   Clientes: " . Customer::count());
-        $this->command->info("   Órdenes de venta: " . SalesOrder::count());
-        $this->command->info("   Pagos registrados: " . SalesOrderPayment::count());
-        $this->command->info("   Sesiones POS: " . PosSession::count());
-        $this->command->info("   Cotizaciones: " . SalesQuote::count());
-        $this->command->info("   Órdenes de compra: " . PurchaseOrder::count());
-        $this->command->info("   Lotes de inventario: " . ProductBatch::count());
-        $this->command->info("   Lotes en almacenes: " . WarehouseBatch::count());
-        $this->command->info("   Movimientos inventario: " . InventoryMovement::count());
-        $this->command->info("   Clientes con deuda: " . Customer::where('current_balance', '>', 0)->count());
+        $this->command->info('   Almacenes: '.$warehouses->count());
+        $this->command->info('   Usuarios: '.User::count());
+        $this->command->info('   Clientes: '.Customer::count());
+        $this->command->info('   Órdenes de venta: '.SalesOrder::count());
+        $this->command->info('   Pagos registrados: '.SalesOrderPayment::count());
+        $this->command->info('   Sesiones POS: '.PosSession::count());
+        $this->command->info('   Cotizaciones: '.SalesQuote::count());
+        $this->command->info('   Órdenes de compra: '.PurchaseOrder::count());
+        $this->command->info('   Lotes de inventario: '.ProductBatch::count());
+        $this->command->info('   Lotes en almacenes: '.WarehouseBatch::count());
+        $this->command->info('   Movimientos inventario: '.InventoryMovement::count());
+        $this->command->info('   Clientes con deuda: '.Customer::where('current_balance', '>', 0)->count());
         $this->command->info('');
         $this->command->info('🎉 ¡Datos de demostración creados exitosamente!');
     }

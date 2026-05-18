@@ -2,10 +2,9 @@
 
 namespace App\Services;
 
-use App\Models\Warehouse;
 use App\Models\ProductInventory;
+use App\Models\Warehouse;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Support\Facades\DB;
 
 class WarehouseService
 {
@@ -17,17 +16,17 @@ class WarehouseService
         $query = Warehouse::query();
 
         // Search filter
-        if (!empty($filters['search'])) {
+        if (! empty($filters['search'])) {
             $search = $filters['search'];
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'ILIKE', "%{$search}%")
-                  ->orWhere('code', 'ILIKE', "%{$search}%")
-                  ->orWhere('location', 'ILIKE', "%{$search}%");
+                    ->orWhere('code', 'ILIKE', "%{$search}%")
+                    ->orWhere('location', 'ILIKE', "%{$search}%");
             });
         }
 
         // Status filter
-        if (!empty($filters['status'])) {
+        if (! empty($filters['status'])) {
             $query->where('status', $filters['status']);
         }
 
@@ -45,7 +44,7 @@ class WarehouseService
     public function getWarehouseById(int $id)
     {
         $warehouse = Warehouse::findOrFail($id);
-        
+
         // Add statistics
         $warehouse->total_products = $this->getTotalProducts($id);
         $warehouse->total_units = $this->getTotalUnits($id);
@@ -71,6 +70,7 @@ class WarehouseService
     {
         $warehouse = Warehouse::findOrFail($id);
         $warehouse->update($data);
+
         return $warehouse->fresh();
     }
 
@@ -80,7 +80,7 @@ class WarehouseService
     public function deleteWarehouse(int $id): bool
     {
         $warehouse = Warehouse::findOrFail($id);
-        
+
         // Check if warehouse has inventory
         $hasInventory = ProductInventory::where('warehouse_id', $id)
             ->where('quantity_available', '>', 0)
@@ -102,21 +102,21 @@ class WarehouseService
             ->where('warehouse_id', $warehouseId);
 
         // Filter by low stock
-        if (!empty($filters['low_stock'])) {
+        if (! empty($filters['low_stock'])) {
             $query->whereColumn('quantity_available', '<=', 'reorder_point');
         }
 
         // Filter by out of stock
-        if (!empty($filters['out_of_stock'])) {
+        if (! empty($filters['out_of_stock'])) {
             $query->where('quantity_available', 0);
         }
 
         // Search by product name or SKU
-        if (!empty($filters['search'])) {
+        if (! empty($filters['search'])) {
             $search = $filters['search'];
             $query->whereHas('product', function ($q) use ($search) {
                 $q->where('name', 'ILIKE', "%{$search}%")
-                  ->orWhere('sku_base', 'ILIKE', "%{$search}%");
+                    ->orWhere('sku_base', 'ILIKE', "%{$search}%");
             });
         }
 
@@ -153,11 +153,7 @@ class WarehouseService
      */
     private function getTotalValue(int $warehouseId): float
     {
-        return ProductInventory::where('warehouse_id', $warehouseId)
-            ->join('products', 'product_inventory.product_id', '=', 'products.id')
-            ->join('product_pricing', 'products.id', '=', 'product_pricing.product_id')
-            ->selectRaw('SUM(product_inventory.quantity_available * product_pricing.base_price) as total')
-            ->value('total') ?? 0.0;
+        return app(InventoryFifoService::class)->availableStockValue($warehouseId);
     }
 
     /**

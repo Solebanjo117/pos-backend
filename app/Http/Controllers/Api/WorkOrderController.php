@@ -32,12 +32,12 @@ class WorkOrderController extends Controller
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('folio', 'like', "%{$search}%")
-                  ->orWhere('vehicle_description', 'like', "%{$search}%");
+                    ->orWhere('vehicle_description', 'like', "%{$search}%");
             });
         }
 
         $perPage = min((int) ($request->per_page ?? 20), 100);
-        $orders  = $query->paginate($perPage);
+        $orders = $query->paginate($perPage);
 
         return response()->json($orders);
     }
@@ -83,42 +83,46 @@ class WorkOrderController extends Controller
             if (! empty($stockErrors)) {
                 return response()->json([
                     'message' => 'Stock insuficiente para uno o más productos.',
-                    'errors'  => $stockErrors,
+                    'errors' => $stockErrors,
                 ], 422);
             }
         }
 
         $workOrder = DB::transaction(function () use ($validated, $request) {
             $wo = WorkOrder::create([
-                'customer_id'           => $validated['customer_id'] ?? null,
-                'warehouse_id'          => $validated['warehouse_id'],
-                'created_by'            => $request->user()->id,
-                'assigned_to'           => $validated['assigned_to'] ?? null,
-                'vehicle_description'   => $validated['vehicle_description'] ?? null,
-                'notes'                 => $validated['notes'] ?? null,
-                'labour_cost'           => $validated['labour_cost'] ?? 0,
+                'customer_id' => $validated['customer_id'] ?? null,
+                'warehouse_id' => $validated['warehouse_id'],
+                'created_by' => $request->user()->id,
+                'assigned_to' => $validated['assigned_to'] ?? null,
+                'vehicle_description' => $validated['vehicle_description'] ?? null,
+                'notes' => $validated['notes'] ?? null,
+                'labour_cost' => $validated['labour_cost'] ?? 0,
                 'estimated_delivery_at' => $validated['estimated_delivery_at'] ?? null,
-                'status'                => 'pending',
+                'status' => 'pending',
             ]);
 
             foreach ($validated['items'] ?? [] as $item) {
-                $wo->items()->create([
-                    'product_id'  => $item['product_id'],
-                    'variant_id'  => $item['variant_id'] ?? null,
-                    'warehouse_id'=> $item['warehouse_id'],
-                    'quantity'    => $item['quantity'],
-                    'unit_price'  => $item['unit_price'],
-                    'notes'       => $item['notes'] ?? null,
+                $workOrderItem = $wo->items()->create([
+                    'product_id' => $item['product_id'],
+                    'variant_id' => $item['variant_id'] ?? null,
+                    'warehouse_id' => $item['warehouse_id'],
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $item['unit_price'],
+                    'notes' => $item['notes'] ?? null,
                 ]);
 
-                // Decrement inventory (quantity_available in product_inventory)
-                $invQuery = ProductInventory::where('warehouse_id', $item['warehouse_id']);
-                if (! empty($item['variant_id'])) {
-                    $invQuery->where('variant_id', $item['variant_id']);
-                } else {
-                    $invQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
-                }
-                $invQuery->decrement('quantity_available', $item['quantity']);
+                app(\App\Services\InventoryFifoService::class)->consumeStock([
+                    'product_id' => $item['product_id'],
+                    'variant_id' => $item['variant_id'] ?? null,
+                    'warehouse_id' => $item['warehouse_id'],
+                    'quantity' => $item['quantity'],
+                    'reference_type' => 'work_order',
+                    'reference_id' => $wo->id,
+                    'reason' => 'work_order_item',
+                    'notes' => "Orden de trabajo #{$wo->id} item #{$workOrderItem->id}",
+                    'user_id' => $request->user()->id,
+                    'strict' => true,
+                ]);
             }
 
             return $wo->load(['items', 'customer', 'warehouse', 'creator', 'assignee']);
@@ -126,7 +130,7 @@ class WorkOrderController extends Controller
 
         return response()->json([
             'message' => 'Orden de trabajo creada exitosamente',
-            'data'    => $workOrder,
+            'data' => $workOrder,
         ], 201);
     }
 
@@ -139,11 +143,11 @@ class WorkOrderController extends Controller
         $workOrder = WorkOrder::findOrFail($id);
 
         $validated = $request->validate([
-            'customer_id'           => 'nullable|exists:customers,id',
-            'assigned_to'           => 'nullable|exists:users,id',
-            'vehicle_description'   => 'nullable|string|max:255',
-            'notes'                 => 'nullable|string|max:5000',
-            'labour_cost'           => 'nullable|numeric|min:0',
+            'customer_id' => 'nullable|exists:customers,id',
+            'assigned_to' => 'nullable|exists:users,id',
+            'vehicle_description' => 'nullable|string|max:255',
+            'notes' => 'nullable|string|max:5000',
+            'labour_cost' => 'nullable|numeric|min:0',
             'estimated_delivery_at' => 'nullable|date',
         ]);
 
@@ -151,7 +155,7 @@ class WorkOrderController extends Controller
 
         return response()->json([
             'message' => 'Orden de trabajo actualizada',
-            'data'    => $workOrder->load(['items', 'customer', 'warehouse', 'creator', 'assignee']),
+            'data' => $workOrder->load(['items', 'customer', 'warehouse', 'creator', 'assignee']),
         ]);
     }
 
@@ -164,7 +168,7 @@ class WorkOrderController extends Controller
         $workOrder = WorkOrder::findOrFail($id);
 
         $request->validate([
-            'status' => 'required|in:' . implode(',', WorkOrder::VALID_STATUSES),
+            'status' => 'required|in:'.implode(',', WorkOrder::VALID_STATUSES),
         ]);
 
         $newStatus = $request->status;
@@ -179,20 +183,26 @@ class WorkOrderController extends Controller
 
         // If cancelled, restore inventory for all items
         if ($newStatus === 'cancelled') {
-            foreach ($workOrder->items as $item) {
-                $q = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                if ($item->variant_id) {
-                    $q->where('variant_id', $item->variant_id);
-                } else {
-                    $q->where('product_id', $item->product_id)->whereNull('variant_id');
-                }
-                $q->increment('quantity_available', $item->quantity);
+            $movements = \App\Models\InventoryMovement::query()
+                ->where('reference_type', 'work_order')
+                ->where('reference_id', $workOrder->id)
+                ->where('movement_type', 'out')
+                ->get();
+
+            foreach ($movements as $movement) {
+                app(\App\Services\InventoryFifoService::class)->restoreFromOutboundMovement($movement, [
+                    'reference_type' => 'work_order_cancelled',
+                    'reference_id' => $workOrder->id,
+                    'reason' => 'work_order_cancelled',
+                    'notes' => "Cancelación de orden de trabajo #{$workOrder->id}",
+                    'user_id' => $request->user()?->id,
+                ]);
             }
         }
 
         return response()->json([
             'message' => "Estado actualizado a '{$newStatus}'",
-            'data'    => $workOrder->load(['items', 'customer', 'warehouse', 'creator', 'assignee']),
+            'data' => $workOrder->load(['items', 'customer', 'warehouse', 'creator', 'assignee']),
         ]);
     }
 
@@ -212,14 +222,19 @@ class WorkOrderController extends Controller
 
         // If pending with items, restore inventory before delete
         if ($workOrder->status === 'pending') {
-            foreach ($workOrder->items as $item) {
-                $q = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                if ($item->variant_id) {
-                    $q->where('variant_id', $item->variant_id);
-                } else {
-                    $q->where('product_id', $item->product_id)->whereNull('variant_id');
-                }
-                $q->increment('quantity_available', $item->quantity);
+            $movements = \App\Models\InventoryMovement::query()
+                ->where('reference_type', 'work_order')
+                ->where('reference_id', $workOrder->id)
+                ->where('movement_type', 'out')
+                ->get();
+
+            foreach ($movements as $movement) {
+                app(\App\Services\InventoryFifoService::class)->restoreFromOutboundMovement($movement, [
+                    'reference_type' => 'work_order_deleted',
+                    'reference_id' => $workOrder->id,
+                    'reason' => 'work_order_deleted',
+                    'notes' => "Eliminación de orden de trabajo #{$workOrder->id}",
+                ]);
             }
         }
 

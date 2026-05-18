@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Helpers\TaxRateHelper;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\SalesOrder;
@@ -329,7 +330,7 @@ class SalesOrderService
                 'unit_cost' => $unitCost,
                 'discount_percent' => $itemData['discount_percent'] ?? 0,
                 'discount_amount' => $itemData['discount_amount'] ?? 0,
-                'tax_percent' => $itemData['tax_percent'] ?? 0,
+                'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                 'is_custom_line' => $isCustomLine,
                 'custom_description' => $customDescription,
                 'added_after_sale' => $isConfirmed,
@@ -350,21 +351,22 @@ class SalesOrderService
                     $quantityToDeduct = min($requested, $available);
 
                     if ($quantityToDeduct > 0) {
-                        \App\Models\InventoryMovement::create([
+                        $fifoResult = app(InventoryFifoService::class)->consumeStock([
                             'product_id' => $item->product_id,
                             'variant_id' => $item->variant_id,
                             'warehouse_id' => $item->warehouse_id,
-                            'movement_type' => 'out',
                             'quantity' => $quantityToDeduct,
-                            'reference_type' => 'sale',
-                            'reference_id' => $order->id,
-                            'notes' => "Agregado post-venta a Orden {$order->order_number}",
+                            'reference_type' => 'post_sale_addition',
+                            'reference_id' => $item->id,
+                            'sales_order_item_id' => $item->id,
+                            'reason' => 'post_sale_addition',
+                            'notes' => "Agregado post-venta item #{$item->id} a Orden {$order->order_number}",
                             'user_id' => \Illuminate\Support\Facades\Auth::id(),
-                            'date' => now(),
                         ]);
 
-                        $inventory->quantity_available = max(0, $inventory->quantity_available - $quantityToDeduct);
-                        $inventory->save();
+                        if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
+                            $item->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
+                        }
                     }
                 }
 
@@ -483,18 +485,98 @@ class SalesOrderService
     }
 
     /**
-     * Remove item
+     * Remove item from order.
+     *
+     * Draft/pending: any item can be removed (existing behavior).
+     * Confirmed/processing/completed: only lines with added_after_sale = true may be
+     * removed. The removal reverses inventory and adjusts the customer balance via a
+     * negative delta through applyPostSaleItemAdjustment().
      */
     public function removeItem(int $itemId): bool
     {
-        $item = SalesOrderItem::findOrFail($itemId);
-        $order = $item->salesOrder;
+        return DB::transaction(function () use ($itemId) {
+            $item = SalesOrderItem::findOrFail($itemId);
+            $order = $item->salesOrder;
 
-        if (! $order->canBeEdited()) {
-            throw new \Exception('No se pueden quitar items de una orden en estado '.$order->status);
+            if ($order->canBeEdited()) {
+                return $item->delete();
+            }
+
+            if (! $this->isPostSaleMutableOrder($order)) {
+                throw new \Exception('No se pueden quitar items de una orden en estado '.$order->status);
+            }
+
+            if (! $item->added_after_sale) {
+                throw new \Exception('Solo se pueden eliminar artículos agregados después de confirmar la orden.');
+            }
+
+            $removedTotal = (float) $item->total;
+
+            // Delete line — SalesOrderItem::deleted observer recalculates order totals
+            $item->delete();
+
+            // Restore inventory for catalog lines (pass order so the lookup is order-scoped)
+            $this->restoreRemovedPostSaleItemInventory($item, $order);
+
+            // Apply negative delta to payment_status and customer balance
+            $order->refresh();
+            $this->applyPostSaleItemAdjustment($order, -$removedTotal);
+
+            return true;
+        });
+    }
+
+    /**
+     * Whether the order status allows post-sale item mutations.
+     */
+    private function isPostSaleMutableOrder(SalesOrder $order): bool
+    {
+        return in_array($order->status, ['confirmed', 'processing', 'completed'], true);
+    }
+
+    /**
+     * Restore the inventory that was deducted when a post-sale item was added.
+     *
+     * The outbound movement uses reference_type = 'post_sale_addition' and
+     * reference_id = $item->id, so the lookup is a unique 1:1 match even when
+     * two post-sale lines of the same product exist on the same order.
+     *
+     * The inbound restore movement stores reference_id = $order->id so that
+     * SalesOrder::cancel() can locate it without depending on hard-deleted item rows.
+     *
+     * Never restores for custom lines.
+     */
+    private function restoreRemovedPostSaleItemInventory(SalesOrderItem $item, SalesOrder $order): void
+    {
+        if ($item->is_custom_line) {
+            return;
         }
 
-        return $item->delete();
+        // Unique 1:1 lookup: each post-sale outbound is linked to its specific item
+        $outboundMovement = \App\Models\InventoryMovement::query()
+            ->where('reference_type', 'post_sale_addition')
+            ->where('reference_id', $item->id)
+            ->where('movement_type', 'out')
+            ->first();
+
+        if (! $outboundMovement) {
+            return;
+        }
+
+        $quantityToRestore = (int) $outboundMovement->quantity;
+
+        if ($quantityToRestore <= 0) {
+            return;
+        }
+
+        app(InventoryFifoService::class)->restoreFromOutboundMovement($outboundMovement, [
+            'reference_type' => 'sales_order_item_removed',
+            'reference_id' => $order->id,
+            'reason' => 'post_sale_item_removed',
+            'notes' => "RestauraciÃ³n post-venta: artÃ­culo #{$item->id} eliminado de orden {$order->order_number}",
+            'user_id' => \Illuminate\Support\Facades\Auth::id(),
+        ]);
+
     }
 
     /**

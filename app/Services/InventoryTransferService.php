@@ -2,10 +2,9 @@
 
 namespace App\Services;
 
-use App\Models\InventoryTransfer;
-use App\Models\InventoryTransferItem;
-use App\Models\ProductInventory;
 use App\Models\InventoryMovement;
+use App\Models\InventoryTransfer;
+use App\Models\ProductInventory;
 use Illuminate\Support\Facades\DB;
 
 class InventoryTransferService
@@ -63,16 +62,11 @@ class InventoryTransferService
                     throw new \Exception("Stock insuficiente para {$productName}. Disponible: {$available}, Solicitado: {$item->quantity}");
                 }
 
-                // Deduct from origin
-                $inventory->decrement('quantity_available', $item->quantity);
-
-                // Record outbound movement
-                InventoryMovement::create([
+                app(InventoryFifoService::class)->consumeStock([
                     'product_id' => $item->product_id,
                     'variant_id' => $item->variant_id,
                     'warehouse_id' => $transfer->from_warehouse_id,
                     'destination_warehouse_id' => $transfer->to_warehouse_id,
-                    'movement_type' => 'out',
                     'quantity' => $item->quantity,
                     'reference_type' => 'transfer',
                     'reference_id' => $transfer->id,
@@ -101,31 +95,22 @@ class InventoryTransferService
 
         return DB::transaction(function () use ($transfer, $receivedByUserId) {
             foreach ($transfer->items as $item) {
-                // Add to destination
-                $inventory = ProductInventory::firstOrCreate(
-                    [
-                        'product_id' => $item->product_id,
-                        'warehouse_id' => $transfer->to_warehouse_id,
-                        'variant_id' => $item->variant_id,
-                    ],
-                    ['quantity_available' => 0, 'quantity_reserved' => 0]
-                );
+                $outboundMovement = InventoryMovement::query()
+                    ->where('reference_type', 'transfer')
+                    ->where('reference_id', $transfer->id)
+                    ->where('movement_type', 'out')
+                    ->where('product_id', $item->product_id)
+                    ->when($item->variant_id, fn ($query) => $query->where('variant_id', $item->variant_id))
+                    ->first();
 
-                $inventory->increment('quantity_available', $item->quantity);
+                if ($outboundMovement) {
+                    app(InventoryFifoService::class)->createTransferInboundLots(
+                        $outboundMovement,
+                        $transfer->to_warehouse_id,
+                        $receivedByUserId
+                    );
+                }
 
-                // Record inbound movement
-                InventoryMovement::create([
-                    'product_id' => $item->product_id,
-                    'variant_id' => $item->variant_id,
-                    'warehouse_id' => $transfer->to_warehouse_id,
-                    'destination_warehouse_id' => $transfer->from_warehouse_id,
-                    'movement_type' => 'in',
-                    'quantity' => $item->quantity,
-                    'reference_type' => 'transfer',
-                    'reference_id' => $transfer->id,
-                    'reason' => "Transferencia entrada ← {$transfer->fromWarehouse->name} ({$transfer->reference})",
-                    'user_id' => $receivedByUserId,
-                ]);
             }
 
             $transfer->update([
@@ -143,11 +128,12 @@ class InventoryTransferService
      */
     public function cancel(InventoryTransfer $transfer): InventoryTransfer
     {
-        if (!in_array($transfer->status, ['draft'])) {
+        if (! in_array($transfer->status, ['draft'])) {
             throw new \Exception('Solo se pueden cancelar transferencias en estado borrador.');
         }
 
         $transfer->update(['status' => 'cancelled']);
+
         return $transfer->fresh();
     }
 }

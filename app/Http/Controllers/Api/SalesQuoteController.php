@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\ProductInventory;
@@ -147,7 +148,7 @@ class SalesQuoteController extends Controller
                         'quantity' => $itemData['quantity'],
                         'unit_price' => $itemData['unit_price'],
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
-                        'tax_percent' => $itemData['tax_percent'] ?? 0,
+                        'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                         'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                         'custom_description' => $itemData['custom_description'] ?? null,
                     ]);
@@ -251,7 +252,7 @@ class SalesQuoteController extends Controller
                             'quantity' => $itemData['quantity'],
                             'unit_price' => $itemData['unit_price'],
                             'discount_percent' => $itemData['discount_percent'] ?? 0,
-                            'tax_percent' => $itemData['tax_percent'] ?? 0,
+                            'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                             'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                             'custom_description' => $itemData['custom_description'] ?? null,
                         ]);
@@ -345,7 +346,7 @@ class SalesQuoteController extends Controller
                         'quantity' => $itemData['quantity'],
                         'unit_price' => $itemData['unit_price'],
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
-                        'tax_percent' => $itemData['tax_percent'] ?? 0,
+                        'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                         'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                         'custom_description' => $itemData['custom_description'] ?? null,
                     ]);
@@ -657,7 +658,7 @@ class SalesQuoteController extends Controller
 
     private function normalizeTaxPercentPayload(Request $request): void
     {
-        $defaultTaxRate = (int) Setting::get('store_tax_rate', 7);
+        $defaultTaxRate = TaxRateHelper::defaultRate();
 
         if ($request->has('tax_percent')) {
             $raw = $request->input('tax_percent');
@@ -839,9 +840,9 @@ class SalesQuoteController extends Controller
         $ticketFooter = \App\Models\Setting::get('store_ticket_footer', 'Cotización válida por 15 días');
 
         // Calculate dominant tax percent
-        $taxPercent = 7;
+        $taxPercent = TaxRateHelper::defaultRate();
         if ($quote->items->count() > 0) {
-            $taxPercent = $quote->items->first()->tax_percent ?? 7;
+            $taxPercent = $quote->items->first()->tax_percent ?? TaxRateHelper::defaultRate();
         }
 
         $barcodeSvg = $this->generateBarcodeSvg($quote->quote_number);

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Helpers\TaxRateHelper;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -145,14 +146,12 @@ class PurchaseOrderItem extends Model
 
     public function setTaxRateAttribute($value): void
     {
-        $parsed = is_numeric($value) ? (int) round((float) $value) : 7;
-
-        $this->attributes['tax_rate'] = max(0, min(100, $parsed));
+        $this->attributes['tax_rate'] = TaxRateHelper::resolve($value);
     }
 
     /**
      * Calculate line amounts. If tax_amount is set to null in the payload,
-     * it will be auto-calculated from tax_rate (default 7%). If a numeric
+     * it will be auto-calculated from tax_rate (store default). If a numeric
      * value is explicitly provided, it is kept as-is (manual ITBM amount).
      * misc_cost defaults to 0 when not present.
      */
@@ -173,7 +172,7 @@ class PurchaseOrderItem extends Model
             $item->tax_amount = round(max(0, (float) $rawTaxAmount), 2);
         } else {
             // Auto-calculate from tax_rate
-            $item->tax_rate = $item->tax_rate ?? 7;
+            $item->tax_rate = $item->tax_rate ?? TaxRateHelper::defaultRate();
             $item->tax_amount = round($item->subtotal * ((float) $item->tax_rate / 100), 2);
         }
 

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\PosCheckoutRequest;
 use App\Models\Inventory;
@@ -90,8 +91,11 @@ class SalesOrderController extends Controller
         try {
             $this->normalizeTaxPercentPayload($request);
 
-            // Get all active payment method codes dynamically
             $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+
+            if ($validPaymentMethods === []) {
+                $validPaymentMethods = ['cash', 'card', 'transfer', 'credit', 'store_credit'];
+            }
 
             $validated = $request->validate([
                 'user_id' => 'nullable|integer|min:1',
@@ -623,7 +627,7 @@ class SalesOrderController extends Controller
                             'unit_price' => $item['price'],
                             'unit_cost' => 0,
                             'discount_percent' => $item['discount_percent'] ?? 0,
-                            'tax_percent' => $item['tax_percent'] ?? 0,
+                            'tax_percent' => TaxRateHelper::resolve($item['tax_percent'] ?? null),
                             'seller_id' => $item['seller_id'] ?? null,
                             'subtotal' => $subtotal,
                             'discount_amount' => $discount,
@@ -663,7 +667,22 @@ class SalesOrderController extends Controller
                             if ($inventory) {
                                 $deduct = min($diffQty, max(0, $inventory->quantity_available));
                                 if ($deduct > 0) {
-                                    $inventory->decrement('quantity_available', $deduct);
+                                    $fifoResult = app(\App\Services\InventoryFifoService::class)->consumeStock([
+                                        'product_id' => $existing->product_id,
+                                        'variant_id' => $existing->variant_id,
+                                        'warehouse_id' => $existing->warehouse_id,
+                                        'quantity' => $deduct,
+                                        'reference_type' => 'post_sale_addition',
+                                        'reference_id' => $existing->id,
+                                        'sales_order_item_id' => $existing->id,
+                                        'reason' => 'post_sale_addition',
+                                        'notes' => "Incremento post-venta item #{$existing->id} en orden {$order->order_number}",
+                                        'user_id' => auth()->id(),
+                                    ]);
+
+                                    if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
+                                        $existing->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
+                                    }
                                 }
                             }
                         }
@@ -680,7 +699,7 @@ class SalesOrderController extends Controller
                                 $q->whereNull('variant_id');
                             })->first();
 
-                        $order->items()->create([
+                        $createdItem = $order->items()->create([
                             'product_id' => $item['product_id'],
                             'variant_id' => $item['variant_id'],
                             'warehouse_id' => $item['warehouse_id'],
@@ -688,7 +707,7 @@ class SalesOrderController extends Controller
                             'unit_price' => $item['price'],
                             'unit_cost' => $pricing ? $pricing->cost : 0,
                             'discount_percent' => $item['discount_percent'] ?? 0,
-                            'tax_percent' => $item['tax_percent'] ?? 0,
+                            'tax_percent' => TaxRateHelper::resolve($item['tax_percent'] ?? null),
                             'seller_id' => $item['seller_id'] ?? null,
                             'subtotal' => $subtotal,
                             'discount_amount' => $discount,
@@ -697,7 +716,6 @@ class SalesOrderController extends Controller
                             'added_after_sale' => true,
                         ]);
 
-                        // Deduct available inventory only (never below 0)
                         $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
                             ->where('product_id', $item['product_id'])
                             ->when(! empty($item['variant_id']), function ($q) use ($item) {
@@ -709,7 +727,22 @@ class SalesOrderController extends Controller
                         if ($inventory) {
                             $deduct = min($item['qty'], max(0, $inventory->quantity_available));
                             if ($deduct > 0) {
-                                $inventory->decrement('quantity_available', $deduct);
+                                $fifoResult = app(\App\Services\InventoryFifoService::class)->consumeStock([
+                                    'product_id' => $createdItem->product_id,
+                                    'variant_id' => $createdItem->variant_id,
+                                    'warehouse_id' => $createdItem->warehouse_id,
+                                    'quantity' => $deduct,
+                                    'reference_type' => 'post_sale_addition',
+                                    'reference_id' => $createdItem->id,
+                                    'sales_order_item_id' => $createdItem->id,
+                                    'reason' => 'post_sale_addition',
+                                    'notes' => "Agregado post-venta item #{$createdItem->id} a orden {$order->order_number}",
+                                    'user_id' => auth()->id(),
+                                ]);
+
+                                if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
+                                    $createdItem->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
+                                }
                             }
                         }
                     }
@@ -818,7 +851,7 @@ class SalesOrderController extends Controller
 
     private function normalizeTaxPercentPayload(Request $request): void
     {
-        $defaultTaxRate = (int) \App\Models\Setting::get('store_tax_rate', 7);
+        $defaultTaxRate = TaxRateHelper::defaultRate();
 
         if ($request->has('tax_percent')) {
             $raw = $request->input('tax_percent');

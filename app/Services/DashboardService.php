@@ -2,12 +2,11 @@
 
 namespace App\Services;
 
-use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
-use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class DashboardService
 {
@@ -33,14 +32,14 @@ class DashboardService
     {
         $query = SalesOrder::whereDate('created_at', Carbon::today())
             ->whereIn('status', ['confirmed', 'processing', 'completed']);
-        
+
         // Filter by warehouse if specified
         if ($warehouseId) {
             $query->whereHas('items', function ($q) use ($warehouseId) {
                 $q->where('warehouse_id', $warehouseId);
             });
         }
-        
+
         return (float) $query->sum('total');
     }
 
@@ -51,7 +50,7 @@ class DashboardService
     {
         $query = SalesOrderItem::whereHas('salesOrder', function ($q) {
             $q->whereDate('created_at', Carbon::today())
-              ->whereIn('status', ['confirmed', 'processing', 'completed']);
+                ->whereIn('status', ['confirmed', 'processing', 'completed']);
         });
 
         if ($warehouseId) {
@@ -59,8 +58,10 @@ class DashboardService
         }
 
         $items = $query->get();
+
         return $items->sum(function ($item) {
             $effectivePrice = (float) $item->unit_price * (1 - ((float) $item->discount_percent / 100));
+
             return ($effectivePrice - (float) $item->unit_cost) * $item->quantity;
         });
     }
@@ -71,14 +72,14 @@ class DashboardService
     private function getPendingOrders(?int $warehouseId = null): int
     {
         $query = SalesOrder::whereIn('status', ['draft', 'pending']);
-        
+
         // Filter by warehouse if specified
         if ($warehouseId) {
             $query->whereHas('items', function ($q) use ($warehouseId) {
                 $q->where('warehouse_id', $warehouseId);
             });
         }
-        
+
         return $query->count();
     }
 
@@ -88,11 +89,11 @@ class DashboardService
     private function getLowStockItemsCount(?int $warehouseId = null): int
     {
         $query = ProductInventory::whereColumn('quantity_available', '<=', 'reorder_point');
-        
+
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
         }
-        
+
         return $query->count();
     }
 
@@ -110,17 +111,7 @@ class DashboardService
      */
     private function getTotalInventoryValue(?int $warehouseId = null): float
     {
-        $query = ProductInventory::join('product_pricing', function($join) {
-            $join->on('product_inventory.product_id', '=', 'product_pricing.product_id')
-                 ->on('product_inventory.variant_id', '=', 'product_pricing.variant_id');
-        })
-        ->selectRaw('SUM(product_inventory.quantity_available * product_pricing.cost) as total_value');
-
-        if ($warehouseId) {
-            $query->where('product_inventory.warehouse_id', $warehouseId);
-        }
-
-        return (float) $query->value('total_value') ?? 0.0;
+        return app(InventoryFifoService::class)->availableStockValue($warehouseId);
     }
 
     /**
@@ -130,31 +121,31 @@ class DashboardService
     {
         // Calculate date range based on period
         $startDate = $this->getPeriodStartDate($period);
-        
+
         $query = SalesOrderItem::select('product_id', 'variant_id')
             ->selectRaw('SUM(quantity) as total_quantity')
             ->selectRaw('SUM(total) as total_sales')
             ->whereHas('salesOrder', function ($q) use ($startDate) {
                 $q->where('created_at', '>=', $startDate)
-                  ->whereIn('status', ['confirmed', 'processing', 'completed']);
+                    ->whereIn('status', ['confirmed', 'processing', 'completed']);
             });
-        
+
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
         }
-        
+
         $topItems = $query->groupBy('product_id', 'variant_id')
             ->orderByDesc('total_quantity')
             ->limit($limit)
             ->with(['product', 'variant'])
             ->get();
-        
+
         return $topItems->map(function ($item) {
             $name = $item->product->name;
             if ($item->variant) {
-                $name .= ' - ' . $item->variant->name;
+                $name .= ' - '.$item->variant->name;
             }
-            
+
             return [
                 'name' => $name,
                 'sales' => (int) $item->total_quantity,
@@ -173,7 +164,7 @@ class DashboardService
 
         // Use DB::table to avoid Eloquent model casting interference with DATE()
         $salesQuery = DB::table('sales_orders')
-            ->select(DB::raw("DATE(created_at) as sale_date"), DB::raw('COALESCE(SUM(total), 0) as total'))
+            ->select(DB::raw('DATE(created_at) as sale_date'), DB::raw('COALESCE(SUM(total), 0) as total'))
             ->where('created_at', '>=', $startDate->toDateTimeString())
             ->where('created_at', '<=', $endDate->toDateTimeString())
             ->whereIn('status', ['confirmed', 'processing', 'completed']);
@@ -181,9 +172,9 @@ class DashboardService
         if ($warehouseId) {
             $salesQuery->whereExists(function ($q) use ($warehouseId) {
                 $q->select(DB::raw(1))
-                  ->from('sales_order_items')
-                  ->whereColumn('sales_order_items.sales_order_id', 'sales_orders.id')
-                  ->where('sales_order_items.warehouse_id', $warehouseId);
+                    ->from('sales_order_items')
+                    ->whereColumn('sales_order_items.sales_order_id', 'sales_orders.id')
+                    ->where('sales_order_items.warehouse_id', $warehouseId);
             });
         }
 
@@ -194,7 +185,7 @@ class DashboardService
         // Profit query using DB::table
         $profitQuery = DB::table('sales_order_items')
             ->select(
-                DB::raw("DATE(sales_orders.created_at) as sale_date"),
+                DB::raw('DATE(sales_orders.created_at) as sale_date'),
                 DB::raw('COALESCE(SUM(sales_order_items.unit_cost * sales_order_items.quantity), 0) as total_cost'),
                 DB::raw('COALESCE(SUM((sales_order_items.unit_price * (1 - sales_order_items.discount_percent / 100) - sales_order_items.unit_cost) * sales_order_items.quantity), 0) as profit')
             )
@@ -249,7 +240,7 @@ class DashboardService
             ->whereColumn('quantity_available', '<=', 'reorder_point')
             ->orderBy('quantity_available', 'asc')
             ->limit($limit);
-        
+
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
         }
@@ -259,7 +250,7 @@ class DashboardService
         return $lowStockInventory->map(function ($inventory) {
             $name = $inventory->product ? $inventory->product->name : 'Producto Desconocido';
             if ($inventory->variant) {
-                $name .= ' - ' . $inventory->variant->name;
+                $name .= ' - '.$inventory->variant->name;
             }
 
             return [
@@ -285,7 +276,7 @@ class DashboardService
             ->selectRaw('COUNT(*) as product_count')
             ->with('warehouse:id,name')
             ->groupBy('warehouse_id');
-        
+
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
         }
@@ -311,7 +302,7 @@ class DashboardService
     {
         $query = ProductInventory::with(['product', 'variant.brand', 'warehouse'])
             ->whereColumn('quantity_available', '<=', 'reorder_point');
-        
+
         if ($warehouseId) {
             $query->where('warehouse_id', $warehouseId);
         }
@@ -321,7 +312,7 @@ class DashboardService
         return $needsReorder->map(function ($inventory) {
             $name = $inventory->product ? $inventory->product->name : 'Producto Desconocido';
             if ($inventory->variant) {
-                $name .= ' - ' . $inventory->variant->name;
+                $name .= ' - '.$inventory->variant->name;
             }
 
             $targetLevel = $inventory->reorder_point + $inventory->reorder_quantity;
@@ -345,7 +336,7 @@ class DashboardService
      */
     private function getPeriodStartDate(string $period): Carbon
     {
-        return match($period) {
+        return match ($period) {
             '7d' => Carbon::now()->subDays(7),
             '30d' => Carbon::now()->subDays(30),
             '90d' => Carbon::now()->subDays(90),
@@ -362,13 +353,13 @@ class DashboardService
         $startDate = $this->getPeriodStartDate($period);
 
         $query = SalesOrderItem::select(
-                'product_variants.brand_id',
-                DB::raw('brands.name as brand_name'),
-                DB::raw('SUM(sales_order_items.total) as revenue'),
-                DB::raw('SUM(sales_order_items.unit_cost * sales_order_items.quantity) as total_cost'),
-                DB::raw('SUM((sales_order_items.unit_price * (1 - sales_order_items.discount_percent / 100) - sales_order_items.unit_cost) * sales_order_items.quantity) as profit'),
-                DB::raw('SUM(sales_order_items.quantity) as units_sold')
-            )
+            'product_variants.brand_id',
+            DB::raw('brands.name as brand_name'),
+            DB::raw('SUM(sales_order_items.total) as revenue'),
+            DB::raw('SUM(sales_order_items.unit_cost * sales_order_items.quantity) as total_cost'),
+            DB::raw('SUM((sales_order_items.unit_price * (1 - sales_order_items.discount_percent / 100) - sales_order_items.unit_cost) * sales_order_items.quantity) as profit'),
+            DB::raw('SUM(sales_order_items.quantity) as units_sold')
+        )
             ->join('sales_orders', 'sales_orders.id', '=', 'sales_order_items.sales_order_id')
             ->join('product_variants', 'product_variants.id', '=', 'sales_order_items.variant_id')
             ->join('brands', 'brands.id', '=', 'product_variants.brand_id')
@@ -387,6 +378,7 @@ class DashboardService
         return $results->map(function ($row) {
             $revenue = (float) $row->revenue;
             $profit = (float) $row->profit;
+
             return [
                 'brand' => $row->brand_name,
                 'revenue' => $revenue,
@@ -443,10 +435,10 @@ class DashboardService
         $startDate = $this->getPeriodStartDate($period);
 
         $query = SalesOrder::select(
-                'users.name as user_name',
-                DB::raw('COUNT(sales_orders.id) as total_orders'),
-                DB::raw('SUM(sales_orders.total) as total_revenue')
-            )
+            'users.name as user_name',
+            DB::raw('COUNT(sales_orders.id) as total_orders'),
+            DB::raw('SUM(sales_orders.total) as total_revenue')
+        )
             ->join('users', 'users.id', '=', 'sales_orders.user_id')
             ->where('sales_orders.created_at', '>=', $startDate)
             ->whereIn('sales_orders.status', ['confirmed', 'processing', 'completed']);
@@ -478,21 +470,21 @@ class DashboardService
     {
         // Get recent sales
         $salesQuery = SalesOrder::select(
-                'id',
-                'order_number as reference',
-                'total as amount',
-                'status',
-                'created_at',
-                DB::raw("'sale' as type")
-            )
+            'id',
+            'order_number as reference',
+            'total as amount',
+            'status',
+            'created_at',
+            DB::raw("'sale' as type")
+        )
             ->whereIn('status', ['confirmed', 'completed']);
-            
+
         if ($warehouseId) {
-             $salesQuery->whereHas('items', function ($q) use ($warehouseId) {
-                 $q->where('warehouse_id', $warehouseId);
-             });
+            $salesQuery->whereHas('items', function ($q) use ($warehouseId) {
+                $q->where('warehouse_id', $warehouseId);
+            });
         }
-        
+
         $sales = $salesQuery->orderByDesc('created_at')->limit($limit)->get();
 
         // Note: For a true activity feed, you might union SalesOrder and InventoryMovement

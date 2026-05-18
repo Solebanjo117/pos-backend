@@ -4,10 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreInventoryRequest;
+use App\Http\Requests\UpdateInventoryLotRequest;
 use App\Models\Inventory;
+use App\Models\InventoryLot;
 use App\Models\InventoryMovement;
 use App\Models\ProductInventory;
 use App\Models\Warehouse;
+use App\Services\InventoryFifoService;
+use App\Services\InventoryLotService;
 use App\Services\InventoryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,7 +20,9 @@ use Illuminate\Support\Facades\DB;
 class InventoryController extends Controller
 {
     public function __construct(
-        private InventoryService $inventoryService
+        private InventoryService $inventoryService,
+        private InventoryFifoService $fifoService,
+        private InventoryLotService $inventoryLotService,
     ) {}
 
     /**
@@ -24,58 +30,106 @@ class InventoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Inventory::with(['product.defaultVariant.brand', 'product.defaultVariant.pricing', 'warehouse'])
-            ->select('inventory.*');
+        $query = ProductInventory::with([
+            'product.defaultVariant.brand',
+            'product.defaultVariant.pricing',
+            'variant.brand',
+            'variant.pricing',
+            'warehouse',
+        ])->select('product_inventory.*');
 
-        // Filter by warehouse
         if ($request->has('warehouse_id')) {
             $query->where('warehouse_id', $request->warehouse_id);
         }
 
-        // Filter by low stock
-        if ($request->boolean('low_stock')) {
-            $query->whereColumn('stock_available', '<=', 'reorder_point');
+        if ($request->has('variant_id')) {
+            $query->where('variant_id', $request->integer('variant_id'));
         }
 
-        // Search by product name or SKU
+        if ($request->boolean('low_stock')) {
+            $query->whereColumn('quantity_available', '<=', 'reorder_point');
+        }
+
+        if ($request->filled('status')) {
+            match ($request->string('status')->toString()) {
+                'out_of_stock' => $query->where('quantity_available', '<=', 0),
+                'low_stock' => $query->where('quantity_available', '>', 0)
+                    ->whereColumn('quantity_available', '<=', 'reorder_point'),
+                'optimal' => $query->where('reorder_quantity', '>', 0)
+                    ->whereColumn('quantity_available', '>=', 'reorder_quantity'),
+                'normal' => $query->where('quantity_available', '>', 0)
+                    ->where(function ($query): void {
+                        $query->whereColumn('quantity_available', '>', 'reorder_point')
+                            ->where(function ($query): void {
+                                $query->where('reorder_quantity', '<=', 0)
+                                    ->orWhereColumn('quantity_available', '<', 'reorder_quantity');
+                            });
+                    }),
+                default => null,
+            };
+        }
+
         if ($request->has('search')) {
             $search = $request->search;
-            $query->whereHas('product', function ($q) use ($search) {
-                $q->where('name', 'ilike', "%{$search}%")
-                    ->orWhere('sku_base', 'ilike', "%{$search}%");
+            $query->where(function ($query) use ($search): void {
+                $query->whereHas('product', function ($q) use ($search): void {
+                    $q->where('name', 'like', "%{$search}%")
+                        ->orWhere('sku_base', 'like', "%{$search}%");
+                })->orWhereHas('variant', function ($q) use ($search): void {
+                    $q->where('sku', 'like', "%{$search}%")
+                        ->orWhereHas('brand', fn ($brandQuery) => $brandQuery->where('name', 'like', "%{$search}%"));
+                });
             });
         }
 
-        // Sorting
         $sortBy = $request->get('sort_by', 'product_id');
         $sortOrder = $request->get('sort_order', 'asc');
 
-        if ($sortBy === 'stock_available' || $sortBy === 'reorder_point') {
-            $query->orderBy($sortBy, $sortOrder);
+        if ($sortBy === 'stock_available') {
+            $query->orderBy('quantity_available', $sortOrder);
+        } elseif ($sortBy === 'reorder_point') {
+            $query->orderBy('reorder_point', $sortOrder);
+        } else {
+            $query->orderBy('product_id', $sortOrder);
         }
 
         $perPage = min($request->get('per_page', 20), 100);
         $inventory = $query->paginate($perPage);
 
         return response()->json([
-            'data' => $inventory->map(function ($item) {
-                $pricing = $item->product->defaultVariant?->pricing;
+            'data' => $inventory->map(function (ProductInventory $item) {
+                $variant = $item->variant ?? $item->product->defaultVariant;
+                $pricing = $variant?->pricing ?? $item->product->defaultVariant?->pricing;
+                $fifoCost = $variant
+                    ? round($this->fifoService->currentFifoCost($item->product_id, $variant->id, $item->warehouse_id), 2)
+                    : 0.0;
+                $fifoValue = $this->fifoStockValue($item->product_id, $item->variant_id, $item->warehouse_id);
 
                 return [
                     'id' => $item->id,
                     'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
                     'product_name' => $item->product->name,
                     'product_sku' => $item->product->sku_base,
-                    'brand' => $item->product->defaultVariant?->brand?->name ?? 'N/A',
+                    'variant_sku' => $variant?->sku,
+                    'brand' => $variant?->brand?->name ?? 'N/A',
                     'warehouse_id' => $item->warehouse_id,
                     'warehouse_name' => $item->warehouse->name,
-                    'stock_available' => $item->stock_available,
-                    'stock_reserved' => $item->stock_reserved,
-                    'stock_on_order' => $item->stock_on_order,
+                    'stock_available' => $item->quantity_available,
+                    'stock_reserved' => $item->quantity_reserved,
+                    'stock_on_order' => 0,
+                    'quantity_available' => $item->quantity_available,
+                    'quantity_reserved' => $item->quantity_reserved,
                     'reorder_point' => $item->reorder_point,
-                    'target_level' => $item->target_level,
-                    'needs_reorder' => $item->needsReorder(),
+                    'reorder_quantity' => $item->reorder_quantity,
+                    'target_level' => $item->reorder_quantity,
+                    'needs_reorder' => $item->isLowStock(),
                     'status' => $this->getStockStatus($item),
+                    'fifo_cost_current' => $fifoCost,
+                    'fifo_stock_value' => $fifoValue,
+                    'open_lots_count' => $this->openLotsCount($item->product_id, $item->variant_id, $item->warehouse_id),
+                    'last_received_at' => $this->lastMovementDate($item->product_id, $item->variant_id, $item->warehouse_id, 'in'),
+                    'last_sold_at' => $this->lastMovementDate($item->product_id, $item->variant_id, $item->warehouse_id, 'out'),
                     'base_price' => $pricing ? (float) $pricing->base_price : null,
                     'cost' => $pricing ? (float) $pricing->cost : null,
                 ];
@@ -88,6 +142,66 @@ class InventoryController extends Controller
                 'to' => $inventory->lastItem(),
                 'total' => $inventory->total(),
             ],
+        ]);
+    }
+
+    public function summary(Request $request): JsonResponse
+    {
+        $inventoryQuery = ProductInventory::query();
+        $lotsQuery = InventoryLot::query()->where('quantity_available', '>', 0);
+        $movementsQuery = InventoryMovement::query()->whereDate('created_at', today());
+
+        if ($request->has('warehouse_id')) {
+            $warehouseId = (int) $request->warehouse_id;
+            $inventoryQuery->where('warehouse_id', $warehouseId);
+            $lotsQuery->where('warehouse_id', $warehouseId);
+            $movementsQuery->where(function ($query) use ($warehouseId): void {
+                $query->where('warehouse_id', $warehouseId)
+                    ->orWhere('destination_warehouse_id', $warehouseId);
+            });
+        }
+
+        $lots = $lotsQuery->get(['quantity_available', 'landed_unit_cost']);
+
+        return response()->json([
+            'data' => [
+                'total_stock' => (int) (clone $inventoryQuery)->sum('quantity_available'),
+                'total_fifo_value' => round((float) $lots->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost), 2),
+                'low_stock_count' => (int) (clone $inventoryQuery)
+                    ->where('quantity_available', '>', 0)
+                    ->whereColumn('quantity_available', '<=', 'reorder_point')
+                    ->count(),
+                'open_lots_count' => $lots->count(),
+                'movements_today' => (int) $movementsQuery->count(),
+            ],
+        ]);
+    }
+
+    public function updateLot(UpdateInventoryLotRequest $request, InventoryLot $lot): JsonResponse
+    {
+        $lot = $this->inventoryLotService->updateAvailableLot(
+            $lot,
+            $request->validated(),
+            $request->user()
+        );
+
+        return response()->json([
+            'data' => [
+                'id' => $lot->id,
+                'product_id' => $lot->product_id,
+                'variant_id' => $lot->variant_id,
+                'warehouse_id' => $lot->warehouse_id,
+                'received_at' => $lot->received_at?->toIso8601String(),
+                'received_quantity' => (int) $lot->received_quantity,
+                'quantity_available' => (int) $lot->quantity_available,
+                'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+                'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+                'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+                'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+                'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+                'sale_price' => $lot->variant?->pricing ? round((float) $lot->variant->pricing->base_price, 2) : null,
+            ],
+            'message' => 'Lote de inventario actualizado correctamente',
         ]);
     }
 
@@ -150,15 +264,10 @@ class InventoryController extends Controller
             ], 404);
         }
 
-        // Map frontend field name to DB column name
         $updateData = collect($validated)->only([
             'reorder_point',
             'reorder_quantity',
         ])->filter(fn ($value) => $value !== null)->toArray();
-
-        if (isset($validated['stock_available'])) {
-            $updateData['quantity_available'] = $validated['stock_available'];
-        }
 
         $inventory = ProductInventory::updateOrCreate(
             [
@@ -169,16 +278,21 @@ class InventoryController extends Controller
             $updateData
         );
 
-        InventoryMovement::create([
-            'movement_type' => 'in',
-            'reason' => 'Ajuste manual de inventario',
-            'product_id' => $productId,
-            'variant_id' => $variantId,
-            'warehouse_id' => $warehouseId,
-            'quantity' => $validated['stock_available'] ?? $inventory->quantity_available,
-            'reference_type' => 'manual_adjustment',
-            'user_id' => $request->user()?->id,
-        ]);
+        if (array_key_exists('stock_available', $validated)) {
+            app(\App\Services\InventoryFifoService::class)->adjustStockToQuantity([
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'warehouse_id' => $warehouseId,
+                'quantity' => $validated['stock_available'],
+                'reference_type' => 'manual_adjustment',
+                'source_type' => 'manual_adjustment',
+                'reason' => 'Ajuste manual de inventario',
+                'notes' => 'Ajuste manual de inventario',
+                'user_id' => $request->user()?->id,
+            ]);
+
+            $inventory->refresh();
+        }
 
         return response()->json([
             'data' => [
@@ -225,11 +339,7 @@ class InventoryController extends Controller
                 ], 422);
             }
 
-            // Deduct stock
-            $inventory->decrement('quantity_available', $validated['quantity']);
-
-            // Record movement
-            InventoryMovement::create([
+            app(\App\Services\InventoryFifoService::class)->consumeStock([
                 'movement_type' => 'out',
                 'reason' => $validated['reason'],
                 'product_id' => $variant->product_id,
@@ -239,6 +349,7 @@ class InventoryController extends Controller
                 'reference_type' => 'waste',
                 'notes' => $validated['notes'] ?? null,
                 'user_id' => $request->user()?->id,
+                'strict' => true,
             ]);
 
             return response()->json([
@@ -303,17 +414,51 @@ class InventoryController extends Controller
     /**
      * Determine stock status based on levels.
      */
-    private function getStockStatus(Inventory $inventory): string
+    private function fifoStockValue(int $productId, ?int $variantId, int $warehouseId): float
     {
-        if ($inventory->stock_available <= 0) {
+        return round((float) InventoryLot::query()
+            ->where('product_id', $productId)
+            ->where('variant_id', $variantId)
+            ->where('warehouse_id', $warehouseId)
+            ->where('quantity_available', '>', 0)
+            ->get(['quantity_available', 'landed_unit_cost'])
+            ->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost), 2);
+    }
+
+    private function openLotsCount(int $productId, ?int $variantId, int $warehouseId): int
+    {
+        return InventoryLot::query()
+            ->where('product_id', $productId)
+            ->where('variant_id', $variantId)
+            ->where('warehouse_id', $warehouseId)
+            ->where('quantity_available', '>', 0)
+            ->count();
+    }
+
+    private function lastMovementDate(int $productId, ?int $variantId, int $warehouseId, string $movementType): ?string
+    {
+        $movement = InventoryMovement::query()
+            ->where('product_id', $productId)
+            ->where('variant_id', $variantId)
+            ->where('warehouse_id', $warehouseId)
+            ->where('movement_type', $movementType)
+            ->latest('created_at')
+            ->first();
+
+        return $movement?->created_at?->toIso8601String();
+    }
+
+    private function getStockStatus(ProductInventory $inventory): string
+    {
+        if ($inventory->quantity_available <= 0) {
             return 'out_of_stock';
         }
 
-        if ($inventory->needsReorder()) {
+        if ($inventory->isLowStock()) {
             return 'low_stock';
         }
 
-        if ($inventory->stock_available >= $inventory->target_level) {
+        if ($inventory->reorder_quantity > 0 && $inventory->quantity_available >= $inventory->reorder_quantity) {
             return 'optimal';
         }
 

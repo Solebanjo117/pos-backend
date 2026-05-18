@@ -2,12 +2,12 @@
 
 namespace App\Services;
 
-use App\Models\ProductBatch;
-use App\Models\WarehouseBatch;
 use App\Models\InventoryMovement;
+use App\Models\ProductBatch;
 use App\Models\ProductInventory;
-use Illuminate\Support\Facades\DB;
+use App\Models\WarehouseBatch;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\DB;
 
 class InventoryMovementService
 {
@@ -16,42 +16,42 @@ class InventoryMovementService
      */
     public function getMovements(array $filters = [], int $perPage = 20): LengthAwarePaginator
     {
-        $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier']);
+        $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier', 'lotAllocations.lot']);
 
         // Apply filters
-        if (!empty($filters['product_id'])) {
+        if (! empty($filters['product_id'])) {
             $query->where('product_id', $filters['product_id']);
         }
 
-        if (!empty($filters['variant_id'])) {
+        if (! empty($filters['variant_id'])) {
             $query->where('variant_id', $filters['variant_id']);
         }
 
-        if (!empty($filters['warehouse_id'])) {
+        if (! empty($filters['warehouse_id'])) {
             $query->where(function ($q) use ($filters) {
                 $q->where('warehouse_id', $filters['warehouse_id'])
-                  ->orWhere('destination_warehouse_id', $filters['warehouse_id']);
+                    ->orWhere('destination_warehouse_id', $filters['warehouse_id']);
             });
         }
 
-        if (!empty($filters['movement_type'])) {
+        if (! empty($filters['movement_type'])) {
             $query->where('movement_type', $filters['movement_type']);
         }
 
-        if (!empty($filters['date_from'])) {
+        if (! empty($filters['date_from'])) {
             $query->whereDate('created_at', '>=', $filters['date_from']);
         }
 
-        if (!empty($filters['date_to'])) {
+        if (! empty($filters['date_to'])) {
             $query->whereDate('created_at', '<=', $filters['date_to']);
         }
 
-        if (!empty($filters['search'])) {
+        if (! empty($filters['search'])) {
             $query->whereHas('product', function ($q) use ($filters) {
-                $q->where('name', 'ilike', '%' . $filters['search'] . '%')
-                  ->orWhere('sku_base', 'ilike', '%' . $filters['search'] . '%');
+                $q->where('name', 'ilike', '%'.$filters['search'].'%')
+                    ->orWhere('sku_base', 'ilike', '%'.$filters['search'].'%');
             })->orWhereHas('variant', function ($q) use ($filters) {
-                $q->where('sku', 'ilike', '%' . $filters['search'] . '%');
+                $q->where('sku', 'ilike', '%'.$filters['search'].'%');
             });
         }
 
@@ -68,7 +68,7 @@ class InventoryMovementService
      */
     public function getMovementById(int $id): InventoryMovement
     {
-        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier'])
+        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier', 'lotAllocations.lot', 'sourceLots'])
             ->findOrFail($id);
     }
 
@@ -77,11 +77,19 @@ class InventoryMovementService
      */
     public function recordInbound(array $data): InventoryMovement
     {
+        if (empty($data['skip_fifo'])) {
+            return app(InventoryFifoService::class)->receiveStock([
+                ...$data,
+                'unit_cost_base' => (float) ($data['cost'] ?? $data['unit_cost_base'] ?? 0),
+                'source_type' => $data['reference_type'] ?? 'manual_inbound',
+            ]);
+        }
+
         return DB::transaction(function () use ($data) {
             $batchId = null;
 
             // Handle Batch Logic
-            if (!empty($data['batch_number'])) {
+            if (! empty($data['batch_number'])) {
                 $batch = ProductBatch::firstOrCreate(
                     [
                         'product_id' => $data['product_id'],
@@ -102,16 +110,16 @@ class InventoryMovementService
             // Create movement record
             $movement = InventoryMovement::create([
                 'movement_type' => 'in',
-                'product_id'    => $data['product_id'],
-                'variant_id'    => $data['variant_id'] ?? null,
+                'product_id' => $data['product_id'],
+                'variant_id' => $data['variant_id'] ?? null,
                 'product_batch_id' => $batchId,
-                'warehouse_id'  => $data['warehouse_id'],
-                'quantity'      => $data['quantity'],
-                'reference_type'=> $data['reference_type'] ?? null,
-                'reference_id'  => $data['reference_id'] ?? null,
-                'notes'         => $data['notes'] ?? null,
-                'user_id'       => $data['user_id'] ?? null,
-                'supplier_id'   => $data['supplier_id'] ?? null,
+                'warehouse_id' => $data['warehouse_id'],
+                'quantity' => $data['quantity'],
+                'reference_type' => $data['reference_type'] ?? null,
+                'reference_id' => $data['reference_id'] ?? null,
+                'notes' => $data['notes'] ?? null,
+                'user_id' => $data['user_id'] ?? null,
+                'supplier_id' => $data['supplier_id'] ?? null,
             ]);
 
             // Update product inventory (Aggregate)
@@ -132,12 +140,25 @@ class InventoryMovementService
      */
     public function recordOutbound(array $data): InventoryMovement
     {
+        if (empty($data['skip_fifo'])) {
+            $result = app(InventoryFifoService::class)->consumeStock([
+                ...$data,
+                'strict' => ! \App\Models\Setting::get('allow_negative_inventory', false),
+            ]);
+
+            if ($result['movement']) {
+                return $result['movement'];
+            }
+
+            throw new \Exception('Stock insuficiente en el almacÃ©n seleccionado.');
+        }
+
         return DB::transaction(function () use ($data) {
             // Check if sufficient stock is available (Aggregate or Variant)
             $query = ProductInventory::where('product_id', $data['product_id'])
                 ->where('warehouse_id', $data['warehouse_id']);
 
-            if (!empty($data['variant_id'])) {
+            if (! empty($data['variant_id'])) {
                 $query->where('variant_id', $data['variant_id']);
             } else {
                 $query->whereNull('variant_id');
@@ -146,17 +167,17 @@ class InventoryMovementService
             $inventory = $query->first();
 
             $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
-            if (!$allowNegative && (!$inventory || $inventory->quantity_available < $data['quantity'])) {
+            if (! $allowNegative && (! $inventory || $inventory->quantity_available < $data['quantity'])) {
                 throw new \Exception('Stock insuficiente en el almacén seleccionado.');
             }
 
             // Handle Batch Logic (if batch is specified)
-            if (!empty($data['product_batch_id'])) {
+            if (! empty($data['product_batch_id'])) {
                 $batchInventory = WarehouseBatch::where('warehouse_id', $data['warehouse_id'])
                     ->where('product_batch_id', $data['product_batch_id'])
                     ->first();
 
-                if (!$batchInventory || $batchInventory->quantity < $data['quantity']) {
+                if (! $batchInventory || $batchInventory->quantity < $data['quantity']) {
                     throw new \Exception('Stock insuficiente en el lote seleccionado.');
                 }
 
@@ -196,6 +217,30 @@ class InventoryMovementService
      */
     public function recordTransfer(array $data): InventoryMovement
     {
+        if (empty($data['skip_fifo'])) {
+            if ($data['warehouse_id'] == $data['destination_warehouse_id']) {
+                throw new \Exception('El almacÃ©n de origen y destino deben ser diferentes.');
+            }
+
+            $result = app(InventoryFifoService::class)->consumeStock([
+                ...$data,
+                'reference_type' => 'transfer',
+                'strict' => ! \App\Models\Setting::get('allow_negative_inventory', false),
+            ]);
+
+            if (! $result['movement']) {
+                throw new \Exception('Stock insuficiente en el almacÃ©n de origen.');
+            }
+
+            app(InventoryFifoService::class)->createTransferInboundLots(
+                $result['movement'],
+                (int) $data['destination_warehouse_id'],
+                (int) ($data['user_id'] ?? auth()->id() ?? 0)
+            );
+
+            return $result['movement']->load(['product', 'variant', 'warehouse', 'destinationWarehouse', 'productBatch']);
+        }
+
         return DB::transaction(function () use ($data) {
             // Validate different warehouses
             if ($data['warehouse_id'] == $data['destination_warehouse_id']) {
@@ -205,8 +250,8 @@ class InventoryMovementService
             // Check if sufficient stock is available in origin warehouse (Aggregate or Variant)
             $query = ProductInventory::where('product_id', $data['product_id'])
                 ->where('warehouse_id', $data['warehouse_id']);
-            
-            if (!empty($data['variant_id'])) {
+
+            if (! empty($data['variant_id'])) {
                 $query->where('variant_id', $data['variant_id']);
             } else {
                 $query->whereNull('variant_id');
@@ -215,17 +260,17 @@ class InventoryMovementService
             $inventory = $query->first();
 
             $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
-            if (!$allowNegative && (!$inventory || $inventory->quantity_available < $data['quantity'])) {
+            if (! $allowNegative && (! $inventory || $inventory->quantity_available < $data['quantity'])) {
                 throw new \Exception('Stock insuficiente en el almacén de origen.');
             }
 
             // Handle Batch Logic (if batch is specified)
-            if (!empty($data['product_batch_id'])) {
+            if (! empty($data['product_batch_id'])) {
                 $batchInventory = WarehouseBatch::where('warehouse_id', $data['warehouse_id'])
                     ->where('product_batch_id', $data['product_batch_id'])
                     ->first();
 
-                if (!$batchInventory || $batchInventory->quantity < $data['quantity']) {
+                if (! $batchInventory || $batchInventory->quantity < $data['quantity']) {
                     throw new \Exception('Stock insuficiente en el lote seleccionado.');
                 }
 
@@ -278,6 +323,7 @@ class InventoryMovementService
     public function getMovementsByProduct(int $productId, array $filters = [], int $perPage = 20): LengthAwarePaginator
     {
         $filters['product_id'] = $productId;
+
         return $this->getMovements($filters, $perPage);
     }
 
@@ -287,6 +333,7 @@ class InventoryMovementService
     public function getMovementsByWarehouse(int $warehouseId, array $filters = [], int $perPage = 20): LengthAwarePaginator
     {
         $filters['warehouse_id'] = $warehouseId;
+
         return $this->getMovements($filters, $perPage);
     }
 
@@ -299,7 +346,7 @@ class InventoryMovementService
             'product_id' => $productId,
             'warehouse_id' => $warehouseId,
         ];
-        
+
         if ($variantId) {
             $criteria['variant_id'] = $variantId;
         } else {
@@ -357,11 +404,13 @@ class InventoryMovementService
     public function recordBulkInbound(array $items): array
     {
         $consolidatedItems = $this->consolidateItems($items);
+
         return DB::transaction(function () use ($consolidatedItems) {
             $movements = [];
             foreach ($consolidatedItems as $item) {
                 $movements[] = $this->recordInbound($item);
             }
+
             return $movements;
         });
     }
@@ -372,11 +421,13 @@ class InventoryMovementService
     public function recordBulkOutbound(array $items): array
     {
         $consolidatedItems = $this->consolidateItems($items);
+
         return DB::transaction(function () use ($consolidatedItems) {
             $movements = [];
             foreach ($consolidatedItems as $item) {
                 $movements[] = $this->recordOutbound($item);
             }
+
             return $movements;
         });
     }
@@ -388,17 +439,18 @@ class InventoryMovementService
     {
         $consolidated = [];
         foreach ($items as $item) {
-            $key = $item['product_id'] . '-' . 
-                   ($item['variant_id'] ?? 'null') . '-' . 
-                   ($item['warehouse_id'] ?? 'null') . '-' . 
+            $key = $item['product_id'].'-'.
+                   ($item['variant_id'] ?? 'null').'-'.
+                   ($item['warehouse_id'] ?? 'null').'-'.
                    ($item['product_batch_id'] ?? ($item['batch_number'] ?? 'null'));
-            
+
             if (isset($consolidated[$key])) {
                 $consolidated[$key]['quantity'] += $item['quantity'];
             } else {
                 $consolidated[$key] = $item;
             }
         }
+
         return array_values($consolidated);
     }
 
@@ -410,7 +462,7 @@ class InventoryMovementService
         $movement = InventoryMovement::findOrFail($movementId);
 
         // Find movements created within +/- 5 seconds by the same user, with same reference/notes
-        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch'])
+        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'lotAllocations.lot', 'sourceLots'])
             ->where('id', '!=', $movementId) // Exclude self
             ->where('user_id', $movement->user_id)
             ->where('movement_type', $movement->movement_type)
@@ -418,10 +470,9 @@ class InventoryMovementService
             ->where('created_at', '<=', $movement->created_at->addSeconds(5))
             ->where(function ($q) use ($movement) {
                 $q->where('reference_id', $movement->reference_id)
-                  ->where('reference_type', $movement->reference_type);
+                    ->where('reference_type', $movement->reference_type);
             })
             ->get()
             ->all();
     }
 }
-

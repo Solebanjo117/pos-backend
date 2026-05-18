@@ -72,7 +72,7 @@ class SalesReturn extends Model
 
     public function getFormattedTotalAttribute(): string
     {
-        return '$' . number_format($this->total_amount, 2);
+        return '$'.number_format($this->total_amount, 2);
     }
 
     // ==================== BUSINESS METHODS ====================
@@ -86,7 +86,7 @@ class SalesReturn extends Model
 
         $sequence = $lastReturn ? (int) substr($lastReturn->return_number, -4) + 1 : 1;
 
-        return 'DEV-' . $date . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
+        return 'DEV-'.$date.'-'.str_pad($sequence, 4, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -100,32 +100,22 @@ class SalesReturn extends Model
 
         // 1. Restore inventory for each returned item
         foreach ($this->items as $item) {
-            // Create inventory movement (in)
-            InventoryMovement::create([
-                'product_id'     => $item->product_id,
-                'variant_id'     => $item->variant_id,
-                'warehouse_id'   => $this->warehouse_id,
-                'movement_type'  => 'in',
-                'quantity'       => $item->quantity,
+            app(\App\Services\InventoryFifoService::class)->receiveStock([
+                'product_id' => $item->product_id,
+                'variant_id' => $item->variant_id,
+                'warehouse_id' => $this->warehouse_id,
+                'quantity' => $item->quantity,
+                'unit_cost_base' => (float) ($item->salesOrderItem?->unit_cost ?? 0),
+                'landed_unit_cost' => (float) ($item->salesOrderItem?->unit_cost ?? 0),
                 'reference_type' => 'sales_return',
-                'reference_id'   => $this->id,
-                'notes'          => "Devolución {$this->return_number} - Orden {$this->salesOrder->order_number}",
-                'user_id'        => auth()->id(),
-                'date'           => now(),
+                'reference_id' => $this->id,
+                'source_type' => 'sales_return',
+                'source_id' => $this->id,
+                'notes' => "Devolución {$this->return_number} - Orden {$this->salesOrder->order_number}",
+                'user_id' => auth()->id(),
+                'received_at' => now(),
             ]);
 
-            // Restore quantity_available
-            $query = ProductInventory::where('warehouse_id', $this->warehouse_id);
-            if ($item->variant_id) {
-                $query->where('variant_id', $item->variant_id);
-            } else {
-                $query->where('product_id', $item->product_id)->whereNull('variant_id');
-            }
-            $inventory = $query->first();
-            if ($inventory) {
-                $inventory->quantity_available += $item->quantity;
-                $inventory->save();
-            }
         }
 
         // 2. Process refund based on refund_method
@@ -140,16 +130,16 @@ class SalesReturn extends Model
                 $customer->save();
 
                 CustomerTransaction::create([
-                    'customer_id'      => $customer->id,
-                    'type'             => 'credit_note',
-                    'reference_type'   => 'sales_return',
-                    'reference_id'     => $this->id,
-                    'amount'           => (float) $this->total_amount,
-                    'balance_before'   => $balanceBefore,
-                    'balance_after'    => $customer->current_balance,
-                    'description'      => "Devolución {$this->return_number}",
+                    'customer_id' => $customer->id,
+                    'type' => 'credit_note',
+                    'reference_type' => 'sales_return',
+                    'reference_id' => $this->id,
+                    'amount' => (float) $this->total_amount,
+                    'balance_before' => $balanceBefore,
+                    'balance_after' => $customer->current_balance,
+                    'description' => "Devolución {$this->return_number}",
                     'transaction_date' => now(),
-                    'created_by'       => auth()->id(),
+                    'created_by' => auth()->id(),
                 ]);
             }
         } elseif (in_array($method, ['cash', 'card', 'transfer'])) {
@@ -157,11 +147,11 @@ class SalesReturn extends Model
             if (class_exists(\App\Models\SalesOrderPayment::class)) {
                 \App\Models\SalesOrderPayment::create([
                     'sales_order_id' => $this->sales_order_id,
-                    'amount'         => -1 * abs((float) $this->total_amount),
-                    'method'         => $method,
-                    'notes'          => "Reembolso por devolución {$this->return_number}" . ($this->refund_notes ? " - {$this->refund_notes}" : ''),
-                    'paid_at'        => now(),
-                    'created_by'     => auth()->id(),
+                    'amount' => -1 * abs((float) $this->total_amount),
+                    'method' => $method,
+                    'notes' => "Reembolso por devolución {$this->return_number}".($this->refund_notes ? " - {$this->refund_notes}" : ''),
+                    'paid_at' => now(),
+                    'created_by' => auth()->id(),
                 ]);
             }
 
@@ -174,16 +164,16 @@ class SalesReturn extends Model
                     $customer->save();
 
                     CustomerTransaction::create([
-                        'customer_id'      => $customer->id,
-                        'type'             => 'credit_note',
-                        'reference_type'   => 'sales_return',
-                        'reference_id'     => $this->id,
-                        'amount'           => (float) $this->total_amount,
-                        'balance_before'   => $balanceBefore,
-                        'balance_after'    => $customer->current_balance,
-                        'description'      => "Devolución {$this->return_number} (reembolso {$method})",
+                        'customer_id' => $customer->id,
+                        'type' => 'credit_note',
+                        'reference_type' => 'sales_return',
+                        'reference_id' => $this->id,
+                        'amount' => (float) $this->total_amount,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $customer->current_balance,
+                        'description' => "Devolución {$this->return_number} (reembolso {$method})",
                         'transaction_date' => now(),
-                        'created_by'       => auth()->id(),
+                        'created_by' => auth()->id(),
                     ]);
                 }
             }

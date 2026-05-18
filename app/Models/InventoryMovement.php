@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class InventoryMovement extends Model
 {
@@ -23,11 +24,13 @@ class InventoryMovement extends Model
         'notes',
         'user_id',
         'supplier_id',
+        'product_batch_id',
     ];
 
     protected $casts = [
         'quantity' => 'integer',
         'reference_id' => 'integer',
+        'product_batch_id' => 'integer',
     ];
 
     /**
@@ -105,5 +108,15 @@ class InventoryMovement extends Model
     public function productBatch(): BelongsTo
     {
         return $this->belongsTo(ProductBatch::class);
+    }
+
+    public function lotAllocations(): HasMany
+    {
+        return $this->hasMany(InventoryLotAllocation::class);
+    }
+
+    public function sourceLots(): HasMany
+    {
+        return $this->hasMany(InventoryLot::class, 'source_movement_id');
     }
 }
