@@ -5,9 +5,8 @@ use App\Models\VehicleEngine;
 use App\Models\VehicleMake;
 use App\Models\VehicleModel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Tests\TestCase;
 
-uses(TestCase::class, RefreshDatabase::class);
+uses(RefreshDatabase::class);
 
 beforeEach(function () {
     $admin = User::factory()->create([
@@ -20,7 +19,6 @@ beforeEach(function () {
 
 it('stores engine with multiple models and returns model_ids', function () {
     $makeA = VehicleMake::create(['name' => 'Marca Motor A']);
-    $makeB = VehicleMake::create(['name' => 'Marca Motor B']);
 
     $modelA = VehicleModel::create([
         'make_id' => $makeA->id,
@@ -30,7 +28,7 @@ it('stores engine with multiple models and returns model_ids', function () {
     ]);
 
     $modelB = VehicleModel::create([
-        'make_id' => $makeB->id,
+        'make_id' => $makeA->id,
         'name' => 'Modelo Motor B',
         'year_from' => 2018,
         'year_to' => 2025,
@@ -45,6 +43,7 @@ it('stores engine with multiple models and returns model_ids', function () {
 
     $response
         ->assertCreated()
+        ->assertJsonPath('data.make_id', $makeA->id)
         ->assertJsonPath('data.model_id', $modelA->id)
         ->assertJsonPath('data.model_ids.0', $modelA->id)
         ->assertJsonPath('data.model_ids.1', $modelB->id);
@@ -54,6 +53,7 @@ it('stores engine with multiple models and returns model_ids', function () {
     $this->assertDatabaseHas('vehicle_engines', [
         'id' => $engineId,
         'engine_code' => 'MM-EN-001',
+        'make_id' => $makeA->id,
         'model_id' => $modelA->id,
     ]);
 
@@ -96,6 +96,7 @@ it('updates engine model associations using model_ids sync', function () {
         'engine_code' => 'MM-EN-002',
         'displacement' => '1.8L',
         'fuel_type' => 'Gasoline',
+        'make_id' => $make->id,
         'model_id' => $model1->id,
     ]);
 
@@ -151,6 +152,7 @@ it('accepts legacy model_id payload and keeps pivot in sync', function () {
 
     $response
         ->assertCreated()
+        ->assertJsonPath('data.make_id', $make->id)
         ->assertJsonPath('data.model_id', $model->id)
         ->assertJsonPath('data.model_ids.0', $model->id);
 
@@ -160,6 +162,74 @@ it('accepts legacy model_id payload and keeps pivot in sync', function () {
         'engine_id' => $engineId,
         'model_id' => $model->id,
     ]);
+});
+
+it('stores engine with explicit vehicle make and no model association', function () {
+    $make = VehicleMake::create(['name' => 'Marca Motor Catalogo']);
+
+    $response = $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
+        'engine_code' => 'CAT-MAKE-001',
+        'displacement' => '1.6L',
+        'fuel_type' => 'Gasoline',
+    ]);
+
+    $response
+        ->assertCreated()
+        ->assertJsonPath('data.make_id', $make->id)
+        ->assertJsonPath('data.make.id', $make->id)
+        ->assertJsonPath('data.model_id', null);
+
+    $this->assertDatabaseHas('vehicle_engines', [
+        'make_id' => $make->id,
+        'engine_code' => 'CAT-MAKE-001',
+        'model_id' => null,
+    ]);
+});
+
+it('rejects model associations that do not belong to the selected make', function () {
+    $makeA = VehicleMake::create(['name' => 'Marca Motor Scope A']);
+    $makeB = VehicleMake::create(['name' => 'Marca Motor Scope B']);
+
+    $modelB = VehicleModel::create([
+        'make_id' => $makeB->id,
+        'name' => 'Modelo Scope B',
+        'year_from' => 2020,
+        'year_to' => 2025,
+    ]);
+
+    $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $makeA->id,
+        'engine_code' => 'MAKE-SCOPE-001',
+        'fuel_type' => 'Gasoline',
+        'model_ids' => [$modelB->id],
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['model_ids']);
+});
+
+it('filters engines by explicit vehicle make', function () {
+    $makeA = VehicleMake::create(['name' => 'Marca Filtro Motor A']);
+    $makeB = VehicleMake::create(['name' => 'Marca Filtro Motor B']);
+
+    VehicleEngine::create([
+        'make_id' => $makeA->id,
+        'engine_code' => 'FILTER-MAKE-A',
+        'fuel_type' => 'Gasoline',
+    ]);
+
+    VehicleEngine::create([
+        'make_id' => $makeB->id,
+        'engine_code' => 'FILTER-MAKE-B',
+        'fuel_type' => 'Gasoline',
+    ]);
+
+    $response = $this->getJson("/api/v1/vehicle-engines?make_id={$makeA->id}");
+
+    $response->assertOk();
+    $codes = collect($response->json('data'))->pluck('engine_code')->all();
+
+    expect($codes)->toContain('FILTER-MAKE-A')
+        ->and($codes)->not->toContain('FILTER-MAKE-B');
 });
 
 it('returns multi-associated engines from byModel endpoint', function () {
@@ -183,6 +253,7 @@ it('returns multi-associated engines from byModel endpoint', function () {
         'engine_code' => 'MM-EN-004',
         'displacement' => '2.5L',
         'fuel_type' => 'Gasoline',
+        'make_id' => $make->id,
         'model_id' => $modelA->id,
     ]);
 
@@ -220,7 +291,7 @@ it('rejects duplicate engine code for the same model', function () {
         ->assertJsonValidationErrors(['engine_code']);
 });
 
-it('allows duplicate engine code when models do not overlap', function () {
+it('rejects duplicate engine code for the same make even when models do not overlap', function () {
     $make = VehicleMake::create(['name' => 'Marca Duplicado Distinto Modelo']);
 
     $modelA = VehicleModel::create([
@@ -247,17 +318,8 @@ it('allows duplicate engine code when models do not overlap', function () {
         'engine_code' => 'DUP-MODEL-02',
         'model_ids' => [$modelB->id],
         'fuel_type' => 'Diesel',
-    ])->assertCreated();
-
-    $this->assertDatabaseHas('vehicle_engines', [
-        'engine_code' => 'DUP-MODEL-02',
-        'model_id' => $modelA->id,
-    ]);
-
-    $this->assertDatabaseHas('vehicle_engines', [
-        'engine_code' => 'DUP-MODEL-02',
-        'model_id' => $modelB->id,
-    ]);
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['engine_code']);
 });
 
 it('rejects duplicate engine code when model associations overlap', function () {
@@ -298,29 +360,40 @@ it('rejects duplicate engine code when model associations overlap', function () 
         ->assertJsonValidationErrors(['engine_code']);
 });
 
-it('rejects duplicate independent engine code', function () {
+it('rejects duplicate engine code for the same make without models', function () {
+    $make = VehicleMake::create(['name' => 'Marca Motor Independiente']);
+
     $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
         'engine_code' => 'INDEP-EN-001',
         'fuel_type' => 'Electric',
     ])->assertCreated();
 
     $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
         'engine_code' => ' inDep-en-001 ',
         'fuel_type' => 'Electric',
     ])->assertStatus(422)
         ->assertJsonValidationErrors(['engine_code']);
 });
 
-it('rejects engine code with internal spaces', function () {
-    $this->postJson('/api/v1/vehicle-engines', [
-        'engine_code' => 'ENG 001',
+it('accepts and collapses engine code with internal whitespace', function () {
+    $make = VehicleMake::create(['name' => 'Marca Espacios Motor']);
+
+    $response = $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
+        'engine_code' => "ENG   001\tA",
         'fuel_type' => 'Gasoline',
-    ])->assertStatus(422)
-        ->assertJsonValidationErrors(['engine_code']);
+    ])->assertCreated();
+
+    expect($response->json('data.engine_code'))->toBe('ENG 001 A');
 });
 
 it('rejects fuel type outside the closed catalog', function () {
+    $make = VehicleMake::create(['name' => 'Marca Fuel Cerrado']);
+
     $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
         'engine_code' => 'FUEL-OUT-001',
         'fuel_type' => 'Gasolina',
     ])->assertStatus(422)
@@ -352,19 +425,25 @@ it('returns 403 when a non admin or manager tries to create an engine', function
 });
 
 it('normalizes engine_code by trimming surrounding whitespace on store', function () {
+    $make = VehicleMake::create(['name' => 'Marca Trim Motor']);
+
     $response = $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
         'engine_code' => '  2ZR-FE  ',
-        'fuel_type'   => 'Gasoline',
+        'fuel_type' => 'Gasoline',
     ])->assertCreated();
 
     expect($response->json('data.engine_code'))->toBe('2ZR-FE');
 });
 
 it('rejects fuel type with incorrect casing that does not match any catalog entry after normalization', function () {
+    $make = VehicleMake::create(['name' => 'Marca Fuel Casing']);
+
     // 'Gasolina' is not in the closed catalog (Gasoline/Diesel/Hybrid/Electric)
     $this->postJson('/api/v1/vehicle-engines', [
+        'make_id' => $make->id,
         'engine_code' => 'CASING-FUEL-01',
-        'fuel_type'   => 'Gasolina',
+        'fuel_type' => 'Gasolina',
     ])->assertStatus(422)
         ->assertJsonValidationErrors(['fuel_type']);
 });
@@ -373,25 +452,26 @@ it('rejects duplicate engine code when existing engine links to model only via p
     $make = VehicleMake::create(['name' => 'Marca Pivot Only']);
 
     $model = VehicleModel::create([
-        'make_id'   => $make->id,
-        'name'      => 'Modelo Pivot Only',
+        'make_id' => $make->id,
+        'name' => 'Modelo Pivot Only',
         'year_from' => 2015,
-        'year_to'   => 2022,
+        'year_to' => 2022,
     ]);
 
     // Create engine with no legacy model_id, associate only via pivot
     $engine = VehicleEngine::create([
         'engine_code' => 'PIVOT-ONLY-01',
-        'fuel_type'   => 'Gasoline',
-        'model_id'    => null,
+        'fuel_type' => 'Gasoline',
+        'make_id' => $make->id,
+        'model_id' => null,
     ]);
     $engine->models()->sync([$model->id]);
 
     // Attempt to create another engine with the same code for the same model via model_ids
     $this->postJson('/api/v1/vehicle-engines', [
         'engine_code' => 'PIVOT-ONLY-01',
-        'fuel_type'   => 'Gasoline',
-        'model_ids'   => [$model->id],
+        'fuel_type' => 'Gasoline',
+        'model_ids' => [$model->id],
     ])->assertStatus(422)
         ->assertJsonValidationErrors(['engine_code']);
 });
@@ -424,6 +504,7 @@ it('ignores legacy singular model_id updates unless model_ids is explicitly sent
         'engine_code' => 'LEG-UPD-001',
         'displacement' => '2.0L',
         'fuel_type' => 'Gasoline',
+        'make_id' => $make->id,
         'model_id' => $modelA->id,
     ]);
 

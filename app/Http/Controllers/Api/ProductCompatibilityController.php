@@ -89,7 +89,7 @@ class ProductCompatibilityController extends Controller
             'engine_id' => $validated['engine_id'] ?? null,
             'chassis_id' => $validated['chassis_id'] ?? null,
             'notes' => $validated['notes'] ?? null,
-            'all_engines' => $scopeType === 'universal' ? (bool) ($validated['all_engines'] ?? false) : false,
+            'all_engines' => in_array($scopeType, ['universal', 'model'], true) ? (bool) ($validated['all_engines'] ?? false) : false,
             'all_chassis' => in_array($scopeType, ['universal', 'model'], true) ? (bool) ($validated['all_chassis'] ?? false) : false,
         ]);
 
@@ -271,9 +271,8 @@ class ProductCompatibilityController extends Controller
     private function applyHierarchicalMatch($query, array $context): void
     {
         $query->where(function ($nested) use ($context): void {
-            $nested->where('scope_type', 'universal')
-                ->orWhere('all_engines', true)
-                ->orWhere('all_chassis', true);
+            // Universal records always match.
+            $nested->where('scope_type', 'universal');
 
             if ($context['make_id']) {
                 $nested->orWhere(function ($scope) use ($context): void {
@@ -282,6 +281,7 @@ class ProductCompatibilityController extends Controller
             }
 
             if ($context['model_id']) {
+                // Model-scoped all_engines / all_chassis only match when model_id coincides.
                 $nested->orWhere(function ($scope) use ($context): void {
                     $scope->where('scope_type', 'model')->where('model_id', $context['model_id']);
                 })->orWhereHas('engine', function ($engine) use ($context): void {
@@ -325,7 +325,7 @@ CASE
     WHEN products.is_universal = true OR EXISTS (
         SELECT 1 FROM product_vehicle_compatibility pvc
         WHERE pvc.product_id = products.id
-        AND (pvc.scope_type = 'universal' OR pvc.all_engines = true OR pvc.all_chassis = true)
+        AND pvc.scope_type = 'universal'
     ) THEN 4
     ELSE 9
 END AS fitment_rank

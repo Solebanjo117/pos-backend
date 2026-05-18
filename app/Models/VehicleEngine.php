@@ -14,6 +14,7 @@ class VehicleEngine extends Model
 
     protected $fillable = [
         'model_id',
+        'make_id',
         'engine_code',
         'displacement',
         'fuel_type',
@@ -22,7 +23,16 @@ class VehicleEngine extends Model
 
     protected $casts = [
         'model_id' => 'integer',
+        'make_id' => 'integer',
     ];
+
+    /**
+     * Get the make that owns the engine catalog entry.
+     */
+    public function make(): BelongsTo
+    {
+        return $this->belongsTo(VehicleMake::class, 'make_id');
+    }
 
     /**
      * Get the model that owns the engine.
@@ -77,7 +87,7 @@ class VehicleEngine extends Model
             $this->engine_code,
             $this->fuel_type,
         ]);
-        
+
         return implode(' ', $parts);
     }
 }

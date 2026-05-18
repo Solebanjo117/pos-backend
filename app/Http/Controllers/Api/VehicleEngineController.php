@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\VehicleEngine;
+use App\Models\VehicleModel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -22,7 +23,7 @@ class VehicleEngineController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = VehicleEngine::query()->with(['model.make', 'models.make']);
+        $query = VehicleEngine::query()->with(['make', 'model.make', 'models.make']);
 
         // Filter by model (legacy model_id or pivot models)
         if ($request->has('model_id')) {
@@ -41,11 +42,12 @@ class VehicleEngineController extends Controller
             $makeId = (int) $request->input('make_id');
 
             $query->where(function ($q) use ($makeId) {
-                $q->whereHas('model', function ($legacyModelQuery) use ($makeId) {
-                    $legacyModelQuery->where('make_id', $makeId);
-                })->orWhereHas('models', function ($modelsQuery) use ($makeId) {
-                    $modelsQuery->where('make_id', $makeId);
-                });
+                $q->where('make_id', $makeId)
+                    ->orWhereHas('model', function ($legacyModelQuery) use ($makeId) {
+                        $legacyModelQuery->where('make_id', $makeId);
+                    })->orWhereHas('models', function ($modelsQuery) use ($makeId) {
+                        $modelsQuery->where('make_id', $makeId);
+                    });
             });
         }
 
@@ -84,6 +86,7 @@ class VehicleEngineController extends Controller
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
+            'make_id' => 'nullable|exists:vehicle_makes,id',
             'model_id' => 'nullable|exists:vehicle_models,id',
             'model_ids' => 'nullable|array',
             'model_ids.*' => 'integer|exists:vehicle_models,id',
@@ -94,23 +97,25 @@ class VehicleEngineController extends Controller
         ]);
 
         $modelIds = $this->resolveModelIds($validated, false);
+        $validated['make_id'] = $this->resolveMakeId($validated, $modelIds);
+        $this->assertMakeIsPresent($validated['make_id']);
+        $this->assertModelsBelongToMake($modelIds, $validated['make_id']);
         $validated['engine_code'] = $this->normalizeEngineCode($validated['engine_code'] ?? null);
         $this->assertEngineCodeNotBlank($validated['engine_code']);
-        $this->assertEngineCodeHasNoWhitespace($validated['engine_code']);
 
         if (array_key_exists('fuel_type', $validated)) {
             $validated['fuel_type'] = $this->normalizeFuelType($validated['fuel_type'] ?? null);
             $this->assertFuelTypeIsAllowed($validated['fuel_type']);
         }
 
-        $this->ensureEngineCodeIsUniquePerModel($validated['engine_code'], $modelIds);
+        $this->ensureEngineCodeIsUniqueForMake($validated['engine_code'], $validated['make_id']);
 
         $validated['model_id'] = $modelIds[0] ?? null;
         unset($validated['model_ids']);
 
         $engine = VehicleEngine::create($validated);
 
-        if (!empty($modelIds)) {
+        if (! empty($modelIds)) {
             $engine->models()->sync($modelIds);
         }
 
@@ -140,6 +145,7 @@ class VehicleEngineController extends Controller
         $engine = VehicleEngine::findOrFail($id);
 
         $validated = $request->validate([
+            'make_id' => 'nullable|exists:vehicle_makes,id',
             'model_id' => 'nullable|exists:vehicle_models,id',
             'model_ids' => 'nullable|array',
             'model_ids.*' => 'integer|exists:vehicle_models,id',
@@ -151,11 +157,13 @@ class VehicleEngineController extends Controller
 
         $modelIds = $this->resolveModelIdsForUpdate($validated);
         $targetModelIds = $modelIds ?? $this->extractModelIdsFromEngine($engine);
+        $targetMakeId = $this->resolveMakeIdForUpdate($validated, $targetModelIds, $engine);
+        $this->assertMakeIsPresent($targetMakeId);
+        $this->assertModelsBelongToMake($targetModelIds, $targetMakeId);
 
         if (array_key_exists('engine_code', $validated)) {
             $validated['engine_code'] = $this->normalizeEngineCode($validated['engine_code'] ?? null);
             $this->assertEngineCodeNotBlank($validated['engine_code']);
-            $this->assertEngineCodeHasNoWhitespace($validated['engine_code']);
         }
 
         if (array_key_exists('fuel_type', $validated)) {
@@ -167,7 +175,9 @@ class VehicleEngineController extends Controller
             ? $validated['engine_code']
             : $this->normalizeEngineCode($engine->engine_code);
 
-        $this->ensureEngineCodeIsUniquePerModel($targetEngineCode, $targetModelIds, (int) $engine->id);
+        $this->ensureEngineCodeIsUniqueForMake($targetEngineCode, $targetMakeId, (int) $engine->id);
+
+        $validated['make_id'] = $targetMakeId;
 
         if ($modelIds !== null) {
             $validated['model_id'] = $modelIds[0] ?? null;
@@ -217,7 +227,7 @@ class VehicleEngineController extends Controller
     {
         $id = (int) $modelId;
 
-        $engines = VehicleEngine::with(['model.make', 'models.make'])
+        $engines = VehicleEngine::with(['make', 'model.make', 'models.make'])
             ->where(function ($query) use ($id) {
                 $query->where('model_id', $id)
                     ->orWhereHas('models', function ($modelsQuery) use ($id) {
@@ -241,7 +251,7 @@ class VehicleEngineController extends Controller
         $hasModelIds = array_key_exists('model_ids', $validated);
         $hasLegacyModelId = array_key_exists('model_id', $validated);
 
-        if (!$hasModelIds && !$hasLegacyModelId) {
+        if (! $hasModelIds && ! $hasLegacyModelId) {
             return $allowNoChange ? null : [];
         }
 
@@ -253,11 +263,11 @@ class VehicleEngineController extends Controller
                 ->values()
                 ->all();
 
-            if (!empty($modelIds)) {
+            if (! empty($modelIds)) {
                 return $modelIds;
             }
 
-            if ($fallbackToLegacyWhenModelIdsEmpty && $hasLegacyModelId && !empty($validated['model_id'])) {
+            if ($fallbackToLegacyWhenModelIdsEmpty && $hasLegacyModelId && ! empty($validated['model_id'])) {
                 return [(int) $validated['model_id']];
             }
 
@@ -266,7 +276,7 @@ class VehicleEngineController extends Controller
 
         $legacyModelId = $validated['model_id'] ?? null;
 
-        return !empty($legacyModelId) ? [(int) $legacyModelId] : [];
+        return ! empty($legacyModelId) ? [(int) $legacyModelId] : [];
     }
 
     /**
@@ -279,16 +289,84 @@ class VehicleEngineController extends Controller
      */
     private function resolveModelIdsForUpdate(array $validated): ?array
     {
-        if (!array_key_exists('model_ids', $validated)) {
+        if (! array_key_exists('model_ids', $validated)) {
             return null;
         }
 
         return $this->resolveModelIds($validated, true, false);
     }
 
+    /**
+     * @param  array<int>  $modelIds
+     */
+    private function resolveMakeId(array $validated, array $modelIds): ?int
+    {
+        if (! empty($validated['make_id'])) {
+            return (int) $validated['make_id'];
+        }
+
+        $firstModelId = $modelIds[0] ?? null;
+        if (! $firstModelId) {
+            return null;
+        }
+
+        return VehicleModel::query()
+            ->where('id', $firstModelId)
+            ->value('make_id');
+    }
+
+    /**
+     * @param  array<int>  $targetModelIds
+     */
+    private function resolveMakeIdForUpdate(array $validated, array $targetModelIds, VehicleEngine $engine): ?int
+    {
+        if (array_key_exists('make_id', $validated)) {
+            return $validated['make_id'] ? (int) $validated['make_id'] : null;
+        }
+
+        if ($engine->make_id !== null) {
+            return (int) $engine->make_id;
+        }
+
+        return $this->resolveMakeId($validated, $targetModelIds);
+    }
+
+    private function assertMakeIsPresent(?int $makeId): void
+    {
+        if ($makeId === null) {
+            throw ValidationException::withMessages([
+                'make_id' => ['Selecciona la marca de vehiculo del motor.'],
+            ]);
+        }
+    }
+
+    /**
+     * @param  array<int>  $modelIds
+     */
+    private function assertModelsBelongToMake(array $modelIds, int $makeId): void
+    {
+        if ($modelIds === []) {
+            return;
+        }
+
+        $invalidModelExists = VehicleModel::query()
+            ->whereIn('id', $modelIds)
+            ->where('make_id', '!=', $makeId)
+            ->exists();
+
+        if ($invalidModelExists) {
+            throw ValidationException::withMessages([
+                'model_ids' => ['Todos los modelos asociados deben pertenecer a la marca seleccionada.'],
+            ]);
+        }
+    }
+
     private function normalizeEngineCode(?string $engineCode): string
     {
-        return mb_strtoupper(trim((string) $engineCode));
+        $code = mb_strtoupper(trim((string) $engineCode));
+
+        // Collapse multiple whitespace characters (spaces, tabs) into a single space.
+        return (string) preg_replace('/\s+/u', ' ', $code);
     }
 
     private function assertEngineCodeNotBlank(string $engineCode): void
@@ -300,14 +378,8 @@ class VehicleEngineController extends Controller
         }
     }
 
-    private function assertEngineCodeHasNoWhitespace(string $engineCode): void
-    {
-        if (preg_match('/\s/u', $engineCode) === 1) {
-            throw ValidationException::withMessages([
-                'engine_code' => ['El codigo del motor no puede contener espacios.'],
-            ]);
-        }
-    }
+    // Internal spaces are now allowed in engine codes (e.g. GAMMA G4 FA).
+    // normalizeEngineCode() already handles leading/trailing whitespace via trim().
 
     private function normalizeFuelType(?string $fuelType): ?string
     {
@@ -332,7 +404,7 @@ class VehicleEngineController extends Controller
             return;
         }
 
-        if (!in_array($fuelType, self::ALLOWED_FUEL_TYPES, true)) {
+        if (! in_array($fuelType, self::ALLOWED_FUEL_TYPES, true)) {
             throw ValidationException::withMessages([
                 'fuel_type' => ['Tipo de combustible invalido. Valores permitidos: Gasoline, Diesel, Hybrid, Electric.'],
             ]);
@@ -364,47 +436,34 @@ class VehicleEngineController extends Controller
     /**
      * @param  array<int>  $modelIds
      */
-    private function ensureEngineCodeIsUniquePerModel(string $engineCode, array $modelIds, ?int $ignoreEngineId = null): void
+    private function ensureEngineCodeIsUniqueForMake(string $engineCode, int $makeId, ?int $ignoreEngineId = null): void
     {
-        $normalizedModelIds = collect($modelIds)
-            ->map(fn ($id) => (int) $id)
-            ->filter(fn ($id) => $id > 0)
-            ->unique()
-            ->values()
-            ->all();
-
         $query = VehicleEngine::query()
-            ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower(trim($engineCode))]);
+            ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower(trim($engineCode))])
+            ->where(function ($scope) use ($makeId): void {
+                $scope->where('make_id', $makeId)
+                    ->orWhereHas('model', function ($modelQuery) use ($makeId): void {
+                        $modelQuery->where('make_id', $makeId);
+                    })
+                    ->orWhereHas('models', function ($modelsQuery) use ($makeId): void {
+                        $modelsQuery->where('make_id', $makeId);
+                    });
+            });
 
         if ($ignoreEngineId !== null) {
             $query->where('id', '!=', $ignoreEngineId);
         }
 
-        if (empty($normalizedModelIds)) {
-            // Explicit independent-engine strategy: only collide with other independent engines.
-            $query->where(function ($scopedQuery) {
-                $scopedQuery->whereNull('model_id')
-                    ->whereDoesntHave('models');
-            });
-        } else {
-            $query->where(function ($scopedQuery) use ($normalizedModelIds) {
-                $scopedQuery->whereIn('model_id', $normalizedModelIds)
-                    ->orWhereHas('models', function ($modelsQuery) use ($normalizedModelIds) {
-                        $modelsQuery->whereIn('vehicle_models.id', $normalizedModelIds);
-                    });
-            });
-        }
-
         if ($query->exists()) {
             throw ValidationException::withMessages([
-                'engine_code' => ['Ya existe un motor con este codigo para el/los modelo(s) seleccionado(s).'],
+                'engine_code' => ['Ya existe un motor con este codigo para la marca seleccionada.'],
             ]);
         }
     }
 
     private function serializeEngine(VehicleEngine $engine): VehicleEngine
     {
-        $engine->loadMissing(['model.make', 'models.make']);
+        $engine->loadMissing(['make', 'model.make', 'models.make']);
 
         $modelIds = $engine->models
             ->pluck('id')
@@ -422,8 +481,19 @@ class VehicleEngineController extends Controller
 
         $engine->setAttribute('model_ids', $modelIds);
 
-        if ($engine->model_id === null && !empty($modelIds)) {
+        if ($engine->model_id === null && ! empty($modelIds)) {
             $engine->setAttribute('model_id', $modelIds[0]);
+        }
+
+        if ($engine->make_id === null) {
+            $derivedMake = $engine->make
+                ?? $engine->model?->make
+                ?? $engine->models->first()?->make;
+
+            if ($derivedMake) {
+                $engine->setAttribute('make_id', $derivedMake->id);
+                $engine->setRelation('make', $derivedMake);
+            }
         }
 
         return $engine;

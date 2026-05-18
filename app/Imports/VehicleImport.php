@@ -94,9 +94,6 @@ class VehicleImport extends BaseImport
         }
 
         $engineCode = $this->nullIfEmpty($row['engine'] ?? null);
-        if ($engineCode !== null && preg_match('/\s/u', $engineCode) === 1) {
-            $errors[] = 'El codigo del motor no puede contener espacios.';
-        }
 
         $vinValues = $this->splitDelimitedValues($row['vin'] ?? null);
         if ($vinValues !== [] && $engineCode === null) {
@@ -170,21 +167,20 @@ class VehicleImport extends BaseImport
             $model->chassis()->syncWithoutDetaching([$chassis->id]);
         }
 
-        $engineCode = $this->nullIfEmpty($row['engine'] ?? null);
+        $engineCode = $this->normalizeEngineCode($row['engine'] ?? null);
         $engine = null;
         if ($engineCode) {
-            $normalizedEngineCode = strtoupper(trim($engineCode));
             $engine = VehicleEngine::query()
                 ->where(function ($query) use ($model) {
                     $query->where('model_id', $model->id)
                         ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('vehicle_models.id', $model->id));
                 })
-                ->whereRaw('LOWER(engine_code) = ?', [mb_strtolower($normalizedEngineCode)])
+                ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower($engineCode)])
                 ->first();
 
             $engineData = [
                 'model_id' => $model->id,
-                'engine_code' => $normalizedEngineCode,
+                'engine_code' => $engineCode,
                 'displacement' => $this->nullIfEmpty($row['displacement'] ?? null),
                 'fuel_type' => $this->normalizeFuelType($row['fuel_type'] ?? null),
                 'aspiration' => $this->nullIfEmpty($row['aspiration'] ?? null),
@@ -244,6 +240,16 @@ class VehicleImport extends BaseImport
         }
 
         return [null, null];
+    }
+
+    private function normalizeEngineCode(mixed $engineCode): ?string
+    {
+        $raw = $this->nullIfEmpty($engineCode);
+        if ($raw === null) {
+            return null;
+        }
+
+        return (string) preg_replace('/\s+/u', ' ', mb_strtoupper(trim($raw)));
     }
 
     private function normalizeFuelType(mixed $fuelType): ?string
