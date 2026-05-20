@@ -1,12 +1,14 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductVariant;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Schema;
 
 uses(RefreshDatabase::class);
 
@@ -50,6 +52,59 @@ it('persists product-level attributes when creating a product without default va
         'name' => 'Amperaje',
         'value' => '100',
         'unit' => 'A',
+    ]);
+});
+
+it('persists product attributes with category source metadata', function () {
+    expect(Schema::hasColumns('product_attributes', ['source', 'source_category_id']))->toBeTrue();
+
+    $category = Category::create([
+        'name' => 'Categoria Atributos Fuente',
+        'slug' => 'categoria-atributos-fuente-'.uniqid(),
+    ]);
+
+    $response = $this->postJson('/api/v1/products', [
+        'name' => 'Producto con atributo heredado',
+        'status' => 'active',
+        'category_id' => $category->id,
+        'attributes' => [
+            [
+                'name' => 'Largo',
+                'value' => '10',
+                'unit' => 'mm',
+                'source' => 'category',
+                'source_category_id' => $category->id,
+            ],
+            [
+                'name' => 'Nota interna',
+                'value' => 'Uso taller',
+                'source' => 'custom',
+                'source_category_id' => $category->id,
+            ],
+        ],
+    ]);
+
+    $response->assertStatus(201);
+
+    $productId = $response->json('data.id');
+
+    $this->assertDatabaseHas('product_attributes', [
+        'product_id' => $productId,
+        'variant_id' => null,
+        'name' => 'Largo',
+        'value' => '10',
+        'unit' => 'mm',
+        'source' => 'category',
+        'source_category_id' => $category->id,
+    ]);
+
+    $this->assertDatabaseHas('product_attributes', [
+        'product_id' => $productId,
+        'variant_id' => null,
+        'name' => 'Nota interna',
+        'value' => 'Uso taller',
+        'source' => 'custom',
+        'source_category_id' => null,
     ]);
 });
 

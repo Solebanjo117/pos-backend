@@ -9,6 +9,12 @@ class UpdateProductRequest extends FormRequest
     protected function prepareForValidation(): void
     {
         $pricing = $this->input('pricing');
+        $compatibility = $this->input('vehicle_compatibility');
+
+        if (is_array($compatibility)) {
+            $compatibility = $this->normalizeVehicleCompatibility($compatibility);
+            $this->merge(['vehicle_compatibility' => $compatibility]);
+        }
 
         if (! is_array($pricing)) {
             return;
@@ -47,6 +53,18 @@ class UpdateProductRequest extends FormRequest
         $pricing = $this->normalizePricingCostBreakdown($pricing);
 
         $this->merge(['pricing' => $pricing]);
+    }
+
+    private function normalizeVehicleCompatibility(array $compatibility): array
+    {
+        if (
+            array_key_exists('model_id', $compatibility)
+            && ($compatibility['model_id'] === null || $compatibility['model_id'] === '')
+        ) {
+            unset($compatibility['model_id']);
+        }
+
+        return $compatibility;
     }
 
     private function normalizePercentValue($value): ?int

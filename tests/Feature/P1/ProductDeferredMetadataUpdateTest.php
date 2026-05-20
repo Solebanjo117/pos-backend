@@ -229,6 +229,36 @@ it('does not delete omitted deferred metadata blocks on product update', functio
     ]);
 });
 
+it('accepts product update compatibility payload without a scoped model id', function () {
+    $product = Product::create([
+        'sku_base' => 'DEFERRED-NO-MODEL-001',
+        'name' => 'Producto sin modelo compatibilidad',
+        'status' => 'active',
+    ]);
+
+    $response = $this->putJson("/api/v1/products/{$product->id}", [
+        'name' => 'Producto sin modelo compatibilidad editado',
+        'vehicle_compatibility' => [
+            'engines' => [],
+            'chassis' => [],
+            'all_engines' => false,
+            'all_chassis' => false,
+            'model_id' => null,
+        ],
+    ]);
+
+    $response->assertStatus(200);
+
+    $this->assertDatabaseHas('products', [
+        'id' => $product->id,
+        'name' => 'Producto sin modelo compatibilidad editado',
+    ]);
+
+    $this->assertDatabaseMissing('product_vehicle_compatibility', [
+        'product_id' => $product->id,
+    ]);
+});
+
 it('previews generated product name without persisting product metadata', function () {
     $mainCategory = Category::create([
         'name' => 'Motor',
