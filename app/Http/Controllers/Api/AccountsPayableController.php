@@ -22,14 +22,17 @@ class AccountsPayableController extends Controller
     public function index(Request $request): JsonResponse
     {
         return response()->json($this->accountLedgerService->payablesSummary(
-            $request->only(['search'])
+            $request->only(['search', 'date_from', 'date_to', 'warehouse_id'])
         ));
     }
 
-    public function statement(Supplier $supplier): JsonResponse
+    public function statement(Request $request, Supplier $supplier): JsonResponse
     {
         return response()->json([
-            'data' => $this->accountLedgerService->supplierStatement($supplier),
+            'data' => $this->accountLedgerService->supplierStatement(
+                $supplier,
+                $request->only(['date_from', 'date_to', 'warehouse_id'])
+            ),
         ]);
     }
 

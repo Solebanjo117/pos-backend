@@ -272,12 +272,20 @@ class PosSessionController extends Controller
                 ])->values(),
             ]);
 
+        $operationalExpenses = \App\Models\OperationalExpense::query()
+            ->where('pos_session_id', $posSession->id)
+            ->with(['warehouse:id,name', 'creator:id,name', 'cashMovement:id,pos_session_id,amount'])
+            ->orderBy('expense_date', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
         return response()->json([
             'data' => $posSession,
             'sales_orders' => $salesOrders,
             'cash_movements' => $posSession->cashMovements,
             'purchase_payments' => $purchasePayments,
             'account_payments' => $accountPayments,
+            'operational_expenses' => $operationalExpenses,
         ]);
     }
 }

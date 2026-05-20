@@ -7,6 +7,8 @@ use App\Models\InventoryMovement;
 use App\Models\OperationalExpense;
 use App\Models\Product;
 use App\Models\ProductInventory;
+use App\Models\PurchaseOrder;
+use App\Models\SalesOrder;
 use Illuminate\Support\Collection;
 
 class ReportService
@@ -20,6 +22,7 @@ class ReportService
         $query = ProductInventory::with([
             'product.defaultVariant.brand',
             'product.defaultVariant.pricing',
+            'variant.brand',
             'warehouse',
         ])->select('product_inventory.*');
 
@@ -60,13 +63,22 @@ class ReportService
 
         // Format products
         $products = $inventory->map(function ($item) {
+            $variant = $item->variant;
+            $defaultVariant = $variant ?: $item->product->defaultVariant;
             $stockValue = $this->fifoStockValue($item);
+            $currentCost = app(InventoryFifoService::class)->currentFifoCost(
+                (int) $item->product_id,
+                $item->variant_id ? (int) $item->variant_id : null,
+                (int) $item->warehouse_id
+            );
 
             return [
                 'id' => $item->product_id,
                 'sku' => $item->product->sku_base ?? '',
                 'name' => $item->product->name,
                 'brand' => $defaultVariant?->brand?->name ?? 'Sin Marca',
+                'variant_id' => $item->variant_id,
+                'variant_sku' => $variant?->sku,
                 'warehouse_id' => $item->warehouse_id,
                 'warehouse' => $item->warehouse?->name ?? '',
                 'current_stock' => $item->quantity_available,
@@ -74,11 +86,8 @@ class ReportService
                 'target_level' => $item->reorder_quantity ?? 0,
                 'status' => $this->getStockStatus($item),
                 'stock_value' => $stockValue,
-                'fifo_cost_current' => app(InventoryFifoService::class)->currentFifoCost(
-                    (int) $item->product_id,
-                    $item->variant_id ? (int) $item->variant_id : null,
-                    (int) $item->warehouse_id
-                ),
+                'current_cost' => $currentCost,
+                'fifo_cost_current' => $currentCost,
             ];
         });
 
@@ -131,6 +140,16 @@ class ReportService
 
         // Format movements
         $formattedMovements = $movements->take(100)->map(function ($movement) {
+            $lotTotalCost = round((float) $movement->lotAllocations->sum('total_cost'), 2);
+            $lotAllocations = $movement->lotAllocations->map(fn ($allocation) => [
+                'lot_id' => $allocation->inventory_lot_id,
+                'quantity' => (int) $allocation->quantity,
+                'unit_cost' => (float) $allocation->unit_cost,
+                'total_cost' => (float) $allocation->total_cost,
+                'source_type' => $allocation->lot?->source_type,
+                'source_id' => $allocation->lot?->source_id,
+            ])->values()->all();
+
             return [
                 'id' => $movement->id,
                 'date' => $movement->created_at->format('Y-m-d H:i:s'),
@@ -146,15 +165,10 @@ class ReportService
                 'user' => $movement->user?->name,
                 'variant_id' => $movement->variant_id,
                 'variant_sku' => $movement->variant?->sku,
-                'fifo_total_cost' => round((float) $movement->lotAllocations->sum('total_cost'), 2),
-                'fifo_allocations' => $movement->lotAllocations->map(fn ($allocation) => [
-                    'lot_id' => $allocation->inventory_lot_id,
-                    'quantity' => (int) $allocation->quantity,
-                    'unit_cost' => (float) $allocation->unit_cost,
-                    'total_cost' => (float) $allocation->total_cost,
-                    'source_type' => $allocation->lot?->source_type,
-                    'source_id' => $allocation->lot?->source_id,
-                ])->values()->all(),
+                'lot_total_cost' => $lotTotalCost,
+                'fifo_total_cost' => $lotTotalCost,
+                'lot_allocations' => $lotAllocations,
+                'fifo_allocations' => $lotAllocations,
             ];
         });
 
@@ -442,6 +456,7 @@ class ReportService
 
         $expenses = $this->financialOperationalExpenses($filters);
         $totalOperationalExpenses = (float) $expenses['total'];
+        $creditBalances = $this->financialCreditBalances($filters);
 
         foreach ($expenses['timeline'] as $expenseDay) {
             $date = $expenseDay['date'];
@@ -487,6 +502,70 @@ class ReportService
                 'total' => round($totalOperationalExpenses, 2),
                 'by_category' => $expenses['by_category'],
                 'timeline' => $expenses['timeline'],
+            ],
+            'credit_balances' => $creditBalances,
+        ];
+    }
+
+    /**
+     * @return array<string, array<string, float|int>>
+     */
+    private function financialCreditBalances(array $filters): array
+    {
+        $warehouseId = $filters['warehouse_id'] ?? null;
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+
+        $receivableOrders = SalesOrder::query()
+            ->with(['payments', 'returns'])
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->whereNotIn('status', ['cancelled'])
+            ->when($dateFrom, function ($query) use ($dateFrom): void {
+                $query->whereDate('date', '>=', $dateFrom);
+            })
+            ->when($dateTo, function ($query) use ($dateTo): void {
+                $query->whereDate('date', '<=', $dateTo);
+            })
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->whereHas('items', function ($query) use ($warehouseId): void {
+                    $query->where('warehouse_id', $warehouseId);
+                });
+            })
+            ->get()
+            ->filter(fn (SalesOrder $order): bool => (float) $order->amount_due > 0)
+            ->values();
+
+        $payableOrders = PurchaseOrder::query()
+            ->with('payments')
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->where('status', '!=', 'cancelled')
+            ->when($dateFrom, function ($query) use ($dateFrom): void {
+                $query->whereDate('order_date', '>=', $dateFrom);
+            })
+            ->when($dateTo, function ($query) use ($dateTo): void {
+                $query->whereDate('order_date', '<=', $dateTo);
+            })
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->where('warehouse_id', $warehouseId);
+            })
+            ->get()
+            ->filter(fn (PurchaseOrder $order): bool => (float) $order->amount_due > 0)
+            ->values();
+
+        return [
+            'accounts_receivable' => [
+                'total_open_balance' => round((float) $receivableOrders->sum(
+                    fn (SalesOrder $order): float => (float) $order->amount_due
+                ), 2),
+                'open_documents_count' => $receivableOrders->count(),
+                'accounts_count' => $receivableOrders->pluck('customer_id')->unique()->count(),
+            ],
+            'accounts_payable' => [
+                'total_open_balance' => round((float) $payableOrders->sum(
+                    fn (PurchaseOrder $order): float => (float) $order->amount_due
+                ), 2),
+                'open_documents_count' => $payableOrders->count(),
+                'accounts_count' => $payableOrders->pluck('supplier_id')->unique()->count(),
             ],
         ];
     }

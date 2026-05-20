@@ -27,7 +27,7 @@ class OperationalExpenseController extends Controller
         ]);
 
         $query = OperationalExpense::query()
-            ->with(['warehouse', 'creator', 'cashMovement'])
+            ->with(['warehouse', 'creator', 'cashMovement', 'posSession'])
             ->when($validated['date_from'] ?? null, fn ($query, $date) => $query->whereDate('expense_date', '>=', $date))
             ->when($validated['date_to'] ?? null, fn ($query, $date) => $query->whereDate('expense_date', '<=', $date))
             ->when($validated['category'] ?? null, fn ($query, $category) => $query->where('category', $category))
@@ -80,14 +80,14 @@ class OperationalExpenseController extends Controller
 
         return response()->json([
             'message' => 'Gasto operativo registrado exitosamente.',
-            'data' => $expense->load(['warehouse', 'creator', 'cashMovement']),
+            'data' => $expense->load(['warehouse', 'creator', 'cashMovement', 'posSession']),
         ], 201);
     }
 
     public function show(OperationalExpense $operationalExpense): JsonResponse
     {
         return response()->json([
-            'data' => $operationalExpense->load(['warehouse', 'creator', 'cashMovement']),
+            'data' => $operationalExpense->load(['warehouse', 'creator', 'cashMovement', 'posSession']),
         ]);
     }
 
@@ -106,7 +106,7 @@ class OperationalExpenseController extends Controller
 
         return response()->json([
             'message' => 'Gasto operativo actualizado exitosamente.',
-            'data' => $operationalExpense->fresh(['warehouse', 'creator', 'cashMovement']),
+            'data' => $operationalExpense->fresh(['warehouse', 'creator', 'cashMovement', 'posSession']),
         ]);
     }
 

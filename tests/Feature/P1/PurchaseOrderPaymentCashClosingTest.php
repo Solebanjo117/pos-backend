@@ -93,6 +93,7 @@ it('registers cash purchase order payment as cash drawer withdrawal in closing',
     ]);
 
     $this->actingAs($admin)->postJson("/api/v1/purchase-orders/{$purchaseOrder->id}/payments", [
+        'warehouse_id' => $warehouse->id,
         'amount' => 64.20,
         'method' => 'cash',
         'notes' => 'Pago en efectivo',
@@ -208,6 +209,66 @@ it('rejects real purchase order payment when there is no open session for the or
         'amount' => 64.20,
         'method' => 'cash',
     ])->assertUnprocessable();
+
+    expect(PurchaseOrderPayment::count())->toBe(0)
+        ->and(CashMovement::count())->toBe(0);
+});
+
+it('rejects purchase order payment when the requested warehouse does not match the order warehouse', function () {
+    ['warehouse' => $warehouse, 'admin' => $admin, 'purchaseOrder' => $purchaseOrder] = purchasePaymentClosingContext();
+    createPurchasePaymentMethod('cash', 'Efectivo', 1);
+
+    $otherWarehouse = Warehouse::create([
+        'code' => 'W-PO-OTHER-'.fake()->unique()->randomNumber(4),
+        'name' => 'Warehouse Diferente',
+    ]);
+    $admin->warehouses()->attach($otherWarehouse->id);
+
+    PosSession::create([
+        'user_id' => $admin->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $this->actingAs($admin)->postJson("/api/v1/purchase-orders/{$purchaseOrder->id}/payments", [
+        'warehouse_id' => $otherWarehouse->id,
+        'amount' => 20,
+        'method' => 'cash',
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors('warehouse_id');
+
+    expect(PurchaseOrderPayment::count())->toBe(0)
+        ->and(CashMovement::count())->toBe(0);
+});
+
+it('explains that the purchase order warehouse needs its own open cash session', function () {
+    ['warehouse' => $warehouse, 'admin' => $admin, 'purchaseOrder' => $purchaseOrder] = purchasePaymentClosingContext();
+    createPurchasePaymentMethod('cash', 'Efectivo', 1);
+
+    $otherWarehouse = Warehouse::create([
+        'code' => 'W-PO-WRONG-'.fake()->unique()->randomNumber(4),
+        'name' => 'Warehouse con Caja Abierta',
+    ]);
+    $admin->warehouses()->attach($otherWarehouse->id);
+
+    PosSession::create([
+        'user_id' => $admin->id,
+        'warehouse_id' => $otherWarehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $this->actingAs($admin)->postJson("/api/v1/purchase-orders/{$purchaseOrder->id}/payments", [
+        'warehouse_id' => $warehouse->id,
+        'amount' => 20,
+        'method' => 'cash',
+    ])->assertUnprocessable()
+        ->assertJsonPath('errors.pos_session_id.0', "La OC pertenece a {$warehouse->name}. Abre o selecciona caja en esa sucursal antes de registrar el pago.");
 
     expect(PurchaseOrderPayment::count())->toBe(0)
         ->and(CashMovement::count())->toBe(0);

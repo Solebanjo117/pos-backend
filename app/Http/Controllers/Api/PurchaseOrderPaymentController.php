@@ -45,10 +45,17 @@ class PurchaseOrderPaymentController extends Controller
         try {
             $payment = $this->purchaseOrderPaymentService->registerPayment($po, $validated);
         } catch (\InvalidArgumentException $exception) {
+            $errorKey = 'payment';
+            if (str_contains($exception->getMessage(), 'La OC pertenece')) {
+                $errorKey = 'pos_session_id';
+            } elseif (str_contains($exception->getMessage(), 'no coincide')) {
+                $errorKey = 'warehouse_id';
+            }
+
             return response()->json([
                 'message' => $exception->getMessage(),
                 'errors' => [
-                    'payment' => [$exception->getMessage()],
+                    $errorKey => [$exception->getMessage()],
                 ],
             ], 422);
         }

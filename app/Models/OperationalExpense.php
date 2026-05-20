@@ -32,6 +32,7 @@ class OperationalExpense extends Model
         'warehouse_id',
         'created_by',
         'cash_movement_id',
+        'pos_session_id',
         'expense_date',
         'category',
         'description',
@@ -61,6 +62,11 @@ class OperationalExpense extends Model
     public function cashMovement(): BelongsTo
     {
         return $this->belongsTo(CashMovement::class);
+    }
+
+    public function posSession(): BelongsTo
+    {
+        return $this->belongsTo(PosSession::class);
     }
 
     public function getCategoryLabelAttribute(): string

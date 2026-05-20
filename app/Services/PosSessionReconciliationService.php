@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\CashMovement;
+use App\Models\OperationalExpense;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\PurchaseOrderPayment;
@@ -117,6 +118,26 @@ class PosSessionReconciliationService
             $salesPayments[$method] ??= ['payments' => 0.0, 'withdrawals' => 0.0];
             $salesPayments[$method]['withdrawals'] = $this->money(
                 (float) $salesPayments[$method]['withdrawals'] - (float) $payment->withdrawals
+            );
+        }
+
+        $operationalExpenseWithdrawals = OperationalExpense::query()
+            ->where('pos_session_id', $session->id)
+            ->where('payment_method', '!=', 'cash')
+            ->selectRaw('payment_method, SUM(amount) as withdrawals')
+            ->groupBy('payment_method')
+            ->get();
+
+        foreach ($operationalExpenseWithdrawals as $expense) {
+            $method = $expense->payment_method;
+
+            if (! $method) {
+                continue;
+            }
+
+            $salesPayments[$method] ??= ['payments' => 0.0, 'withdrawals' => 0.0];
+            $salesPayments[$method]['withdrawals'] = $this->money(
+                (float) $salesPayments[$method]['withdrawals'] - (float) $expense->withdrawals
             );
         }
 

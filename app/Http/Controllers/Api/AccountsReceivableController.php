@@ -18,14 +18,17 @@ class AccountsReceivableController extends Controller
     public function index(Request $request): JsonResponse
     {
         return response()->json($this->accountLedgerService->receivablesSummary(
-            $request->only(['search', 'per_page', 'page'])
+            $request->only(['search', 'per_page', 'page', 'date_from', 'date_to', 'warehouse_id'])
         ));
     }
 
-    public function statement(Customer $customer): JsonResponse
+    public function statement(Request $request, Customer $customer): JsonResponse
     {
         return response()->json([
-            'data' => $this->accountLedgerService->customerStatement($customer),
+            'data' => $this->accountLedgerService->customerStatement(
+                $customer,
+                $request->only(['date_from', 'date_to', 'warehouse_id'])
+            ),
         ]);
     }
 

@@ -36,17 +36,25 @@ class AccountLedgerService
             ->paginate($filters['per_page'] ?? 50);
 
         return [
-            'data' => $customers->getCollection()->map(fn (Customer $customer): array => [
-                'id' => $customer->id,
-                'code' => $customer->code,
-                'name' => $customer->name,
-                'email' => $customer->email,
-                'phone' => $customer->phone,
-                'current_balance' => (float) $customer->current_balance,
-                'credit_limit' => (float) $customer->credit_limit,
-                'available_credit' => $customer->getAvailableCredit(),
-                'open_documents_count' => $this->openSalesOrders($customer)->count(),
-            ])->values(),
+            'data' => $customers->getCollection()
+                ->map(function (Customer $customer) use ($filters): array {
+                    $documents = $this->openSalesOrders($customer, $filters);
+                    $openBalance = round((float) $documents->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
+
+                    return [
+                        'id' => $customer->id,
+                        'code' => $customer->code,
+                        'name' => $customer->name,
+                        'email' => $customer->email,
+                        'phone' => $customer->phone,
+                        'current_balance' => $openBalance,
+                        'credit_limit' => (float) $customer->credit_limit,
+                        'available_credit' => $customer->getAvailableCredit(),
+                        'open_documents_count' => $documents->count(),
+                    ];
+                })
+                ->filter(fn (array $customer): bool => $customer['open_documents_count'] > 0)
+                ->values(),
             'meta' => [
                 'current_page' => $customers->currentPage(),
                 'last_page' => $customers->lastPage(),
@@ -59,9 +67,9 @@ class AccountLedgerService
     /**
      * @return array<string, mixed>
      */
-    public function customerStatement(Customer $customer): array
+    public function customerStatement(Customer $customer, array $filters = []): array
     {
-        $documents = $this->openSalesOrders($customer)
+        $documents = $this->openSalesOrders($customer, $filters)
             ->map(fn (SalesOrder $order): array => [
                 'id' => $order->id,
                 'document_type' => 'sales_order',
@@ -163,8 +171,8 @@ class AccountLedgerService
     {
         $suppliers = Supplier::whereHas('purchaseOrders')
             ->get()
-            ->map(function (Supplier $supplier): array {
-                $orders = $this->openPurchaseOrders($supplier);
+            ->map(function (Supplier $supplier) use ($filters): array {
+                $orders = $this->openPurchaseOrders($supplier, $filters);
                 $totalOrdersAmount = $orders->sum('total');
                 $totalPaid = $orders->sum(fn (PurchaseOrder $order): float => (float) $order->amount_paid);
                 $totalDebt = max(0, (float) $totalOrdersAmount - (float) $totalPaid);
@@ -193,9 +201,9 @@ class AccountLedgerService
     /**
      * @return array<string, mixed>
      */
-    public function supplierStatement(Supplier $supplier): array
+    public function supplierStatement(Supplier $supplier, array $filters = []): array
     {
-        $documents = $this->openPurchaseOrders($supplier)
+        $documents = $this->openPurchaseOrders($supplier, $filters)
             ->map(fn (PurchaseOrder $order): array => [
                 'id' => $order->id,
                 'document_type' => 'purchase_order',
@@ -232,7 +240,7 @@ class AccountLedgerService
             $amount = round((float) $data['amount'], 2);
             $applications = $this->normalizeSupplierApplications($supplier, $data['applications'] ?? [], $amount);
             $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
-            $session = $this->openSessionForSupplierApplications($applications);
+            $session = $this->resolveSupplierPaymentSession($applications, $data['pos_session_id'] ?? null);
 
             if ($appliedTotal > $amount + 0.01) {
                 throw new \InvalidArgumentException('El monto aplicado excede el monto del pago.');
@@ -429,6 +437,38 @@ class AccountLedgerService
     }
 
     /**
+     * @param  array<int, array{document_id: int, amount: float}>  $applications
+     */
+    private function resolveSupplierPaymentSession(array $applications, mixed $posSessionId = null): ?PosSession
+    {
+        if (! $posSessionId) {
+            return $this->openSessionForSupplierApplications($applications);
+        }
+
+        $session = PosSession::query()
+            ->where('id', (int) $posSessionId)
+            ->where('user_id', Auth::id())
+            ->where('status', 'open')
+            ->first();
+
+        if (! $session) {
+            return null;
+        }
+
+        $warehouseIds = PurchaseOrder::query()
+            ->whereIn('id', collect($applications)->pluck('document_id')->all())
+            ->pluck('warehouse_id')
+            ->unique()
+            ->values();
+
+        if ($warehouseIds->count() !== 1 || (int) $warehouseIds->first() !== (int) $session->warehouse_id) {
+            return null;
+        }
+
+        return $session;
+    }
+
+    /**
      * @param  array<string, mixed>  $attributes
      */
     private function createLedgerEntry(array $attributes): AccountLedgerEntry
@@ -520,11 +560,22 @@ class AccountLedgerService
     /**
      * @return Collection<int, SalesOrder>
      */
-    private function openSalesOrders(Customer $customer): Collection
+    private function openSalesOrders(Customer $customer, array $filters = []): Collection
     {
         return $customer->salesOrders()
             ->with(['payments', 'returns'])
             ->whereIn('payment_status', ['pending', 'partial'])
+            ->when(! empty($filters['date_from']), function ($query) use ($filters): void {
+                $query->whereDate('date', '>=', $filters['date_from']);
+            })
+            ->when(! empty($filters['date_to']), function ($query) use ($filters): void {
+                $query->whereDate('date', '<=', $filters['date_to']);
+            })
+            ->when(! empty($filters['warehouse_id']), function ($query) use ($filters): void {
+                $query->whereHas('items', function ($query) use ($filters): void {
+                    $query->where('warehouse_id', $filters['warehouse_id']);
+                });
+            })
             ->orderBy('date')
             ->get()
             ->filter(fn (SalesOrder $order): bool => (float) $order->amount_due > 0)
@@ -534,12 +585,21 @@ class AccountLedgerService
     /**
      * @return Collection<int, PurchaseOrder>
      */
-    private function openPurchaseOrders(Supplier $supplier): Collection
+    private function openPurchaseOrders(Supplier $supplier, array $filters = []): Collection
     {
         return $supplier->purchaseOrders()
             ->with('payments')
             ->whereIn('payment_status', ['pending', 'partial'])
             ->where('status', '!=', 'cancelled')
+            ->when(! empty($filters['date_from']), function ($query) use ($filters): void {
+                $query->whereDate('order_date', '>=', $filters['date_from']);
+            })
+            ->when(! empty($filters['date_to']), function ($query) use ($filters): void {
+                $query->whereDate('order_date', '<=', $filters['date_to']);
+            })
+            ->when(! empty($filters['warehouse_id']), function ($query) use ($filters): void {
+                $query->where('warehouse_id', $filters['warehouse_id']);
+            })
             ->orderBy('order_date')
             ->get()
             ->filter(fn (PurchaseOrder $order): bool => (float) $order->amount_due > 0)

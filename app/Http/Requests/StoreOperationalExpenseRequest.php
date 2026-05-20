@@ -30,7 +30,7 @@ class StoreOperationalExpenseRequest extends FormRequest
             'category' => ['required', 'string', Rule::in(array_keys(OperationalExpense::CATEGORIES))],
             'description' => ['nullable', 'string', 'max:255'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'payment_method' => ['nullable', 'string', Rule::in(OperationalExpense::PAYMENT_METHODS)],
+            'payment_method' => ['required', 'string', Rule::in(OperationalExpense::PAYMENT_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string'],
         ];
@@ -45,6 +45,7 @@ class StoreOperationalExpenseRequest extends FormRequest
             'category.in' => 'La categoria del gasto no es valida.',
             'amount.required' => 'El monto del gasto es obligatorio.',
             'amount.min' => 'El monto del gasto debe ser mayor a cero.',
+            'payment_method.required' => 'El metodo de pago del gasto es obligatorio.',
             'payment_method.in' => 'El metodo de pago no es valido.',
         ];
     }
