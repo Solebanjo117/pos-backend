@@ -80,6 +80,7 @@ function operationalInventoryContext(): array
         'warehouse_id' => $warehouse->id,
         'quantity' => 10,
         'unit_cost' => 5.35,
+        'sale_price' => 11.25,
         'source_type' => 'purchase_order',
         'reference_type' => 'purchase_order',
         'reference_id' => 501,
@@ -94,6 +95,7 @@ function operationalInventoryContext(): array
         'warehouse_id' => $warehouse->id,
         'quantity' => 10,
         'unit_cost' => 6.42,
+        'sale_price' => 13.75,
         'source_type' => 'purchase_order',
         'reference_type' => 'purchase_order',
         'reference_id' => 502,
@@ -117,7 +119,7 @@ function operationalInventoryContext(): array
     return compact('warehouse', 'otherWarehouse', 'user', 'brand', 'product', 'variant');
 }
 
-it('lists operational inventory by variant with fifo valuation fields', function () {
+it('lists operational inventory by variant with neutral valuation fields and legacy aliases', function () {
     $context = operationalInventoryContext();
 
     $this->actingAs($context['user'])
@@ -130,7 +132,11 @@ it('lists operational inventory by variant with fifo valuation fields', function
         ->assertJsonPath('data.0.stock_available', 8)
         ->assertJsonPath('data.0.quantity_available', 8)
         ->assertJsonPath('data.0.quantity_reserved', 2)
+        ->assertJsonPath('data.0.current_cost', 6.42)
+        ->assertJsonPath('data.0.current_sale_price', 13.75)
+        ->assertJsonPath('data.0.inventory_value', 51.36)
         ->assertJsonPath('data.0.fifo_cost_current', 6.42)
+        ->assertJsonPath('data.0.fifo_sale_price_current', 13.75)
         ->assertJsonPath('data.0.fifo_stock_value', 51.36)
         ->assertJsonPath('data.0.open_lots_count', 1)
         ->assertJsonPath('data.0.last_received_at', fn ($value) => is_string($value) && $value !== '')
@@ -205,24 +211,25 @@ it('filters operational inventory by variant id and warehouse', function () {
         ->assertJsonPath('data.0.variant_sku', 'SH-10W30-QT');
 });
 
-it('returns operational inventory summary from fifo lots', function () {
+it('returns operational inventory summary with neutral inventory value and legacy alias', function () {
     $context = operationalInventoryContext();
 
     $this->actingAs($context['user'])
         ->getJson('/api/v1/inventory/summary?warehouse_id='.$context['warehouse']->id)
         ->assertOk()
         ->assertJsonPath('data.total_stock', 8)
+        ->assertJsonPath('data.total_inventory_value', 51.36)
         ->assertJsonPath('data.total_fifo_value', 51.36)
         ->assertJsonPath('data.low_stock_count', 0)
         ->assertJsonPath('data.open_lots_count', 1)
         ->assertJsonPath('data.movements_today', 3);
 });
 
-it('lists open fifo lots for the inventory lots tab without changing legacy batches', function () {
+it('lists open inventory lots for the lots tab with neutral and legacy query aliases', function () {
     $context = operationalInventoryContext();
 
     $this->actingAs($context['user'])
-        ->getJson('/api/v1/inventory/batches?fifo=1&warehouse_id='.$context['warehouse']->id)
+        ->getJson('/api/v1/inventory/batches?lots=1&warehouse_id='.$context['warehouse']->id)
         ->assertOk()
         ->assertJsonCount(1, 'data')
         ->assertJsonPath('data.0.product_id', $context['product']->id)
@@ -235,6 +242,18 @@ it('lists open fifo lots for the inventory lots tab without changing legacy batc
         ->assertJsonPath('data.0.remaining_value', 51.36)
         ->assertJsonPath('data.0.source_type', 'purchase_order')
         ->assertJsonPath('data.0.source_id', 502);
+
+    $this->actingAs($context['user'])
+        ->getJson('/api/v1/inventory/batches?open_lots=1&warehouse_id='.$context['warehouse']->id)
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', fn ($value) => is_int($value));
+
+    $this->actingAs($context['user'])
+        ->getJson('/api/v1/inventory/batches?fifo=1&warehouse_id='.$context['warehouse']->id)
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', fn ($value) => is_int($value));
 });
 
 it('updates an available inventory lot stock costs date and sale price without rewriting historical allocations', function () {
@@ -272,21 +291,81 @@ it('updates an available inventory lot stock costs date and sale price without r
             ->value('quantity_available')
     )->toBe(6);
 
-    expect($context['variant']->pricing()->value('base_price'))->toBe('14.75');
+    expect($context['variant']->pricing()->value('base_price'))->toBe('12.50');
 
     $this->actingAs($context['user'])
         ->getJson('/api/v1/inventory/summary?warehouse_id='.$context['warehouse']->id)
         ->assertOk()
         ->assertJsonPath('data.total_stock', 6)
+        ->assertJsonPath('data.total_inventory_value', 42.72)
         ->assertJsonPath('data.total_fifo_value', 42.72);
 
-    $this->actingAs($context['user'])
-        ->getJson("/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/fifo-history?warehouse_id={$context['warehouse']->id}")
+    $historyResponse = $this->actingAs($context['user'])
+        ->getJson("/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/inventory-history?warehouse_id={$context['warehouse']->id}")
         ->assertOk()
+        ->assertJsonPath('data.summary.current_cost', 7.12)
+        ->assertJsonPath('data.summary.current_sale_price', 14.75)
+        ->assertJsonPath('data.summary.inventory_value', 42.72)
         ->assertJsonPath('data.summary.fifo_cost_current', 7.12)
+        ->assertJsonPath('data.summary.fifo_sale_price_current', 14.75)
         ->assertJsonPath('data.lots.0.id', $lot->id)
         ->assertJsonPath('data.lots.0.quantity_available', 6)
-        ->assertJsonPath('data.lots.0.landed_unit_cost', 7.12);
+        ->assertJsonPath('data.lots.0.unit_cost_base', 7)
+        ->assertJsonPath('data.lots.0.tax_per_unit', 0.07)
+        ->assertJsonPath('data.lots.0.misc_per_unit', 0.05)
+        ->assertJsonPath('data.lots.0.landed_unit_cost', 7.12)
+        ->assertJsonPath('data.lots.0.sale_price', 14.75);
+
+    $sourceLot = collect($historyResponse->json('data.purchase_movements'))
+        ->flatMap(fn (array $movement) => $movement['source_lots'] ?? [])
+        ->firstWhere('lot_id', $lot->id);
+
+    expect($sourceLot)->not->toBeNull()
+        ->and((float) $sourceLot['unit_cost_base'])->toBe(7.0)
+        ->and((float) $sourceLot['tax_per_unit'])->toBe(0.07)
+        ->and((float) $sourceLot['landed_unit_cost'])->toBe(7.12)
+        ->and((float) $sourceLot['sale_price'])->toBe(14.75);
+});
+
+it('exposes purchase lot tax and misc as line totals while preserving unit valuation', function () {
+    $context = operationalInventoryContext();
+
+    /** @var InventoryFifoService $fifo */
+    $fifo = app(InventoryFifoService::class);
+    $fifo->receiveStock([
+        'product_id' => $context['product']->id,
+        'variant_id' => $context['variant']->id,
+        'warehouse_id' => $context['otherWarehouse']->id,
+        'quantity' => 20,
+        'unit_cost' => 30.00,
+        'tax_amount' => 42.00,
+        'misc_cost' => 6.00,
+        'sale_price' => 5000.00,
+        'source_type' => 'purchase_order',
+        'reference_type' => 'purchase_order',
+        'reference_id' => 37,
+        'source_id' => 94,
+    ]);
+
+    $this->actingAs($context['user'])
+        ->getJson("/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/inventory-history?warehouse_id={$context['otherWarehouse']->id}")
+        ->assertOk()
+        ->assertJsonPath('data.summary.stock_available', 20)
+        ->assertJsonPath('data.summary.current_cost', 32.40)
+        ->assertJsonPath('data.summary.inventory_value', fn ($value) => (float) $value === 648.0)
+        ->assertJsonPath('data.lots.0.received_quantity', 20)
+        ->assertJsonPath('data.lots.0.quantity_available', 20)
+        ->assertJsonPath('data.lots.0.unit_cost_base', fn ($value) => (float) $value === 30.0)
+        ->assertJsonPath('data.lots.0.tax_per_unit', 2.10)
+        ->assertJsonPath('data.lots.0.tax_total', fn ($value) => (float) $value === 42.0)
+        ->assertJsonPath('data.lots.0.misc_per_unit', 0.30)
+        ->assertJsonPath('data.lots.0.misc_total', fn ($value) => (float) $value === 6.0)
+        ->assertJsonPath('data.lots.0.landed_unit_cost', 32.40)
+        ->assertJsonPath('data.lots.0.landed_total', fn ($value) => (float) $value === 648.0)
+        ->assertJsonPath('data.lots.0.remaining_value', fn ($value) => (float) $value === 648.0)
+        ->assertJsonPath('data.purchase_movements.0.source_lots.0.tax_total', fn ($value) => (float) $value === 42.0)
+        ->assertJsonPath('data.purchase_movements.0.source_lots.0.misc_total', fn ($value) => (float) $value === 6.0)
+        ->assertJsonPath('data.purchase_movements.0.source_lots.0.landed_total', fn ($value) => (float) $value === 648.0);
 });
 
 it('validates editable inventory lot stock costs and sale price', function () {

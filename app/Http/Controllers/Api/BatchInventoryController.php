@@ -15,8 +15,8 @@ class BatchInventoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        if ($request->boolean('fifo')) {
-            return $this->fifoLots($request);
+        if ($request->boolean('lots') || $request->boolean('open_lots') || $request->boolean('fifo')) {
+            return $this->openLots($request);
         }
 
         // Start with ProductBatch and join warehouse_batches to get quantities
@@ -123,7 +123,7 @@ class BatchInventoryController extends Controller
         ]);
     }
 
-    private function fifoLots(Request $request): JsonResponse
+    private function openLots(Request $request): JsonResponse
     {
         $query = InventoryLot::query()
             ->with(['product', 'variant.brand', 'warehouse'])
@@ -175,6 +175,7 @@ class BatchInventoryController extends Controller
                 'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
                 'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
                 'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+                'sale_price' => round((float) $lot->sale_price, 2),
                 'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
                 'received_at' => $lot->received_at?->toIso8601String(),
             ]),

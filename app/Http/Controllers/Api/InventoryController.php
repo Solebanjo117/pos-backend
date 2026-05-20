@@ -100,10 +100,12 @@ class InventoryController extends Controller
             'data' => $inventory->map(function (ProductInventory $item) {
                 $variant = $item->variant ?? $item->product->defaultVariant;
                 $pricing = $variant?->pricing ?? $item->product->defaultVariant?->pricing;
-                $fifoCost = $variant
-                    ? round($this->fifoService->currentFifoCost($item->product_id, $variant->id, $item->warehouse_id), 2)
-                    : 0.0;
-                $fifoValue = $this->fifoStockValue($item->product_id, $item->variant_id, $item->warehouse_id);
+                $activePricing = $variant
+                    ? $this->fifoService->currentFifoPricing($item->product_id, $variant->id, $item->warehouse_id)
+                    : ['active_lot_id' => null, 'current_cost' => 0.0, 'current_sale_price' => (float) ($pricing?->base_price ?? 0)];
+                $currentCost = round((float) $activePricing['current_cost'], 2);
+                $currentSalePrice = round((float) $activePricing['current_sale_price'], 2);
+                $inventoryValue = $this->inventoryValue($item->product_id, $item->variant_id, $item->warehouse_id);
 
                 return [
                     'id' => $item->id,
@@ -125,8 +127,13 @@ class InventoryController extends Controller
                     'target_level' => $item->reorder_quantity,
                     'needs_reorder' => $item->isLowStock(),
                     'status' => $this->getStockStatus($item),
-                    'fifo_cost_current' => $fifoCost,
-                    'fifo_stock_value' => $fifoValue,
+                    'active_lot_id' => $activePricing['active_lot_id'],
+                    'current_cost' => $currentCost,
+                    'current_sale_price' => $currentSalePrice,
+                    'inventory_value' => $inventoryValue,
+                    'fifo_cost_current' => $currentCost,
+                    'fifo_sale_price_current' => $currentSalePrice,
+                    'fifo_stock_value' => $inventoryValue,
                     'open_lots_count' => $this->openLotsCount($item->product_id, $item->variant_id, $item->warehouse_id),
                     'last_received_at' => $this->lastMovementDate($item->product_id, $item->variant_id, $item->warehouse_id, 'in'),
                     'last_sold_at' => $this->lastMovementDate($item->product_id, $item->variant_id, $item->warehouse_id, 'out'),
@@ -162,11 +169,13 @@ class InventoryController extends Controller
         }
 
         $lots = $lotsQuery->get(['quantity_available', 'landed_unit_cost']);
+        $totalInventoryValue = round((float) $lots->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost), 2);
 
         return response()->json([
             'data' => [
                 'total_stock' => (int) (clone $inventoryQuery)->sum('quantity_available'),
-                'total_fifo_value' => round((float) $lots->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost), 2),
+                'total_inventory_value' => $totalInventoryValue,
+                'total_fifo_value' => $totalInventoryValue,
                 'low_stock_count' => (int) (clone $inventoryQuery)
                     ->where('quantity_available', '>', 0)
                     ->whereColumn('quantity_available', '<=', 'reorder_point')
@@ -196,10 +205,13 @@ class InventoryController extends Controller
                 'quantity_available' => (int) $lot->quantity_available,
                 'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
                 'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+                'tax_total' => round((int) $lot->received_quantity * (float) $lot->tax_per_unit, 2),
                 'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+                'misc_total' => round((int) $lot->received_quantity * (float) $lot->misc_per_unit, 2),
                 'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+                'landed_total' => round((int) $lot->received_quantity * (float) $lot->landed_unit_cost, 2),
+                'sale_price' => round((float) $lot->sale_price, 2),
                 'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
-                'sale_price' => $lot->variant?->pricing ? round((float) $lot->variant->pricing->base_price, 2) : null,
             ],
             'message' => 'Lote de inventario actualizado correctamente',
         ]);
@@ -414,7 +426,7 @@ class InventoryController extends Controller
     /**
      * Determine stock status based on levels.
      */
-    private function fifoStockValue(int $productId, ?int $variantId, int $warehouseId): float
+    private function inventoryValue(int $productId, ?int $variantId, int $warehouseId): float
     {
         return round((float) InventoryLot::query()
             ->where('product_id', $productId)

@@ -54,12 +54,14 @@ it('creates a complete fifo history demo scenario for inventory operations', fun
     $user = User::query()->where('email', 'admin@hermes.com')->firstOrFail();
 
     $this->actingAs($user)
-        ->getJson("/api/v1/products/{$product->id}/variants/{$variant->id}/fifo-history?warehouse_id={$warehouse->id}")
+        ->getJson("/api/v1/products/{$product->id}/variants/{$variant->id}/inventory-history?warehouse_id={$warehouse->id}")
         ->assertOk()
         ->assertJsonPath('data.summary.stock_available', 17)
+        ->assertJsonPath('data.summary.current_cost', fn ($value) => is_numeric($value) && (float) $value > 0)
         ->assertJsonPath('data.summary.open_lots_count', 2)
         ->assertJsonCount(2, 'data.lots')
         ->assertJsonCount(2, 'data.purchase_movements')
         ->assertJsonCount(1, 'data.sale_movements')
+        ->assertJsonPath('data.sale_movements.0.lot_allocations.0.quantity', 5)
         ->assertJsonPath('data.sale_movements.0.fifo_allocations.0.quantity', 5);
 });

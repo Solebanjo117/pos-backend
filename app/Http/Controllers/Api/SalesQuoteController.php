@@ -111,13 +111,7 @@ class SalesQuoteController extends Controller
                     continue;
                 }
 
-                $pricingQuery = \App\Models\ProductPricing::query();
-                if (! empty($item['variant_id'])) {
-                    $pricingQuery->where('variant_id', $item['variant_id']);
-                } else {
-                    $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
-                }
-                $systemPrice = $pricingQuery->value('base_price');
+                $systemPrice = $this->systemSalePriceForItem($item, $validated['warehouse_id'] ?? null);
                 if ($systemPrice !== null) {
                     $item['unit_price'] = (float) $systemPrice;
                 }
@@ -215,13 +209,7 @@ class SalesQuoteController extends Controller
                     continue;
                 }
 
-                $pricingQuery = \App\Models\ProductPricing::query();
-                if (! empty($item['variant_id'])) {
-                    $pricingQuery->where('variant_id', $item['variant_id']);
-                } else {
-                    $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
-                }
-                $systemPrice = $pricingQuery->value('base_price');
+                $systemPrice = $this->systemSalePriceForItem($item, $validated['warehouse_id'] ?? null);
                 if ($systemPrice !== null) {
                     $item['unit_price'] = (float) $systemPrice;
                 }
@@ -309,13 +297,7 @@ class SalesQuoteController extends Controller
                     continue;
                 }
 
-                $pricingQuery = \App\Models\ProductPricing::query();
-                if (! empty($item['variant_id'])) {
-                    $pricingQuery->where('variant_id', $item['variant_id']);
-                } else {
-                    $pricingQuery->where('product_id', $item['product_id'])->whereNull('variant_id');
-                }
-                $systemPrice = $pricingQuery->value('base_price');
+                $systemPrice = $this->systemSalePriceForItem($item, $validated['warehouse_id'] ?? null);
                 if ($systemPrice !== null) {
                     $item['unit_price'] = (float) $systemPrice;
                 }
@@ -869,5 +851,32 @@ class SalesQuoteController extends Controller
         $pdf->setOption('defaultFont', 'Helvetica');
 
         return $pdf->stream("cotizacion-proforma-{$quote->quote_number}.pdf");
+    }
+
+    private function systemSalePriceForItem(array $item, ?int $quoteWarehouseId = null): ?float
+    {
+        $productId = (int) ($item['product_id'] ?? 0);
+        $variantId = ! empty($item['variant_id']) ? (int) $item['variant_id'] : null;
+        $warehouseId = ! empty($item['warehouse_id']) ? (int) $item['warehouse_id'] : $quoteWarehouseId;
+
+        if ($productId > 0 && $warehouseId) {
+            $fifoPrice = app(\App\Services\InventoryFifoService::class)
+                ->currentFifoPricing($productId, $variantId, (int) $warehouseId);
+
+            if (($fifoPrice['active_lot_id'] ?? null) !== null) {
+                return (float) $fifoPrice['current_sale_price'];
+            }
+        }
+
+        $pricingQuery = \App\Models\ProductPricing::query();
+        if ($variantId) {
+            $pricingQuery->where('variant_id', $variantId);
+        } else {
+            $pricingQuery->where('product_id', $productId)->whereNull('variant_id');
+        }
+
+        $price = $pricingQuery->value('base_price');
+
+        return $price !== null ? (float) $price : null;
     }
 }

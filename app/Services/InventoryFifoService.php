@@ -56,6 +56,7 @@ class InventoryFifoService
         $taxPerUnit = $quantity > 0 ? round((float) ($data['tax_amount'] ?? 0) / $quantity, 4) : 0;
         $miscPerUnit = $quantity > 0 ? round((float) ($data['misc_cost'] ?? 0) / $quantity, 4) : 0;
         $landedUnitCost = round((float) ($data['landed_unit_cost'] ?? ($unitCostBase + $taxPerUnit + $miscPerUnit)), 4);
+        $salePrice = round((float) ($data['sale_price'] ?? $this->resolveFallbackSalePrice($movement->product_id, $movement->variant_id)), 2);
 
         return InventoryLot::create([
             'product_id' => $movement->product_id,
@@ -71,6 +72,7 @@ class InventoryFifoService
             'tax_per_unit' => $taxPerUnit,
             'misc_per_unit' => $miscPerUnit,
             'landed_unit_cost' => $landedUnitCost,
+            'sale_price' => $salePrice,
             'received_at' => $data['received_at'] ?? now(),
         ]);
     }
@@ -351,6 +353,7 @@ class InventoryFifoService
                     'tax_per_unit' => $lot->tax_per_unit,
                     'misc_per_unit' => $lot->misc_per_unit,
                     'landed_unit_cost' => $allocation->unit_cost,
+                    'sale_price' => $lot->sale_price,
                     'received_at' => now(),
                 ]);
             }
@@ -417,9 +420,29 @@ class InventoryFifoService
 
     public function currentFifoCost(int $productId, ?int $variantId, int $warehouseId): float
     {
+        return (float) $this->currentFifoPricing($productId, $variantId, $warehouseId)['current_cost'];
+    }
+
+    /**
+     * @return array{active_lot_id: int|null, current_cost: float, current_sale_price: float, inventory_value: float}
+     */
+    public function currentFifoPricing(int $productId, ?int $variantId, int $warehouseId): array
+    {
         $lot = $this->availableLotsQuery($productId, $variantId, $warehouseId)->first();
 
-        return $lot ? (float) $lot->landed_unit_cost : 0.0;
+        return [
+            'active_lot_id' => $lot?->id,
+            'current_cost' => $lot ? (float) $lot->landed_unit_cost : $this->resolveFallbackUnitCost($productId, $variantId),
+            'current_sale_price' => $lot ? (float) $lot->sale_price : $this->resolveFallbackSalePrice($productId, $variantId),
+            'inventory_value' => round($this->availableStockValueForItem($productId, $variantId, $warehouseId), 2),
+        ];
+    }
+
+    private function availableStockValueForItem(int $productId, ?int $variantId, int $warehouseId): float
+    {
+        return (float) $this->availableLotsQuery($productId, $variantId, $warehouseId)
+            ->get(['quantity_available', 'landed_unit_cost'])
+            ->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost);
     }
 
     private function ensureOpeningLotForAggregate(int $productId, ?int $variantId, int $warehouseId): void
@@ -525,5 +548,21 @@ class InventoryFifoService
             ->first();
 
         return (float) ($pricing?->cost_total ?? 0);
+    }
+
+    private function resolveFallbackSalePrice(int $productId, ?int $variantId): float
+    {
+        if ($variantId) {
+            $variant = ProductVariant::with('pricing')->find($variantId);
+
+            return (float) ($variant?->pricing?->base_price ?? 0);
+        }
+
+        $pricing = ProductPricing::query()
+            ->where('product_id', $productId)
+            ->whereNull('variant_id')
+            ->first();
+
+        return (float) ($pricing?->base_price ?? 0);
     }
 }

@@ -207,6 +207,14 @@ class ProductDetailResource extends JsonResource
                         }
 
                         return $variant->inventory->map(function ($inv) use ($variant) {
+                            $activePricing = app(\App\Services\InventoryFifoService::class)->currentFifoPricing(
+                                (int) $variant->product_id,
+                                (int) $variant->id,
+                                (int) $inv->warehouse_id
+                            );
+                            $currentCost = round((float) $activePricing['current_cost'], 2);
+                            $currentSalePrice = round((float) $activePricing['current_sale_price'], 2);
+
                             return [
                                 'id' => $inv->id,
                                 'warehouse_id' => $inv->warehouse_id,
@@ -222,11 +230,11 @@ class ProductDetailResource extends JsonResource
                                 'stock_on_order' => 0, // Placeholder as column missing in Model
                                 'reorder_point' => (int) $inv->reorder_point,
                                 'needs_reorder' => $inv->quantity_available <= $inv->reorder_point,
-                                'fifo_cost_current' => app(\App\Services\InventoryFifoService::class)->currentFifoCost(
-                                    (int) $variant->product_id,
-                                    (int) $variant->id,
-                                    (int) $inv->warehouse_id
-                                ),
+                                'active_lot_id' => $activePricing['active_lot_id'],
+                                'current_cost' => $currentCost,
+                                'current_sale_price' => $currentSalePrice,
+                                'fifo_cost_current' => $currentCost,
+                                'fifo_sale_price_current' => $currentSalePrice,
                             ];
                         });
                     })->values();

@@ -521,6 +521,7 @@ class PurchaseOrderService
 
                 $lineUnits = max(1, (int) $item->quantity_ordered * (int) ($item->units_per_package ?? 1));
                 $receivedRatio = $actualUnits / $lineUnits;
+                $newSalePrice = $this->receivedSalePriceForItem($item, $received);
 
                 app(InventoryFifoService::class)->receiveStock([
                     'product_id' => $productId,
@@ -538,6 +539,7 @@ class PurchaseOrderService
                     'user_id' => Auth::id(),
                     'supplier_id' => $item->supplier_id ?? $po->supplier_id,
                     'batch_number' => $received['batch_number'] ?? null,
+                    'sale_price' => $newSalePrice,
                 ]);
 
                 // Handle batch tracking if enabled
@@ -558,7 +560,6 @@ class PurchaseOrderService
                 }
 
                 // R30 — Update sale price if provided and different (LL-012)
-                $newSalePrice = isset($received['sale_price']) ? (float) $received['sale_price'] : null;
                 if ($newSalePrice !== null && $newSalePrice > 0) {
                     if ($useVariant && $item->variant) {
                         $pricing = $item->variant->pricing;
@@ -816,6 +817,7 @@ class PurchaseOrderService
                 'user_id' => Auth::id(),
                 'supplier_id' => $supplierId,
                 'batch_number' => $data['batch_number'] ?? null,
+                'sale_price' => $data['sale_price'] ?? null,
             ]);
 
             // Handle batch tracking if applicable
@@ -914,5 +916,29 @@ class PurchaseOrderService
                 $pricing->update(['base_price' => $salePrice]);
             }
         }
+    }
+
+    private function receivedSalePriceForItem(PurchaseOrderItem $item, array $received): ?float
+    {
+        if (isset($received['sale_price']) && (float) $received['sale_price'] > 0) {
+            return (float) $received['sale_price'];
+        }
+
+        $category = $item->product?->category;
+        if ($category?->pricing_formula && $item->unit_cost > 0) {
+            $calculated = app(PricingFormulaService::class)->calculate(
+                $category->pricing_formula,
+                (float) $item->unit_cost,
+                (bool) $category->applies_itbm
+            );
+
+            return $calculated !== null ? (float) $calculated : null;
+        }
+
+        $pricing = ! empty($item->variant_id)
+            ? $item->variant?->pricing
+            : $item->product?->pricing;
+
+        return $pricing ? (float) $pricing->base_price : null;
     }
 }

@@ -38,6 +38,7 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     // --> Product Variants (Brands)
     Route::get('/{product}/variants', [App\Http\Controllers\Api\ProductVariantController::class, 'index']);
     Route::post('/{product}/variants', [App\Http\Controllers\Api\ProductVariantController::class, 'store']);
+    Route::get('/{product}/variants/{variant}/inventory-history', [App\Http\Controllers\Api\ProductVariantController::class, 'inventoryHistory']);
     Route::get('/{product}/variants/{variant}/fifo-history', [App\Http\Controllers\Api\ProductVariantController::class, 'fifoHistory']);
     Route::put('/{product}/variants/{variant}', [App\Http\Controllers\Api\ProductVariantController::class, 'update']);
     Route::delete('/{product}/variants/{variant}', [App\Http\Controllers\Api\ProductVariantController::class, 'destroy']);

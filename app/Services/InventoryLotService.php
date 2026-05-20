@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Models\InventoryLot;
 use App\Models\ProductInventory;
-use App\Models\ProductPricing;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
@@ -33,6 +32,7 @@ class InventoryLotService
                 'tax_per_unit',
                 'misc_per_unit',
                 'landed_unit_cost',
+                'sale_price',
                 'quantity_available',
             ]);
 
@@ -49,6 +49,7 @@ class InventoryLotService
                 'tax_per_unit' => $taxPerUnit,
                 'misc_per_unit' => $miscPerUnit,
                 'landed_unit_cost' => round($unitCostBase + $taxPerUnit + $miscPerUnit, 4),
+                'sale_price' => $salePrice,
             ]);
             $lockedLot->save();
 
@@ -80,24 +81,6 @@ class InventoryLotService
                 ),
             ])->save();
 
-            if ($lockedLot->variant_id) {
-                ProductPricing::firstOrCreate(
-                    [
-                        'product_id' => $lockedLot->product_id,
-                        'variant_id' => $lockedLot->variant_id,
-                    ],
-                    [
-                        'base_price' => 0,
-                        'msrp' => 0,
-                        'cost' => 0,
-                        'margin_percentage' => 0,
-                        'tax_rate' => 0,
-                    ]
-                )->update([
-                    'base_price' => $salePrice,
-                ]);
-            }
-
             activity('inventory')
                 ->causedBy($user)
                 ->performedOn($lockedLot)
@@ -109,9 +92,9 @@ class InventoryLotService
                         'tax_per_unit',
                         'misc_per_unit',
                         'landed_unit_cost',
+                        'sale_price',
                         'quantity_available',
                     ]),
-                    'sale_price' => $salePrice,
                 ])
                 ->log('inventory_lot_updated');
 

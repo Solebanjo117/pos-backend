@@ -64,7 +64,7 @@ function fifoCatalogContext(): array
     return compact('warehouse', 'user', 'supplier', 'product', 'variant');
 }
 
-function receiveFifoPurchase(array $context, int $quantity, float $unitCost, ?float $taxAmount = null, float $miscCost = 0): PurchaseOrder
+function receiveFifoPurchase(array $context, int $quantity, float $unitCost, ?float $taxAmount = null, float $miscCost = 0, ?float $salePrice = null): PurchaseOrder
 {
     /** @var PurchaseOrderService $service */
     $service = app(PurchaseOrderService::class);
@@ -82,10 +82,16 @@ function receiveFifoPurchase(array $context, int $quantity, float $unitCost, ?fl
         ]],
     ]);
 
-    return $service->receiveItems($po->id, [[
+    $received = [
         'item_id' => $po->items()->firstOrFail()->id,
         'quantity_received' => $quantity,
-    ]]);
+    ];
+
+    if ($salePrice !== null) {
+        $received['sale_price'] = $salePrice;
+    }
+
+    return $service->receiveItems($po->id, [$received]);
 }
 
 it('receives purchase lots and consumes the oldest lot first on sale', function () {
@@ -135,7 +141,44 @@ it('receives purchase lots and consumes the oldest lot first on sale', function 
         ->and((int) $lots[1]->fresh()->quantity_available)->toBe(8);
 });
 
-it('exposes fifo history for a product variant by warehouse', function () {
+it('moves active fifo cost and sale price to the next purchase lot after the oldest lot is consumed', function () {
+    $context = fifoCatalogContext();
+    $this->actingAs($context['user']);
+
+    receiveFifoPurchase($context, 10, 5.35, 0, 0, 9.99);
+    receiveFifoPurchase($context, 10, 6.42, 0, 0, 12.49);
+
+    app(SalesOrderService::class)->create([
+        'user_id' => $context['user']->id,
+        'warehouse_id' => $context['warehouse']->id,
+        'status' => 'confirmed',
+        'payment_method' => 'cash',
+        'items' => [[
+            'product_id' => $context['product']->id,
+            'variant_id' => $context['variant']->id,
+            'warehouse_id' => $context['warehouse']->id,
+            'quantity' => 10,
+            'unit_price' => 9.99,
+            'tax_percent' => 0,
+        ]],
+    ]);
+
+    $this->getJson("/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/inventory-history?warehouse_id={$context['warehouse']->id}")
+        ->assertOk()
+        ->assertJsonPath('data.summary.current_cost', 6.42)
+        ->assertJsonPath('data.summary.current_sale_price', 12.49)
+        ->assertJsonPath('data.summary.fifo_sale_price_current', 12.49)
+        ->assertJsonPath('data.summary.active_lot_id', fn ($value) => is_int($value))
+        ->assertJsonPath('data.lots.0.sale_price', 12.49);
+
+    $this->getJson("/api/v1/products/{$context['product']->id}?warehouse_id={$context['warehouse']->id}")
+        ->assertOk()
+        ->assertJsonPath('data.variants.0.inventory.0.current_cost', 6.42)
+        ->assertJsonPath('data.variants.0.inventory.0.current_sale_price', 12.49)
+        ->assertJsonPath('data.variants.0.inventory.0.fifo_sale_price_current', 12.49);
+});
+
+it('exposes neutral inventory history for a product variant by warehouse with legacy fifo aliases', function () {
     $context = fifoCatalogContext();
     $this->actingAs($context['user']);
 
@@ -158,19 +201,32 @@ it('exposes fifo history for a product variant by warehouse', function () {
     ]);
 
     $response = $this->getJson(
-        "/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/fifo-history?warehouse_id={$context['warehouse']->id}"
+        "/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/inventory-history?warehouse_id={$context['warehouse']->id}"
     );
 
     $response->assertOk()
         ->assertJsonPath('data.summary.stock_available', 8)
+        ->assertJsonPath('data.summary.current_cost', 6.42)
+        ->assertJsonPath('data.summary.inventory_value', 51.36)
         ->assertJsonPath('data.summary.fifo_cost_current', 6.42)
         ->assertJsonPath('data.summary.open_lots_count', 1)
         ->assertJsonPath('data.lots.0.quantity_available', 8)
         ->assertJsonPath('data.lots.0.landed_unit_cost', 6.42)
         ->assertJsonPath('data.purchase_movements.0.quantity', 10)
+        ->assertJsonPath('data.purchase_movements.0.source_lots.0.quantity', 10)
+        ->assertJsonPath('data.purchase_movements.0.fifo_lots.0.quantity', 10)
         ->assertJsonPath('data.sale_movements.0.quantity', 12)
+        ->assertJsonPath('data.sale_movements.0.lot_allocations.0.quantity', 10)
+        ->assertJsonPath('data.sale_movements.0.lot_allocations.1.quantity', 2)
         ->assertJsonPath('data.sale_movements.0.fifo_allocations.0.quantity', 10)
         ->assertJsonPath('data.sale_movements.0.fifo_allocations.1.quantity', 2);
+
+    $this->getJson(
+        "/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/fifo-history?warehouse_id={$context['warehouse']->id}"
+    )
+        ->assertOk()
+        ->assertJsonPath('data.summary.current_cost', 6.42)
+        ->assertJsonPath('data.summary.fifo_cost_current', 6.42);
 });
 
 it('returns not found when requesting fifo history for a variant from another product', function () {
@@ -676,7 +732,7 @@ it('bulk inventory movement endpoints do not allow skip fifo to bypass lots', fu
         ->where('movement_type', 'out'))->sum('quantity'))->toBe(3);
 });
 
-it('exposes source fifo lots on inbound inventory movement detail', function () {
+it('exposes source lots on inbound inventory movement detail with legacy fifo alias', function () {
     $context = fifoCatalogContext();
     $this->actingAs($context['user']);
 
@@ -697,6 +753,12 @@ it('exposes source fifo lots on inbound inventory movement detail', function () 
         ->assertJsonPath('data.product.id', $context['product']->id)
         ->assertJsonPath('data.variant.id', $context['variant']->id)
         ->assertJsonPath('data.warehouse.id', $context['warehouse']->id)
+        ->assertJsonPath('data.source_lots.0.received_quantity', 7)
+        ->assertJsonPath('data.source_lots.0.quantity_available', 7)
+        ->assertJsonPath('data.source_lots.0.unit_cost_base', 4.25)
+        ->assertJsonPath('data.source_lots.0.tax_per_unit', 0.30)
+        ->assertJsonPath('data.source_lots.0.misc_per_unit', 0.15)
+        ->assertJsonPath('data.source_lots.0.landed_unit_cost', 4.70)
         ->assertJsonPath('data.fifo_lots.0.received_quantity', 7)
         ->assertJsonPath('data.fifo_lots.0.quantity_available', 7)
         ->assertJsonPath('data.fifo_lots.0.unit_cost_base', 4.25)
@@ -705,7 +767,7 @@ it('exposes source fifo lots on inbound inventory movement detail', function () 
         ->assertJsonPath('data.fifo_lots.0.landed_unit_cost', 4.70);
 });
 
-it('exposes fifo allocations on outbound inventory movement detail', function () {
+it('exposes lot allocations on outbound inventory movement detail with legacy fifo alias', function () {
     $context = fifoCatalogContext();
     $this->actingAs($context['user']);
 
@@ -735,6 +797,9 @@ it('exposes fifo allocations on outbound inventory movement detail', function ()
         ->assertJsonPath('data.product.id', $context['product']->id)
         ->assertJsonPath('data.variant.id', $context['variant']->id)
         ->assertJsonPath('data.warehouse.id', $context['warehouse']->id)
+        ->assertJsonPath('data.lot_allocations.0.quantity', 3)
+        ->assertJsonPath('data.lot_allocations.0.unit_cost', 3.50)
+        ->assertJsonPath('data.lot_allocations.0.total_cost', 10.50)
         ->assertJsonPath('data.fifo_allocations.0.quantity', 3)
         ->assertJsonPath('data.fifo_allocations.0.unit_cost', 3.50)
         ->assertJsonPath('data.fifo_allocations.0.total_cost', 10.50);

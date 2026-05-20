@@ -100,14 +100,24 @@ class InventoryFifoHistoryService
             fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost
         ), 2);
 
+        $activePricing = $this->fifoService->currentFifoPricing($product->id, $variant->id, $warehouseId);
+        $inventoryValue = $totalLotValue;
+        $currentCost = round((float) $activePricing['current_cost'], 2);
+        $currentSalePrice = round((float) $activePricing['current_sale_price'], 2);
+
         return [
             'product_id' => $product->id,
             'variant_id' => $variant->id,
             'warehouse_id' => $warehouseId,
             'stock_available' => (int) ($inventory?->quantity_available ?? 0),
-            'fifo_cost_current' => round($this->fifoService->currentFifoCost($product->id, $variant->id, $warehouseId), 2),
+            'active_lot_id' => $activePricing['active_lot_id'],
+            'current_cost' => $currentCost,
+            'current_sale_price' => $currentSalePrice,
+            'inventory_value' => $inventoryValue,
+            'fifo_cost_current' => $currentCost,
+            'fifo_sale_price_current' => $currentSalePrice,
             'total_lot_quantity' => $totalLotQuantity,
-            'total_lot_value' => $totalLotValue,
+            'total_lot_value' => $inventoryValue,
             'average_landed_cost' => $totalLotQuantity > 0 ? round($totalLotValue / $totalLotQuantity, 2) : 0.0,
             'open_lots_count' => $availableLots->count(),
             'last_received_at' => $this->lastMovementDate($product, $variant, $warehouseId, 'in'),

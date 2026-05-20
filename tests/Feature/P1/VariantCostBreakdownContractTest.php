@@ -2,7 +2,9 @@
 
 use App\Models\Brand;
 use App\Models\Category;
+use App\Models\InventoryLot;
 use App\Models\ProductPricing;
+use App\Models\ProductInventory;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -153,4 +155,87 @@ it('keeps legacy cost unchanged when cost_base is not explicitly provided', func
     expect($pricing->getRawOriginal('cost_base'))->toBeNull()
         ->and((float) $pricing->cost)->toBe(100.0)
         ->and((float) $pricing->cost_total)->toBe(100.0);
+});
+
+it('creates an opening lot when creating a variant with initial stock', function () {
+    $productResponse = $this->postJson('/api/v1/products', variantCostBaseProductPayload($this->brandDefault, $this->category));
+    $productResponse->assertStatus(201);
+
+    $productId = (int) $productResponse->json('data.id');
+
+    $createVariantResponse = $this->postJson("/api/v1/products/{$productId}/variants", [
+        'brand_id' => $this->brandVariant->id,
+        'pricing' => [
+            'base_price' => 175,
+            'msrp' => 190,
+            'cost_base' => 80,
+            'cost_tax_rate' => 10,
+            'cost_miscellaneous' => 4,
+            'sale_tax_rate' => 7,
+        ],
+        'initial_inventory' => [[
+            'warehouse_id' => $this->warehouse->id,
+            'stock_available' => 7,
+            'reorder_point' => 1,
+            'reorder_quantity' => 2,
+        ]],
+    ]);
+
+    $createVariantResponse->assertStatus(201);
+
+    $variantId = (int) $createVariantResponse->json('data.id');
+
+    $inventory = ProductInventory::where('product_id', $productId)
+        ->where('variant_id', $variantId)
+        ->where('warehouse_id', $this->warehouse->id)
+        ->firstOrFail();
+
+    $lot = InventoryLot::where('product_id', $productId)
+        ->where('variant_id', $variantId)
+        ->where('warehouse_id', $this->warehouse->id)
+        ->firstOrFail();
+
+    expect((int) $inventory->quantity_available)->toBe(7)
+        ->and(InventoryLot::where('variant_id', $variantId)->count())->toBe(1)
+        ->and((int) $lot->quantity_available)->toBe(7)
+        ->and((int) $lot->received_quantity)->toBe(7)
+        ->and($lot->source_type)->toBe('opening_balance')
+        ->and((float) $lot->landed_unit_cost)->toBe(92.0);
+});
+
+it('does not create an opening lot when creating a variant with zero initial stock', function () {
+    $productResponse = $this->postJson('/api/v1/products', variantCostBaseProductPayload($this->brandDefault, $this->category));
+    $productResponse->assertStatus(201);
+
+    $productId = (int) $productResponse->json('data.id');
+
+    $createVariantResponse = $this->postJson("/api/v1/products/{$productId}/variants", [
+        'brand_id' => $this->brandVariant->id,
+        'pricing' => [
+            'base_price' => 175,
+            'msrp' => 190,
+            'cost_base' => 80,
+            'cost_tax_rate' => 10,
+            'cost_miscellaneous' => 4,
+            'sale_tax_rate' => 7,
+        ],
+        'initial_inventory' => [[
+            'warehouse_id' => $this->warehouse->id,
+            'stock_available' => 0,
+            'reorder_point' => 1,
+            'reorder_quantity' => 2,
+        ]],
+    ]);
+
+    $createVariantResponse->assertStatus(201);
+
+    $variantId = (int) $createVariantResponse->json('data.id');
+
+    $inventory = ProductInventory::where('product_id', $productId)
+        ->where('variant_id', $variantId)
+        ->where('warehouse_id', $this->warehouse->id)
+        ->firstOrFail();
+
+    expect((int) $inventory->quantity_available)->toBe(0)
+        ->and(InventoryLot::where('variant_id', $variantId)->count())->toBe(0);
 });

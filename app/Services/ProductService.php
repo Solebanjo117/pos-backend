@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductAttribute;
@@ -780,6 +781,111 @@ class ProductService
         ]);
 
         return $variant;
+    }
+
+    /**
+     * Create a variant with pricing, aggregate inventory, and an opening lot when initial stock is positive.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    public function createVariantWithInitialInventory(Product $product, array $data): ProductVariant
+    {
+        return DB::transaction(function () use ($product, $data) {
+            $sku = $data['sku'] ?? null;
+            if (! is_string($sku) || trim($sku) === '') {
+                $sku = $this->generateSkuForVariant($product, (int) $data['brand_id']);
+            }
+
+            $variant = $this->createVariant($product, [
+                'brand_id' => $data['brand_id'],
+                'sku' => $sku,
+                'upc' => $data['upc'] ?? null,
+                'status' => $data['status'] ?? 'active',
+                'is_default' => false,
+            ]);
+
+            $pricingData = $data['pricing'] ?? null;
+            if (! $pricingData) {
+                $product->loadMissing('pricing');
+                $productPricing = $product->pricing;
+
+                if ($productPricing) {
+                    $saleTaxRate = $productPricing->sale_tax_rate ?? $productPricing->tax_rate;
+                    $costTaxRate = $productPricing->cost_tax_rate ?? $saleTaxRate;
+
+                    $pricingData = [
+                        'base_price' => $productPricing->base_price,
+                        'msrp' => $productPricing->msrp,
+                        'cost' => (float) $productPricing->getRawOriginal('cost'),
+                        'cost_base' => $productPricing->getRawOriginal('cost_base'),
+                        'cost_miscellaneous' => $productPricing->getRawOriginal('cost_miscellaneous'),
+                        'tax_rate' => $saleTaxRate,
+                        'sale_tax_rate' => $saleTaxRate,
+                        'cost_tax_rate' => $costTaxRate,
+                        'max_discount_percentage' => $productPricing->max_discount_percentage,
+                    ];
+                }
+            }
+
+            if ($pricingData) {
+                $pricingData = $this->normalizePricingPayload($pricingData);
+                $pricingData['variant_id'] = $variant->id;
+                $pricingData['product_id'] = $product->id;
+                $pricing = $variant->pricing()->create($pricingData);
+                $pricing->calculateMargin();
+                $pricing->save();
+            }
+
+            $inventoryRows = $data['initial_inventory'] ?? [];
+            if (empty($inventoryRows)) {
+                $defaultWarehouse = DB::table('warehouses')->first();
+                $inventoryRows = $defaultWarehouse ? [[
+                    'warehouse_id' => $defaultWarehouse->id,
+                    'stock_available' => 0,
+                    'reorder_point' => 5,
+                    'reorder_quantity' => 10,
+                ]] : [];
+            }
+
+            $variant->loadMissing('pricing');
+
+            foreach ($inventoryRows as $inventoryData) {
+                if (empty($inventoryData['warehouse_id'])) {
+                    continue;
+                }
+
+                $quantityAvailable = (int) ($inventoryData['stock_available'] ?? $inventoryData['quantity_available'] ?? 0);
+
+                $inventory = $variant->inventory()->create([
+                    'warehouse_id' => $inventoryData['warehouse_id'],
+                    'quantity_available' => $quantityAvailable,
+                    'reorder_point' => $inventoryData['reorder_point'] ?? 0,
+                    'reorder_quantity' => $inventoryData['reorder_quantity'] ?? 0,
+                    'product_id' => $product->id,
+                ]);
+
+                if ($quantityAvailable > 0) {
+                    app(InventoryFifoService::class)->ensureOpeningLotForInventory(
+                        $product->id,
+                        $variant->id,
+                        (int) $inventory->warehouse_id,
+                        $quantityAvailable,
+                        (float) ($variant->pricing?->cost_total ?? 0)
+                    );
+                }
+            }
+
+            return $variant->fresh(['brand', 'pricing', 'inventory.warehouse']);
+        });
+    }
+
+    private function generateSkuForVariant(Product $product, int $brandId): string
+    {
+        $base = $product->sku_base ?: ($product->name ? substr($product->name, 0, 10) : 'PROD');
+        $brand = Brand::find($brandId);
+        $brandCode = $brand ? substr($brand->name, 0, 3) : 'XXX';
+
+        return strtoupper($base.'-'.$brandCode.'-'.substr(uniqid(), -6));
     }
 
     /**

@@ -62,21 +62,31 @@ class ProductVariantResource extends JsonResource
 
             'inventory' => $this->when(
                 $this->relationLoaded('inventory'),
-                fn () => $this->inventory->map(fn ($inv) => [
-                    'warehouse' => [
-                        'id' => $inv->warehouse?->id,
-                        'name' => $inv->warehouse?->name,
-                        'code' => $inv->warehouse?->code,
-                    ],
-                    'quantity_available' => $inv->quantity_available,
-                    'quantity_reserved' => $inv->quantity_reserved ?? 0,
-                    'reorder_point' => $inv->reorder_point,
-                    'fifo_cost_current' => app(\App\Services\InventoryFifoService::class)->currentFifoCost(
+                fn () => $this->inventory->map(function ($inv) {
+                    $activePricing = app(\App\Services\InventoryFifoService::class)->currentFifoPricing(
                         (int) $this->product_id,
                         (int) $this->id,
                         (int) $inv->warehouse_id
-                    ),
-                ])
+                    );
+                    $currentCost = round((float) $activePricing['current_cost'], 2);
+                    $currentSalePrice = round((float) $activePricing['current_sale_price'], 2);
+
+                    return [
+                        'warehouse' => [
+                            'id' => $inv->warehouse?->id,
+                            'name' => $inv->warehouse?->name,
+                            'code' => $inv->warehouse?->code,
+                        ],
+                        'quantity_available' => $inv->quantity_available,
+                        'quantity_reserved' => $inv->quantity_reserved ?? 0,
+                        'reorder_point' => $inv->reorder_point,
+                        'active_lot_id' => $activePricing['active_lot_id'],
+                        'current_cost' => $currentCost,
+                        'current_sale_price' => $currentSalePrice,
+                        'fifo_cost_current' => $currentCost,
+                        'fifo_sale_price_current' => $currentSalePrice,
+                    ];
+                })
             ),
 
             'suppliers' => $this->when(

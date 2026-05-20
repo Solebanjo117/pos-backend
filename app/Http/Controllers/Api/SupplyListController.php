@@ -117,6 +117,7 @@ class SupplyListController extends Controller
                 'notes' => 'Stock preaplicado desde OC diaria',
                 'user_id' => Auth::id(),
                 'supplier_id' => $validated['supplier_id'] ?? null,
+                'sale_price' => $validated['sale_price'] ?? null,
             ]);
 
             return $item;

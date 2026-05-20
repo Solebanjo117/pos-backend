@@ -5,7 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ProductVariantFifoHistoryRequest;
+use App\Http\Requests\StoreProductVariantRequest;
 use App\Http\Resources\InventoryMovementResource;
+use App\Http\Resources\ProductVariantResource;
 use App\Models\InventoryLot;
 use App\Models\Product;
 use App\Models\ProductVariant;
@@ -31,172 +33,27 @@ class ProductVariantController extends Controller
             ->get();
 
         return response()->json([
-            'data' => $variants,
+            'data' => ProductVariantResource::collection($variants)->resolve(),
         ]);
     }
 
     /**
      * Store a newly created variant.
      */
-    public function store(Request $request, Product $product): JsonResponse
+    public function store(StoreProductVariantRequest $request, Product $product): JsonResponse
     {
-        $this->normalizePricingTaxRates($request);
-
-        $validated = $request->validate([
-            'brand_id' => 'required|exists:brands,id',
-            'sku' => [
-                'nullable',
-                'string',
-                'max:255',
-            ],
-            'upc' => [
-                'nullable',
-                'string',
-                'max:50',
-            ],
-            'status' => 'nullable|in:active,discontinued,pending',
-
-            // Pricing (optional)
-            'pricing' => 'nullable|array',
-            'pricing.base_price' => 'required_with:pricing|numeric|min:0',
-            'pricing.msrp' => 'nullable|numeric|min:0',
-            'pricing.cost' => 'nullable|numeric|min:0',
-            'pricing.cost_base' => 'nullable|numeric|min:0',
-            'pricing.cost_miscellaneous' => 'nullable|numeric|min:0',
-            'pricing.tax_rate' => 'nullable|integer|min:0|max:100',
-            'pricing.cost_tax_rate' => 'nullable|integer|min:0|max:100',
-            'pricing.sale_tax_rate' => 'nullable|integer|min:0|max:100',
-            'pricing.max_discount_percentage' => 'nullable|numeric|min:0|max:100',
-            'pricing.pricing_formula' => 'nullable|string|max:255',
-
-            // Initial Inventory (optional)
-            'initial_inventory' => 'nullable|array',
-            'initial_inventory.*.warehouse_id' => 'required_with:initial_inventory|exists:warehouses,id',
-            'initial_inventory.*.stock_available' => 'nullable|integer|min:0',
-            'initial_inventory.*.reorder_point' => 'nullable|integer|min:0',
-            'initial_inventory.*.reorder_quantity' => 'nullable|integer|min:0',
-
-            'attributes' => 'missing',
-        ]);
-
         try {
-            // Create variant using service (reusing logic creates pricing/inventory)
-            // We need to adapt the structure slightly for helper method if needed,
-            // but ProductService::createVariant is simple. Let's use it or extend it.
-            // ProductService::createVariant doesn't handle pricing/inventory in one go
-            // inside the *method* shown earlier, it returned the variant.
-            // Let's implement the full transaction here or call a service method if we add one.
-            // For now, I'll implement logic here wrapping service calls or just using models
-            // since ProductService::createVariant didn't include pricing/inventory logic in the snippet I saw?
-            // Wait, looking at ProductService.php again...
-            // createProduct DOES it all. createVariant ONLY creates the variant model.
-            // I should handle pricing and inventory creation here.
-
-            \DB::beginTransaction();
-
-            // Auto-generate SKU if not provided
-            $sku = $validated['sku'];
-            if (empty($sku)) {
-                // Use product sku_base or name as base, append brand short name or ID
-                $base = $product->sku_base ?: ($product->name ? substr($product->name, 0, 10) : 'PROD');
-                $brand = \App\Models\Brand::find($validated['brand_id']);
-                $brandCode = $brand ? substr($brand->name, 0, 3) : 'XXX';
-                $sku = strtoupper($base.'-'.$brandCode.'-'.substr(uniqid(), -6));
-            }
-
-            $variant = $this->productService->createVariant($product, [
-                'brand_id' => $validated['brand_id'],
-                'sku' => $sku,
-                'upc' => $validated['upc'] ?? null,
-                'pricing' => $validated['pricing'] ?? null,
-                'status' => $validated['status'] ?? 'active',
-                'is_default' => false,
-            ]);
-
-            // Add Initial Inventory
-            if (! empty($validated['initial_inventory'])) {
-                foreach ($validated['initial_inventory'] as $invData) {
-                    // Skip if warehouse_id is not valid
-                    if (empty($invData['warehouse_id'])) {
-                        continue;
-                    }
-
-                    $variant->inventory()->create([
-                        'warehouse_id' => $invData['warehouse_id'],
-                        'quantity_available' => $invData['stock_available'] ?? 0,
-                        'reorder_point' => $invData['reorder_point'] ?? 0,
-                        'reorder_quantity' => $invData['reorder_quantity'] ?? 0,
-                        'product_id' => $product->id,
-                    ]);
-                }
-            } else {
-                // Try to create inventory for default warehouse if it exists
-                $defaultWarehouse = \DB::table('warehouses')->first();
-                if ($defaultWarehouse) {
-                    $variant->inventory()->create([
-                        'warehouse_id' => $defaultWarehouse->id,
-                        'quantity_available' => 0,
-                        'reorder_point' => 5,
-                        'reorder_quantity' => 10,
-                        'product_id' => $product->id,
-                    ]);
-                }
-            }
-
-            // Create variant-level pricing (always - either from request or copied from product)
-            $pricingData = $validated['pricing'] ?? null;
-
-            if (! $pricingData) {
-                // Copy product's current pricing as independent variant pricing
-                $productPricing = $product->pricing;
-                if ($productPricing) {
-                    $saleTaxRate = $productPricing->sale_tax_rate ?? $productPricing->tax_rate;
-                    $costTaxRate = $productPricing->cost_tax_rate ?? $saleTaxRate;
-
-                    $pricingData = [
-                        'base_price' => $productPricing->base_price,
-                        'msrp' => $productPricing->msrp,
-                        'cost' => (float) $productPricing->getRawOriginal('cost'),
-                        'cost_base' => $productPricing->getRawOriginal('cost_base'),
-                        'cost_miscellaneous' => $productPricing->getRawOriginal('cost_miscellaneous'),
-                        'tax_rate' => $saleTaxRate,
-                        'sale_tax_rate' => $saleTaxRate,
-                        'cost_tax_rate' => $costTaxRate,
-                        'max_discount_percentage' => $productPricing->max_discount_percentage,
-                    ];
-                }
-            }
-
-            if ($pricingData) {
-                $pricingData = $this->normalizePricingCostBreakdown($pricingData);
-                $pricingData['variant_id'] = $variant->id;
-                $pricingData['product_id'] = $product->id;
-                $pricing = $variant->pricing()->create($pricingData);
-                $pricing->calculateMargin();
-                $pricing->save();
-            }
-
-            $variant->loadMissing('pricing');
-            foreach ($variant->inventory()->get() as $inventory) {
-                app(\App\Services\InventoryFifoService::class)->ensureOpeningLotForInventory(
-                    $product->id,
-                    $variant->id,
-                    (int) $inventory->warehouse_id,
-                    (int) $inventory->quantity_available,
-                    (float) ($variant->pricing?->cost_total ?? 0)
-                );
-            }
-
-            \DB::commit();
+            $variant = $this->productService->createVariantWithInitialInventory(
+                $product,
+                $request->validated()
+            );
 
             return response()->json([
                 'message' => 'Variante creada exitosamente',
-                'data' => $variant->load(['brand', 'pricing', 'inventory']),
+                'data' => (new ProductVariantResource($variant))->resolve($request),
             ], 201);
 
         } catch (\Exception $e) {
-            \DB::rollBack();
-
             return response()->json([
                 'message' => 'Error al crear la variante: '.$e->getMessage(),
             ], 500);
@@ -292,7 +149,7 @@ class ProductVariantController extends Controller
         ]);
     }
 
-    public function fifoHistory(ProductVariantFifoHistoryRequest $request, Product $product, ProductVariant $variant): JsonResponse
+    public function inventoryHistory(ProductVariantFifoHistoryRequest $request, Product $product, ProductVariant $variant): JsonResponse
     {
         if ($variant->product_id !== $product->id) {
             return response()->json(['message' => 'Variante no corresponde al producto'], 404);
@@ -303,44 +160,74 @@ class ProductVariantController extends Controller
         return response()->json([
             'data' => [
                 'summary' => $history['summary'],
-                'lots' => $history['lots']->map(fn (InventoryLot $lot) => [
-                    'id' => $lot->id,
-                    'warehouse_id' => $lot->warehouse_id,
-                    'warehouse' => $lot->warehouse ? [
-                        'id' => $lot->warehouse->id,
-                        'name' => $lot->warehouse->name,
-                        'code' => $lot->warehouse->code,
-                    ] : null,
-                    'source_type' => $lot->source_type,
-                    'source_id' => $lot->source_id,
-                    'source_movement_id' => $lot->source_movement_id,
-                    'batch_number' => $lot->batch_number,
-                    'received_quantity' => (int) $lot->received_quantity,
-                    'quantity_available' => (int) $lot->quantity_available,
-                    'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
-                    'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
-                    'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
-                    'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
-                    'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
-                    'received_at' => $lot->received_at?->toIso8601String(),
-                ])->values(),
+                'lots' => $history['lots']->map(fn (InventoryLot $lot) => $this->serializedHistoryLot($lot))->values(),
                 'purchase_movements' => $history['purchase_movements']->map(fn ($movement) => [
                     ...((new InventoryMovementResource($movement))->resolve($request)),
-                    'fifo_lots' => $movement->sourceLots->map(fn (InventoryLot $lot) => [
-                        'lot_id' => $lot->id,
-                        'quantity' => (int) $lot->received_quantity,
-                        'quantity_available' => (int) $lot->quantity_available,
-                        'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
-                        'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
-                        'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
-                        'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
-                        'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
-                        'received_at' => $lot->received_at?->toIso8601String(),
-                    ])->values(),
+                    'source_lots' => $movement->sourceLots->map(fn (InventoryLot $lot) => $this->serializedMovementSourceLot($lot))->values(),
+                    'fifo_lots' => $movement->sourceLots->map(fn (InventoryLot $lot) => $this->serializedMovementSourceLot($lot))->values(),
                 ])->values(),
                 'sale_movements' => InventoryMovementResource::collection($history['sale_movements'])->resolve($request),
             ],
         ]);
+    }
+
+    public function fifoHistory(ProductVariantFifoHistoryRequest $request, Product $product, ProductVariant $variant): JsonResponse
+    {
+        return $this->inventoryHistory($request, $product, $variant);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function serializedHistoryLot(InventoryLot $lot): array
+    {
+        return [
+            'id' => $lot->id,
+            'warehouse_id' => $lot->warehouse_id,
+            'warehouse' => $lot->warehouse ? [
+                'id' => $lot->warehouse->id,
+                'name' => $lot->warehouse->name,
+                'code' => $lot->warehouse->code,
+            ] : null,
+            'source_type' => $lot->source_type,
+            'source_id' => $lot->source_id,
+            'source_movement_id' => $lot->source_movement_id,
+            'batch_number' => $lot->batch_number,
+            'received_quantity' => (int) $lot->received_quantity,
+            'quantity_available' => (int) $lot->quantity_available,
+            'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+            'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+            'tax_total' => round((int) $lot->received_quantity * (float) $lot->tax_per_unit, 2),
+            'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+            'misc_total' => round((int) $lot->received_quantity * (float) $lot->misc_per_unit, 2),
+            'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+            'landed_total' => round((int) $lot->received_quantity * (float) $lot->landed_unit_cost, 2),
+            'sale_price' => round((float) $lot->sale_price, 2),
+            'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+            'received_at' => $lot->received_at?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function serializedMovementSourceLot(InventoryLot $lot): array
+    {
+        return [
+            'lot_id' => $lot->id,
+            'quantity' => (int) $lot->received_quantity,
+            'quantity_available' => (int) $lot->quantity_available,
+            'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+            'tax_per_unit' => round((float) $lot->tax_per_unit, 2),
+            'tax_total' => round((int) $lot->received_quantity * (float) $lot->tax_per_unit, 2),
+            'misc_per_unit' => round((float) $lot->misc_per_unit, 2),
+            'misc_total' => round((int) $lot->received_quantity * (float) $lot->misc_per_unit, 2),
+            'landed_unit_cost' => round((float) $lot->landed_unit_cost, 2),
+            'landed_total' => round((int) $lot->received_quantity * (float) $lot->landed_unit_cost, 2),
+            'sale_price' => round((float) $lot->sale_price, 2),
+            'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+            'received_at' => $lot->received_at?->toIso8601String(),
+        ];
     }
 
     private function normalizePricingTaxRates(Request $request): void

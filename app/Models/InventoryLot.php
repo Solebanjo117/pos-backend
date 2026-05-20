@@ -25,6 +25,7 @@ class InventoryLot extends Model
         'tax_per_unit',
         'misc_per_unit',
         'landed_unit_cost',
+        'sale_price',
         'received_at',
     ];
 
@@ -42,6 +43,7 @@ class InventoryLot extends Model
             'tax_per_unit' => 'decimal:4',
             'misc_per_unit' => 'decimal:4',
             'landed_unit_cost' => 'decimal:4',
+            'sale_price' => 'decimal:2',
             'received_at' => 'datetime',
         ];
     }

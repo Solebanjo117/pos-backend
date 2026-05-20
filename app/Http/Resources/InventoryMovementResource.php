@@ -58,32 +58,10 @@ class InventoryMovementResource extends JsonResource
                     'expiry_date' => $this->productBatch->expiry_date?->toIso8601String(),
                 ];
             }),
-            'fifo_allocations' => $this->whenLoaded('lotAllocations', function () {
-                return $this->lotAllocations->map(fn ($allocation) => [
-                    'lot_id' => $allocation->inventory_lot_id,
-                    'quantity' => (int) $allocation->quantity,
-                    'unit_cost' => (float) $allocation->unit_cost,
-                    'total_cost' => (float) $allocation->total_cost,
-                    'source_type' => $allocation->lot?->source_type,
-                    'source_id' => $allocation->lot?->source_id,
-                    'received_at' => $allocation->lot?->received_at?->toIso8601String(),
-                ])->values();
-            }),
-            'fifo_lots' => $this->whenLoaded('sourceLots', function () {
-                return $this->sourceLots->map(fn ($lot) => [
-                    'id' => $lot->id,
-                    'batch_number' => $lot->batch_number,
-                    'source_type' => $lot->source_type,
-                    'source_id' => $lot->source_id,
-                    'received_quantity' => (int) $lot->received_quantity,
-                    'quantity_available' => (int) $lot->quantity_available,
-                    'unit_cost_base' => (float) $lot->unit_cost_base,
-                    'tax_per_unit' => (float) $lot->tax_per_unit,
-                    'misc_per_unit' => (float) $lot->misc_per_unit,
-                    'landed_unit_cost' => (float) $lot->landed_unit_cost,
-                    'received_at' => $lot->received_at?->toIso8601String(),
-                ])->values();
-            }),
+            'lot_allocations' => $this->whenLoaded('lotAllocations', fn () => $this->serializedLotAllocations()),
+            'fifo_allocations' => $this->whenLoaded('lotAllocations', fn () => $this->serializedLotAllocations()),
+            'source_lots' => $this->whenLoaded('sourceLots', fn () => $this->serializedSourceLots()),
+            'fifo_lots' => $this->whenLoaded('sourceLots', fn () => $this->serializedSourceLots()),
             'variant' => $this->whenLoaded('variant', function () {
                 return $this->variant_id ? [
                     'id' => $this->variant->id,
@@ -94,5 +72,37 @@ class InventoryMovementResource extends JsonResource
             'created_at' => $this->created_at?->toIso8601String(),
             'updated_at' => $this->updated_at?->toIso8601String(),
         ];
+    }
+
+    private function serializedLotAllocations(): mixed
+    {
+        return $this->lotAllocations->map(fn ($allocation) => [
+            'lot_id' => $allocation->inventory_lot_id,
+            'quantity' => (int) $allocation->quantity,
+            'unit_cost' => (float) $allocation->unit_cost,
+            'total_cost' => (float) $allocation->total_cost,
+            'sale_price' => (float) ($allocation->lot?->sale_price ?? 0),
+            'source_type' => $allocation->lot?->source_type,
+            'source_id' => $allocation->lot?->source_id,
+            'received_at' => $allocation->lot?->received_at?->toIso8601String(),
+        ])->values();
+    }
+
+    private function serializedSourceLots(): mixed
+    {
+        return $this->sourceLots->map(fn ($lot) => [
+            'id' => $lot->id,
+            'batch_number' => $lot->batch_number,
+            'source_type' => $lot->source_type,
+            'source_id' => $lot->source_id,
+            'received_quantity' => (int) $lot->received_quantity,
+            'quantity_available' => (int) $lot->quantity_available,
+            'unit_cost_base' => (float) $lot->unit_cost_base,
+            'tax_per_unit' => (float) $lot->tax_per_unit,
+            'misc_per_unit' => (float) $lot->misc_per_unit,
+            'landed_unit_cost' => (float) $lot->landed_unit_cost,
+            'sale_price' => (float) $lot->sale_price,
+            'received_at' => $lot->received_at?->toIso8601String(),
+        ])->values();
     }
 }
