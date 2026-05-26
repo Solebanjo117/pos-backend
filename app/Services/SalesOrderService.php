@@ -17,7 +17,7 @@ class SalesOrderService
      */
     public function getAll(array $filters = []): LengthAwarePaginator
     {
-        $query = SalesOrder::with(['customer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns']);
+        $query = SalesOrder::with(['customer', 'customerVehicle.model.make', 'customerVehicle.chassis', 'customerVehicle.engine', 'referredByCustomer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns']);
 
         // Apply filters
         if (isset($filters['status'])) {
@@ -70,7 +70,7 @@ class SalesOrderService
      */
     public function getById(int $id): ?SalesOrder
     {
-        return SalesOrder::with(['customer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns'])
+        return SalesOrder::with(['customer', 'customerVehicle.model.make', 'customerVehicle.chassis', 'customerVehicle.engine', 'referredByCustomer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns'])
             ->findOrFail($id);
     }
 
@@ -108,6 +108,8 @@ class SalesOrderService
             // Create order
             $order = SalesOrder::create([
                 'customer_id' => $data['customer_id'] ?? null,
+                'customer_vehicle_id' => $data['customer_vehicle_id'] ?? null,
+                'referred_by_customer_id' => $data['referred_by_customer_id'] ?? null,
                 'user_id' => $userId,
                 'pos_session_id' => $activeSession ? $activeSession->id : null,
                 'date' => $data['date'] ?? now(),
@@ -241,6 +243,8 @@ class SalesOrderService
         return DB::transaction(function () use ($order, $data) {
             $order->update([
                 'customer_id' => $data['customer_id'] ?? $order->customer_id,
+                'customer_vehicle_id' => array_key_exists('customer_vehicle_id', $data) ? $data['customer_vehicle_id'] : $order->customer_vehicle_id,
+                'referred_by_customer_id' => array_key_exists('referred_by_customer_id', $data) ? $data['referred_by_customer_id'] : $order->referred_by_customer_id,
                 'date' => $data['date'] ?? $order->date,
                 'discount_amount' => $data['discount_amount'] ?? $order->discount_amount,
                 'shipping_cost' => $data['shipping_cost'] ?? $order->shipping_cost,

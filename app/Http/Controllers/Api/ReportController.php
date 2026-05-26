@@ -4,8 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Services\ReportService;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 class ReportController extends Controller
@@ -51,7 +51,7 @@ class ReportController extends Controller
             'warehouse_id',
             'user_id',
             'movement_type',
-            'group_by'
+            'group_by',
         ]);
 
         $report = $this->reportService->generateMovementHistoryReport($filters);
@@ -64,7 +64,7 @@ class ReportController extends Controller
      */
     public function exportStockLevels(Request $request, string $format): Response
     {
-        if (!in_array($format, ['pdf', 'excel'])) {
+        if (! in_array($format, ['pdf', 'excel'])) {
             return response()->json(['error' => 'Invalid format'], 400);
         }
 
@@ -74,7 +74,7 @@ class ReportController extends Controller
         if ($format === 'pdf') {
             $pdfService = app(\App\Services\PdfExportService::class);
             $pdf = $pdfService->exportStockLevels($report);
-            
+
             return response($pdf, 200, [
                 'Content-Type' => 'application/pdf',
                 'Content-Disposition' => 'attachment; filename="stock-levels-report.pdf"',
@@ -93,7 +93,7 @@ class ReportController extends Controller
      */
     public function exportMovementHistory(Request $request, string $format): Response
     {
-        if (!in_array($format, ['pdf', 'excel'])) {
+        if (! in_array($format, ['pdf', 'excel'])) {
             return response()->json(['error' => 'Invalid format'], 400);
         }
 
@@ -109,7 +109,7 @@ class ReportController extends Controller
             'warehouse_id',
             'user_id',
             'movement_type',
-            'group_by'
+            'group_by',
         ]);
 
         $report = $this->reportService->generateMovementHistoryReport($filters);
@@ -117,7 +117,7 @@ class ReportController extends Controller
         if ($format === 'pdf') {
             $pdfService = app(\App\Services\PdfExportService::class);
             $pdf = $pdfService->exportMovementHistory($report);
-            
+
             return response($pdf, 200, [
                 'Content-Type' => 'application/pdf',
                 'Content-Disposition' => 'attachment; filename="movement-history-report.pdf"',
@@ -144,6 +144,21 @@ class ReportController extends Controller
 
         $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
         $report = $this->reportService->generateFinancialReport($filters);
+
+        return response()->json($report);
+    }
+
+    public function customerReferences(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date_from' => 'required|date',
+            'date_to' => 'required|date|after_or_equal:date_from',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'customer_id' => 'nullable|exists:customers,id',
+        ]);
+
+        $filters = $request->only(['date_from', 'date_to', 'warehouse_id', 'customer_id']);
+        $report = $this->reportService->generateCustomerReferenceReport($filters);
 
         return response()->json($report);
     }
@@ -220,17 +235,18 @@ class ReportController extends Controller
             $pdfService = app(\App\Services\PdfExportService::class);
             if (method_exists($pdfService, 'exportZReport')) {
                 $pdf = $pdfService->exportZReport($report);
+
                 return response($pdf, 200, [
                     'Content-Type' => 'application/pdf',
                     'Content-Disposition' => 'attachment; filename="z-report-'.$date.'.pdf"',
                 ]);
             }
         }
-        
+
         // Fallback for PDF generation if method not available
         $pdf = app('dompdf.wrapper');
-        $pdf->loadHTML('<h1>Cierre de Caja (Z-Report) - ' . $date . '</h1><pre>' . print_r($report, true) . '</pre>');
-        
+        $pdf->loadHTML('<h1>Cierre de Caja (Z-Report) - '.$date.'</h1><pre>'.print_r($report, true).'</pre>');
+
         return $pdf->download('z-report-'.$date.'.pdf');
     }
 }

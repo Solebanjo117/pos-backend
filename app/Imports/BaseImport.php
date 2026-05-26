@@ -7,7 +7,8 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
-use Maatwebsite\Excel\Facades\Excel;
+use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
 
 abstract class BaseImport
 {
@@ -15,9 +16,13 @@ abstract class BaseImport
 
     public array $errors = [];
 
+    public array $validationRows = [];
+
     public int $successCount = 0;
 
     public int $errorCount = 0;
+
+    public int $processedCount = 0;
 
     abstract public function getColumns(): array;
 
@@ -29,9 +34,9 @@ abstract class BaseImport
 
     abstract public function getEntityLabel(): string;
 
-    public function preview(UploadedFile $file, int $maxRows = 200): array
+    public function preview(UploadedFile $file, int $maxRows = 200, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
     {
-        $rows = $this->extractRows($file);
+        $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping, $maxRows);
 
         return $rows
             ->take($maxRows)
@@ -54,6 +59,7 @@ abstract class BaseImport
     public function execute(array $rows): void
     {
         foreach ($rows as $row) {
+            $this->processedCount++;
             $rowNum = (int) ($row['__row'] ?? 0);
 
             try {
@@ -78,15 +84,103 @@ abstract class BaseImport
                 $this->errors[] = [
                     'row' => $rowNum,
                     'label' => $row[$this->getLabelColumn()] ?? '',
+                    'data' => $row,
                     'error' => $e->getMessage(),
                 ];
             }
         }
     }
 
-    public function import(UploadedFile $file): void
+    public function validateRows(array $rows): void
     {
-        $this->execute($this->extractRows($file)->all());
+        foreach ($rows as $row) {
+            $this->processedCount++;
+            $rowNum = (int) ($row['__row'] ?? 0);
+
+            try {
+                $rowErrors = $this->validateRow($row);
+                $rowWarnings = $this->getWarningsForRow($row);
+
+                $this->validationRows[] = [
+                    'row' => $rowNum,
+                    'data' => $this->mapRowToPreview($row, $rowErrors, $rowWarnings),
+                    'is_valid' => empty($rowErrors),
+                    'errors' => $rowErrors,
+                    'warnings' => $rowWarnings,
+                ];
+
+                if (! empty($rowErrors)) {
+                    throw new \RuntimeException(implode(' ', $rowErrors));
+                }
+
+                $this->successCount++;
+                $this->results[] = [
+                    'row' => $rowNum,
+                    'status' => 'ok',
+                    'label' => $row[$this->getLabelColumn()] ?? '',
+                    'id' => null,
+                ];
+            } catch (\Throwable $e) {
+                $this->errorCount++;
+                $this->errors[] = [
+                    'row' => $rowNum,
+                    'label' => $row[$this->getLabelColumn()] ?? '',
+                    'data' => $row,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+    }
+
+    public function import(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): void
+    {
+        $this->execute($this->extractRows($file, $sheetIndex, $sheetName, $mapping)->all());
+    }
+
+    public function importInChunks(
+        UploadedFile|string $file,
+        int $chunkSize = 500,
+        ?callable $afterChunk = null,
+        ?int $sheetIndex = null,
+        ?string $sheetName = null,
+        array $mapping = []
+    ): void {
+        $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping);
+        $totalRows = $rows->count();
+
+        foreach ($rows->chunk($chunkSize) as $chunk) {
+            $this->execute($chunk->values()->all());
+
+            if ($afterChunk !== null) {
+                $shouldContinue = $afterChunk($this, $this->processedCount, $totalRows);
+                if ($shouldContinue === false) {
+                    break;
+                }
+            }
+        }
+    }
+
+    public function validateInChunks(
+        UploadedFile|string $file,
+        int $chunkSize = 500,
+        ?callable $afterChunk = null,
+        ?int $sheetIndex = null,
+        ?string $sheetName = null,
+        array $mapping = []
+    ): void {
+        $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping);
+        $totalRows = $rows->count();
+
+        foreach ($rows->chunk($chunkSize) as $chunk) {
+            $this->validateRows($chunk->values()->all());
+
+            if ($afterChunk !== null) {
+                $shouldContinue = $afterChunk($this, $this->processedCount, $totalRows);
+                if ($shouldContinue === false) {
+                    break;
+                }
+            }
+        }
     }
 
     protected function getLabelColumn(): string
@@ -117,22 +211,77 @@ abstract class BaseImport
         return $mapped;
     }
 
-    protected function extractRows(UploadedFile $file): Collection
+    public function inspectSheets(UploadedFile|string $file, array $mapping = []): array
     {
-        $sheet = Excel::toCollection(null, $file)->first() ?? collect();
+        $sheetInfo = $this->sheetInfo($file);
+        $sheets = [];
 
-        if ($sheet->isEmpty()) {
+        foreach ($sheetInfo as $index => $info) {
+            $rawHeaders = $this->sheetHeader($file, $info['worksheetName'] ?? null);
+            $sourceHeaders = collect($rawHeaders)
+                ->map(fn ($header) => $this->normalizeRawHeader((string) $header))
+                ->filter(fn (string $header) => $header !== '')
+                ->values()
+                ->all();
+            $headers = collect($sourceHeaders)
+                ->map(fn (string $header) => $this->applyHeaderMapping($this->mapHeader($header), $header, $mapping))
+                ->filter(fn (string $header) => $header !== '')
+                ->values()
+                ->all();
+            $rowCount = max((int) ($info['totalRows'] ?? 0) - 1, 0);
+            $analysis = $this->analyzeSheetHeaders($headers, $rowCount);
+
+            $sheets[] = [
+                'index' => $index,
+                'name' => $info['worksheetName'] ?? 'Hoja '.($index + 1),
+                'row_count' => $rowCount,
+                'headers' => $headers,
+                'source_headers' => $sourceHeaders,
+                'matched_headers' => $analysis['matched_headers'],
+                'missing_required_headers' => $analysis['missing_required_headers'],
+                'score' => $analysis['score'],
+                'is_compatible' => $analysis['is_compatible'],
+                'is_recommended' => false,
+            ];
+        }
+
+        $recommendedIndex = $this->recommendedSheetIndex($sheets);
+        foreach ($sheets as $position => $sheet) {
+            $sheets[$position]['is_recommended'] = $sheet['index'] === $recommendedIndex;
+        }
+
+        return $sheets;
+    }
+
+    public function resolveSelectedSheet(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
+    {
+        $sheets = $this->inspectSheets($file, $mapping);
+        $resolvedIndex = $this->resolveSheetIndex($sheets, $sheetIndex, $sheetName);
+
+        return $sheets[$resolvedIndex] ?? throw new \RuntimeException('La hoja seleccionada no existe en el archivo.');
+    }
+
+    protected function extractRows(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = [], ?int $maxRows = null): Collection
+    {
+        $sheets = $this->inspectSheets($file, $mapping);
+        $resolvedIndex = $this->resolveSheetIndex($sheets, $sheetIndex, $sheetName);
+        $sheetRows = collect($this->sheetRows($file, (string) ($sheets[$resolvedIndex]['name'] ?? ''), $maxRows));
+
+        if ($sheetRows->isEmpty()) {
             return collect();
         }
 
-        $rawHeaders = $sheet->shift();
-        $headers = collect($rawHeaders?->toArray() ?? [])
-            ->map(fn ($header) => $this->normalizeHeader((string) $header))
+        $rawHeaders = $sheetRows->shift();
+        $headers = collect($rawHeaders ?? [])
+            ->map(function ($header) use ($mapping): string {
+                $sourceHeader = $this->normalizeRawHeader((string) $header);
+
+                return $this->applyHeaderMapping($this->mapHeader($sourceHeader), $sourceHeader, $mapping);
+            })
             ->all();
 
         $rows = collect();
-        foreach ($sheet->values() as $index => $row) {
-            $values = $row->toArray();
+        foreach ($sheetRows->values() as $index => $values) {
             $assoc = [];
 
             foreach ($headers as $position => $header) {
@@ -154,13 +303,156 @@ abstract class BaseImport
         return $rows;
     }
 
+    /**
+     * @return array{matched_headers: array<int, string>, missing_required_headers: array<int, string>, score: int, is_compatible: bool}
+     */
+    protected function analyzeSheetHeaders(array $headers, int $rowCount): array
+    {
+        return [
+            'matched_headers' => $headers,
+            'missing_required_headers' => [],
+            'score' => $rowCount > 0 ? 1 : 0,
+            'is_compatible' => $rowCount > 0,
+        ];
+    }
+
+    protected function recommendedSheetIndex(array $sheets): int
+    {
+        return 0;
+    }
+
+    private function resolveSheetIndex(array $sheets, ?int $sheetIndex = null, ?string $sheetName = null): int
+    {
+        if ($sheetName !== null && trim($sheetName) !== '') {
+            $normalizedSheetName = mb_strtolower(trim($sheetName));
+            foreach ($sheets as $sheet) {
+                if (mb_strtolower((string) $sheet['name']) === $normalizedSheetName) {
+                    return (int) $sheet['index'];
+                }
+            }
+
+            throw new \RuntimeException("La hoja '{$sheetName}' no existe en el archivo.");
+        }
+
+        if ($sheetIndex !== null) {
+            foreach ($sheets as $sheet) {
+                if ((int) $sheet['index'] === $sheetIndex) {
+                    return $sheetIndex;
+                }
+            }
+
+            throw new \RuntimeException("La hoja seleccionada #{$sheetIndex} no existe en el archivo.");
+        }
+
+        return $this->recommendedSheetIndex($sheets);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function sheetInfo(UploadedFile|string $file): array
+    {
+        $path = $file instanceof UploadedFile ? $file->getRealPath() : $file;
+
+        if (! is_string($path) || $path === '') {
+            return [];
+        }
+
+        try {
+            return $this->readerForFile($path)->listWorksheetInfo($path);
+        } catch (\Throwable) {
+            return [[
+                'worksheetName' => 'Hoja 1',
+                'totalRows' => 0,
+                'totalColumns' => 0,
+            ]];
+        }
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    private function sheetHeader(UploadedFile|string $file, ?string $sheetName): array
+    {
+        return $this->sheetRows($file, (string) $sheetName, 0)[0] ?? [];
+    }
+
+    /**
+     * @return array<int, array<int, mixed>>
+     */
+    private function sheetRows(UploadedFile|string $file, string $sheetName, ?int $maxDataRows = null): array
+    {
+        $path = $file instanceof UploadedFile ? $file->getRealPath() : $file;
+
+        if (! is_string($path) || $path === '') {
+            return [];
+        }
+
+        $reader = $this->readerForFile($path);
+        if ($sheetName !== '') {
+            $reader->setLoadSheetsOnly([$sheetName]);
+        }
+
+        if ($maxDataRows !== null) {
+            $reader->setReadFilter($this->rowLimitFilter($maxDataRows + 1));
+        }
+
+        $spreadsheet = $reader->load($path);
+        $worksheet = $spreadsheet->getSheet(0);
+        $rows = $worksheet->toArray(null, true, true, false);
+        $spreadsheet->disconnectWorksheets();
+
+        return $rows;
+    }
+
+    private function readerForFile(string $path): \PhpOffice\PhpSpreadsheet\Reader\IReader
+    {
+        $reader = IOFactory::createReaderForFile($path);
+        $reader->setReadDataOnly(true);
+
+        return $reader;
+    }
+
+    private function rowLimitFilter(int $maxRow): IReadFilter
+    {
+        return new class($maxRow) implements IReadFilter
+        {
+            public function __construct(private readonly int $maxRow) {}
+
+            public function readCell($columnAddress, $row, $worksheetName = ''): bool
+            {
+                return (int) $row <= $this->maxRow;
+            }
+        };
+    }
+
     protected function normalizeHeader(string $header): string
+    {
+        return $this->mapHeader($this->normalizeRawHeader($header));
+    }
+
+    protected function normalizeRawHeader(string $header): string
     {
         $normalized = mb_strtolower(trim($header));
         $normalized = Str::ascii($normalized);
-        $normalized = str_replace([' ', '-', '.'], '_', $normalized);
+        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized) ?? $normalized;
 
-        return $this->mapHeader($normalized);
+        return trim($normalized, '_');
+    }
+
+    protected function applyHeaderMapping(string $mappedHeader, string $sourceHeader, array $mapping): string
+    {
+        $target = $mapping[$sourceHeader] ?? $mapping[$mappedHeader] ?? null;
+
+        if ($target === null || $target === '') {
+            return $mappedHeader;
+        }
+
+        if ($target === 'ignore') {
+            return '';
+        }
+
+        return (string) $target;
     }
 
     protected function mapHeader(string $header): string

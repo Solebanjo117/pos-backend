@@ -765,9 +765,8 @@ class ProductService
      */
     public function createVariant(Product $product, array $data): ProductVariant
     {
-        // Generate variant system_id if brand_id is present
-        $systemId = null;
-        if (! empty($data['brand_id'])) {
+        $systemId = $data['system_id'] ?? null;
+        if ($systemId === null && ! empty($data['brand_id'])) {
             $systemId = $this->generateVariantSystemId();
         }
 

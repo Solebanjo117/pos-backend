@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Customer;
 use App\Models\InventoryLot;
 use App\Models\InventoryMovement;
 use App\Models\OperationalExpense;
@@ -13,6 +14,85 @@ use Illuminate\Support\Collection;
 
 class ReportService
 {
+    public function generateCustomerReferenceReport(array $filters): array
+    {
+        $warehouseId = $filters['warehouse_id'] ?? null;
+
+        $orders = SalesOrder::query()
+            ->with(['customer:id,code,name', 'referredByCustomer:id,code,name'])
+            ->whereIn('status', ['confirmed', 'processing', 'completed'])
+            ->whereDate('date', '>=', $filters['date_from'])
+            ->whereDate('date', '<=', $filters['date_to'])
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->whereHas('items', function ($query) use ($warehouseId): void {
+                    $query->where('warehouse_id', $warehouseId);
+                });
+            })
+            ->orderBy('date')
+            ->get();
+
+        $customerIds = $orders
+            ->flatMap(fn (SalesOrder $order) => [$order->customer_id, $order->referred_by_customer_id])
+            ->filter()
+            ->unique()
+            ->values();
+
+        if (! empty($filters['customer_id'])) {
+            $filterCustomerId = (int) $filters['customer_id'];
+            $customerIds = $customerIds->filter(fn (int $customerId): bool => $customerId === $filterCustomerId)->values();
+        }
+
+        $customers = Customer::query()
+            ->whereIn('id', $customerIds)
+            ->orderBy('name')
+            ->get(['id', 'code', 'name']);
+
+        $rows = $customers->map(function (Customer $customer) use ($orders): array {
+            $directOrders = $orders->where('customer_id', $customer->id)->values();
+            $referredOrders = $orders->where('referred_by_customer_id', $customer->id)->values();
+            $directRevenue = round((float) $directOrders->sum('total'), 2);
+            $referredRevenue = round((float) $referredOrders->sum('total'), 2);
+
+            return [
+                'customer_id' => $customer->id,
+                'customer_code' => $customer->code,
+                'customer_name' => $customer->name,
+                'direct_revenue' => $directRevenue,
+                'referred_revenue' => $referredRevenue,
+                'combined_revenue' => round($directRevenue + $referredRevenue, 2),
+                'orders_count' => $directOrders->count(),
+                'referred_orders_count' => $referredOrders->count(),
+                'direct_orders' => $directOrders->map(fn (SalesOrder $order) => $this->customerReferenceOrderRow($order))->all(),
+                'referred_orders' => $referredOrders->map(fn (SalesOrder $order) => $this->customerReferenceOrderRow($order))->all(),
+            ];
+        })->sortByDesc('combined_revenue')->values();
+
+        return [
+            'summary' => [
+                'direct_revenue' => round((float) $rows->sum('direct_revenue'), 2),
+                'referred_revenue' => round((float) $rows->sum('referred_revenue'), 2),
+                'combined_revenue' => round((float) $rows->sum('combined_revenue'), 2),
+                'customers_count' => $rows->count(),
+            ],
+            'data' => $rows->all(),
+        ];
+    }
+
+    private function customerReferenceOrderRow(SalesOrder $order): array
+    {
+        return [
+            'id' => $order->id,
+            'order_number' => $order->order_number,
+            'date' => $order->date?->format('Y-m-d'),
+            'status' => $order->status,
+            'customer_id' => $order->customer_id,
+            'customer_name' => $order->customer?->name,
+            'referred_by_customer_id' => $order->referred_by_customer_id,
+            'referred_by_customer_name' => $order->referredByCustomer?->name,
+            'total' => round((float) $order->total, 2),
+        ];
+    }
+
     /**
      * Generate stock levels report
      */

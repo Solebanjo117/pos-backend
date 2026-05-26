@@ -18,6 +18,8 @@ class SalesOrder extends Model
     protected $fillable = [
         'order_number',
         'customer_id',
+        'customer_vehicle_id',
+        'referred_by_customer_id',
         'user_id',
         'pos_session_id',
         'date',
@@ -56,6 +58,16 @@ class SalesOrder extends Model
     public function customer(): BelongsTo
     {
         return $this->belongsTo(Customer::class);
+    }
+
+    public function customerVehicle(): BelongsTo
+    {
+        return $this->belongsTo(CustomerVehicle::class);
+    }
+
+    public function referredByCustomer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class, 'referred_by_customer_id');
     }
 
     public function user(): BelongsTo

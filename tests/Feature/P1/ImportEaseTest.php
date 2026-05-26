@@ -1,6 +1,7 @@
 <?php
 
 use App\Exports\BrandImportTemplate;
+use App\Exports\ProductImportTemplate;
 use App\Imports\BrandImport;
 use App\Imports\CategoryImport;
 use App\Imports\ProductImport;
@@ -14,10 +15,50 @@ use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
 use App\Models\VehicleModel;
 use App\Models\VehicleVin;
+use App\Models\Warehouse;
 use App\Services\ProductService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+
+it('publishes a compact product import template while keeping legacy fields hidden', function () {
+    $import = new ProductImport(app(ProductService::class));
+
+    $visibleHeaders = [
+        'nombre',
+        'sku',
+        'system_id',
+        'brand',
+        'categoria',
+        'costo',
+        'precio',
+        'cantidad',
+        'descripcion',
+    ];
+
+    $hiddenLegacyFields = [
+        'warehouse',
+        'categorias_extra',
+        'atributos',
+        'make',
+        'model',
+        'year',
+        'code',
+        'engine',
+        'vin',
+        'upsale_path',
+    ];
+
+    expect((new ProductImportTemplate)->headings())->toBe($visibleHeaders)
+        ->and(collect($import->getColumns())->pluck('key')->all())->toBe($visibleHeaders)
+        ->and(array_keys($import->getExampleRow()))->toBe($visibleHeaders);
+
+    foreach ($hiddenLegacyFields as $field) {
+        expect((new ProductImportTemplate)->headings())->not->toContain($field)
+            ->and(collect($import->getColumns())->pluck('key')->all())->not->toContain($field)
+            ->and($import->validFields())->toContain($field);
+    }
+});
 
 it('imports category default attributes from simple lists and keeps json legacy support', function () {
     $import = new CategoryImport;
@@ -95,6 +136,24 @@ it('imports products with simple direct columns for attributes and extra categor
         'name' => 'Encendido',
         'slug' => 'encendido',
     ]);
+    Category::create([
+        'name' => 'Motor',
+        'slug' => 'motor',
+    ]);
+    Category::create([
+        'name' => 'Servicio',
+        'slug' => 'servicio',
+    ]);
+
+    Brand::create([
+        'name' => 'NGK',
+        'status' => 'active',
+    ]);
+
+    $warehouse = Warehouse::create([
+        'code' => 'MAIN',
+        'name' => 'Principal',
+    ]);
 
     $import = new ProductImport(app(ProductService::class));
     $import->execute([
@@ -102,7 +161,10 @@ it('imports products with simple direct columns for attributes and extra categor
             '__row' => 2,
             'nombre' => 'Bujia import facil',
             'sku' => 'IMP-EASY',
+            'brand' => 'NGK',
             'categoria' => 'Encendido',
+            'cantidad' => '3',
+            'warehouse' => $warehouse->code,
             'categorias_extra' => 'Motor, Servicio',
             'atributos' => 'color:rojo,largo:15cm',
         ],
@@ -123,7 +185,9 @@ it('imports products with simple direct columns for attributes and extra categor
         'unit' => 'cm',
     ]);
 
-    expect($product->variants()->count())->toBe(0);
+    $variant = $product->variants()->firstOrFail();
+
+    expect($variant->inventory()->where('warehouse_id', $warehouse->id)->firstOrFail()->quantity_available)->toBe(3);
 });
 
 it('rolls back partial work when an import row fails during processing', function () {

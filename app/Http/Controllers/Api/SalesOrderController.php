@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\PosCheckoutRequest;
+use App\Models\CustomerVehicle;
 use App\Models\Inventory;
 use App\Models\PaymentMethod;
 use App\Services\SalesOrderService;
@@ -100,6 +101,8 @@ class SalesOrderController extends Controller
             $validated = $request->validate([
                 'user_id' => 'nullable|integer|min:1',
                 'customer_id' => 'nullable|exists:customers,id',
+                'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
+                'referred_by_customer_id' => ['nullable', Rule::exists('customers', 'id')->where('status', 'active')],
                 'date' => 'nullable|date',
                 'status' => 'nullable|in:draft,pending,confirmed',
                 'source_quote_id' => 'nullable|exists:sales_quotes,id',
@@ -132,6 +135,8 @@ class SalesOrderController extends Controller
             if (! empty($validated['items'])) {
                 $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
             }
+
+            $this->validateCustomerVehicle($validated);
 
             // Map specific payment types to generic database types
             $paymentTypeMap = [
@@ -311,6 +316,8 @@ class SalesOrderController extends Controller
 
             $validated = $request->validate([
                 'customer_id' => 'nullable|exists:customers,id',
+                'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
+                'referred_by_customer_id' => ['nullable', Rule::exists('customers', 'id')->where('status', 'active')],
                 'date' => 'nullable|date',
                 'discount_amount' => 'nullable|numeric|min:0',
                 'shipping_cost' => 'nullable|numeric|min:0',
@@ -334,6 +341,8 @@ class SalesOrderController extends Controller
             if (! empty($validated['items'])) {
                 $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
             }
+
+            $this->validateCustomerVehicle($validated);
 
             // ── Enforce price override permission (R05) ──
             $userRole = $request->user()->role ?? '';
@@ -869,6 +878,34 @@ class SalesOrderController extends Controller
         }
 
         $request->merge(['items' => $items]);
+    }
+
+    /**
+     * @throws ValidationException
+     */
+    private function validateCustomerVehicle(array $data): void
+    {
+        if (empty($data['customer_vehicle_id'])) {
+            return;
+        }
+
+        if (empty($data['customer_id'])) {
+            throw ValidationException::withMessages([
+                'customer_vehicle_id' => 'Selecciona un cliente antes de seleccionar un carro.',
+            ]);
+        }
+
+        $vehicleBelongsToCustomer = CustomerVehicle::query()
+            ->whereKey($data['customer_vehicle_id'])
+            ->where('customer_id', $data['customer_id'])
+            ->where('status', 'active')
+            ->exists();
+
+        if (! $vehicleBelongsToCustomer) {
+            throw ValidationException::withMessages([
+                'customer_vehicle_id' => 'El carro seleccionado no pertenece al cliente de la venta.',
+            ]);
+        }
     }
 
     /**

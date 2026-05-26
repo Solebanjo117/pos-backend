@@ -4,8 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Customer extends Model
 {
@@ -66,6 +66,11 @@ class Customer extends Model
         return $this->hasMany(SalesOrder::class);
     }
 
+    public function vehicles(): HasMany
+    {
+        return $this->hasMany(CustomerVehicle::class);
+    }
+
     /**
      * Check if customer has available credit
      */
@@ -74,7 +79,7 @@ class Customer extends Model
         if ($this->credit_limit <= 0) {
             return false;
         }
-        
+
         return ($this->current_balance + $amount) <= $this->credit_limit;
     }
 
@@ -125,8 +130,8 @@ class Customer extends Model
     {
         $lastCustomer = static::withTrashed()->latest('id')->first();
         $nextId = $lastCustomer ? $lastCustomer->id + 1 : 1;
-        
-        return 'CL' . str_pad($nextId, 6, '0', STR_PAD_LEFT);
+
+        return 'CL'.str_pad($nextId, 6, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -152,10 +157,10 @@ class Customer extends Model
     {
         return $query->where(function ($q) use ($term) {
             $q->where('code', 'ilike', "%{$term}%")
-              ->orWhere('name', 'ilike', "%{$term}%")
-              ->orWhere('email', 'ilike', "%{$term}%")
-              ->orWhere('phone', 'ilike', "%{$term}%")
-              ->orWhere('tax_id', 'ilike', "%{$term}%");
+                ->orWhere('name', 'ilike', "%{$term}%")
+                ->orWhere('email', 'ilike', "%{$term}%")
+                ->orWhere('phone', 'ilike', "%{$term}%")
+                ->orWhere('tax_id', 'ilike', "%{$term}%");
         });
     }
 }

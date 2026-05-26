@@ -3,7 +3,6 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
 use App\Models\VehicleModel;
 use App\Models\VehicleVin;
@@ -56,37 +55,66 @@ class VehicleVinController extends Controller
 
     public function indexByModelEngine(int $modelId, int $engineId): JsonResponse
     {
-        $this->rejectUnscopedVinEndpoint();
+        $this->resolveModelAndEngine($modelId, $engineId);
+
+        return response()->json(['data' => $this->modelEngineVins($modelId, $engineId)->get()]);
     }
 
     public function storeByModelEngine(Request $request, int $modelId, int $engineId): JsonResponse
     {
-        $this->rejectUnscopedVinEndpoint();
+        $this->resolveModelAndEngine($modelId, $engineId);
+
+        return $this->storeModelEngineVin($request, $modelId, $engineId);
     }
 
     public function destroyByModelEngine(int $modelId, int $engineId, int $vinId): JsonResponse
     {
-        $this->rejectUnscopedVinEndpoint();
+        $this->resolveModelAndEngine($modelId, $engineId);
+
+        return $this->destroyModelEngineVin($modelId, $engineId, $vinId);
     }
 
     public function indexByModelChassisEngine(int $modelId, int $chassisId, int $engineId): JsonResponse
     {
-        $this->resolveScopedVehicle($modelId, $chassisId, $engineId);
+        $this->resolveModelAndEngine($modelId, $engineId);
 
-        $vins = VehicleVin::query()
-            ->where('model_id', $modelId)
-            ->where('chassis_id', $chassisId)
-            ->where('engine_id', $engineId)
-            ->orderBy('created_at', 'desc')
-            ->get();
-
-        return response()->json(['data' => $vins]);
+        return response()->json(['data' => $this->modelEngineVins($modelId, $engineId)->get()]);
     }
 
     public function storeByModelChassisEngine(Request $request, int $modelId, int $chassisId, int $engineId): JsonResponse
     {
-        $this->resolveScopedVehicle($modelId, $chassisId, $engineId);
+        $this->resolveModelAndEngine($modelId, $engineId);
 
+        return $this->storeModelEngineVin($request, $modelId, $engineId);
+    }
+
+    public function destroyByModelChassisEngine(int $modelId, int $chassisId, int $engineId, int $vinId): JsonResponse
+    {
+        $this->resolveModelAndEngine($modelId, $engineId);
+
+        return $this->destroyModelEngineVin($modelId, $engineId, $vinId);
+    }
+
+    public function moveScopedVin(Request $request, int $modelId, int $chassisId, int $engineId, int $vinId): JsonResponse
+    {
+        abort(422, 'Los VINs ahora se administran por modelo y motor; no se mueven por chasis.');
+    }
+
+    private function rejectUnscopedVinEndpoint(): never
+    {
+        abort(422, 'Los VINs requieren modelo y motor.');
+    }
+
+    private function modelEngineVins(int $modelId, int $engineId): \Illuminate\Database\Eloquent\Builder
+    {
+        return VehicleVin::query()
+            ->where('model_id', $modelId)
+            ->where('engine_id', $engineId)
+            ->orderBy('created_at', 'desc');
+    }
+
+    private function storeModelEngineVin(Request $request, int $modelId, int $engineId): JsonResponse
+    {
         $validated = $request->validate([
             'vin' => 'required|string|max:40',
             'notes' => 'nullable|string|max:255',
@@ -96,87 +124,34 @@ class VehicleVinController extends Controller
         $vin = VehicleVin::firstOrCreate(
             [
                 'model_id' => $modelId,
-                'chassis_id' => $chassisId,
                 'engine_id' => $engineId,
                 'vin' => $vinValue,
             ],
             [
+                'chassis_id' => null,
                 'notes' => $validated['notes'] ?? null,
             ]
         );
 
-        return response()->json(['data' => $vin], $vin->wasRecentlyCreated ? 201 : 200);
+        $wasRecentlyCreated = $vin->wasRecentlyCreated;
+
+        if ($vin->chassis_id !== null) {
+            $vin->update(['chassis_id' => null]);
+        }
+
+        return response()->json(['data' => $vin->refresh()], $wasRecentlyCreated ? 201 : 200);
     }
 
-    public function destroyByModelChassisEngine(int $modelId, int $chassisId, int $engineId, int $vinId): JsonResponse
+    private function destroyModelEngineVin(int $modelId, int $engineId, int $vinId): JsonResponse
     {
-        $this->resolveScopedVehicle($modelId, $chassisId, $engineId);
-
         $vin = VehicleVin::query()
             ->where('model_id', $modelId)
-            ->where('chassis_id', $chassisId)
             ->where('engine_id', $engineId)
             ->findOrFail($vinId);
 
         $vin->delete();
 
         return response()->json(['message' => 'VIN eliminado'], 200);
-    }
-
-    public function moveScopedVin(Request $request, int $modelId, int $chassisId, int $engineId, int $vinId): JsonResponse
-    {
-        $this->resolveScopedVehicle($modelId, $chassisId, $engineId);
-
-        $validated = $request->validate([
-            'target_chassis_id' => 'required|integer|exists:vehicle_chassis,id',
-        ]);
-
-        $targetChassisId = (int) $validated['target_chassis_id'];
-        $this->resolveScopedVehicle($modelId, $targetChassisId, $engineId);
-
-        $vin = VehicleVin::query()
-            ->where('model_id', $modelId)
-            ->where('chassis_id', $chassisId)
-            ->where('engine_id', $engineId)
-            ->findOrFail($vinId);
-
-        $duplicate = VehicleVin::query()
-            ->where('model_id', $modelId)
-            ->where('chassis_id', $targetChassisId)
-            ->where('engine_id', $engineId)
-            ->where('vin', $vin->vin)
-            ->first();
-
-        if ($duplicate) {
-            $vin->delete();
-
-            return response()->json(['data' => $duplicate], 200);
-        }
-
-        $vin->update(['chassis_id' => $targetChassisId]);
-
-        return response()->json(['data' => $vin->refresh()], 200);
-    }
-
-    private function rejectUnscopedVinEndpoint(): never
-    {
-        abort(422, 'Los VINs requieren modelo, chasis y motor.');
-    }
-
-    /**
-     * @return array{0: VehicleModel, 1: VehicleChassis, 2: VehicleEngine}
-     */
-    private function resolveScopedVehicle(int $modelId, int $chassisId, int $engineId): array
-    {
-        [$model, $engine] = $this->resolveModelAndEngine($modelId, $engineId);
-        $chassis = VehicleChassis::with('models:id')->whereKey($chassisId)->firstOrFail();
-
-        $chassisBelongsToModel = $chassis->model_id === $model->id
-            || $chassis->models->contains('id', $model->id);
-
-        abort_unless($chassisBelongsToModel, 422, 'El chasis no pertenece al modelo seleccionado.');
-
-        return [$model, $chassis, $engine];
     }
 
     /**

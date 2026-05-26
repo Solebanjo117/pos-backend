@@ -43,7 +43,7 @@ Route::get('vehicle-models/{modelId}/engines/{engineId}/vins', [VehicleVinContro
 Route::post('vehicle-models/{modelId}/engines/{engineId}/vins', [VehicleVinController::class, 'storeByModelEngine'])->middleware('role:admin,manager');
 Route::delete('vehicle-models/{modelId}/engines/{engineId}/vins/{vinId}', [VehicleVinController::class, 'destroyByModelEngine'])->middleware('role:admin,manager');
 
-// Vehicle VINs scoped to car + engine
+// Legacy alias: VINs are resolved by model + engine and ignore chassis.
 Route::get('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins', [VehicleVinController::class, 'indexByModelChassisEngine']);
 Route::post('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins', [VehicleVinController::class, 'storeByModelChassisEngine'])->middleware('role:admin,manager');
 Route::patch('vehicle-models/{modelId}/chassis/{chassisId}/engines/{engineId}/vins/{vinId}', [VehicleVinController::class, 'moveScopedVin'])->middleware('role:admin,manager');

@@ -4,9 +4,9 @@ namespace App\Services;
 
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\DB;
 
 class CustomerService
 {
@@ -18,22 +18,22 @@ class CustomerService
         $query = Customer::query();
 
         // Search
-        if (!empty($filters['search'])) {
+        if (! empty($filters['search'])) {
             $query->search($filters['search']);
         }
 
         // Filter by type
-        if (!empty($filters['type'])) {
+        if (! empty($filters['type'])) {
             $query->where('type', $filters['type']);
         }
 
         // Filter by status
-        if (!empty($filters['status'])) {
+        if (! empty($filters['status'])) {
             $query->where('status', $filters['status']);
         }
 
         // Filter by credit
-        if (!empty($filters['has_credit'])) {
+        if (! empty($filters['has_credit'])) {
             $query->withCredit();
         }
 
@@ -51,7 +51,7 @@ class CustomerService
     public function createCustomer(array $data): Customer
     {
         DB::beginTransaction();
-        
+
         try {
             // Generate code if not provided
             if (empty($data['code'])) {
@@ -61,7 +61,7 @@ class CustomerService
             $customer = Customer::create($data);
 
             // Create initial transaction if balance is set
-            if (!empty($data['initial_balance']) && $data['initial_balance'] != 0) {
+            if (! empty($data['initial_balance']) && $data['initial_balance'] != 0) {
                 $this->createTransaction(
                     $customer,
                     'adjustment',
@@ -74,6 +74,7 @@ class CustomerService
             }
 
             DB::commit();
+
             return $customer->fresh();
         } catch (\Exception $e) {
             DB::rollBack();
@@ -87,11 +88,12 @@ class CustomerService
     public function updateCustomer(Customer $customer, array $data): Customer
     {
         DB::beginTransaction();
-        
+
         try {
             $customer->update($data);
-            
+
             DB::commit();
+
             return $customer->fresh();
         } catch (\Exception $e) {
             DB::rollBack();
@@ -117,9 +119,14 @@ class CustomerService
      */
     public function getCustomerWithTransactions(int $customerId): Customer
     {
-        return Customer::with(['transactions' => function ($query) {
-            $query->orderBy('transaction_date', 'desc')->limit(50);
-        }])->findOrFail($customerId);
+        return Customer::with([
+            'vehicles.model.make',
+            'vehicles.chassis',
+            'vehicles.engine',
+            'transactions' => function ($query) {
+                $query->orderBy('transaction_date', 'desc')->limit(50);
+            },
+        ])->findOrFail($customerId);
     }
 
     /**
@@ -129,18 +136,18 @@ class CustomerService
         Customer $customer,
         string $type,
         float $amount,
-        string $description = null,
-        string $referenceType = null,
-        int $referenceId = null,
-        int $createdBy = null
+        ?string $description = null,
+        ?string $referenceType = null,
+        ?int $referenceId = null,
+        ?int $createdBy = null
     ): CustomerTransaction {
         DB::beginTransaction();
-        
+
         try {
             $balanceBefore = $customer->current_balance;
-            
+
             // Calculate new balance
-            $balanceAfter = match($type) {
+            $balanceAfter = match ($type) {
                 'sale' => $balanceBefore + $amount,
                 'payment' => $balanceBefore - $amount,
                 'credit_note' => $balanceBefore - $amount,
@@ -166,6 +173,7 @@ class CustomerService
             $customer->update(['current_balance' => $balanceAfter]);
 
             DB::commit();
+
             return $transaction;
         } catch (\Exception $e) {
             DB::rollBack();
@@ -201,7 +209,7 @@ class CustomerService
     /**
      * Adjust customer balance
      */
-    public function adjustBalance(Customer $customer, float $amount, string $reason, int $userId = null): CustomerTransaction
+    public function adjustBalance(Customer $customer, float $amount, string $reason, ?int $userId = null): CustomerTransaction
     {
         return $this->createTransaction(
             $customer,

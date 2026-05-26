@@ -9,6 +9,19 @@ class StoreProductRequest extends FormRequest
 {
     protected function prepareForValidation(): void
     {
+        $vehicleCompatibility = $this->input('vehicle_compatibility');
+        if (is_array($vehicleCompatibility) && array_is_list($vehicleCompatibility)) {
+            $this->merge([
+                'vehicle_compatibility' => [
+                    'engines' => collect($vehicleCompatibility)
+                        ->filter()
+                        ->map(fn ($engineId): array => ['engine_id' => (int) $engineId])
+                        ->values()
+                        ->all(),
+                ],
+            ]);
+        }
+
         $pricing = $this->input('pricing');
 
         if (! is_array($pricing)) {
