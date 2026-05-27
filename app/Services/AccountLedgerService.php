@@ -79,6 +79,16 @@ class AccountLedgerService
                 'amount_paid' => (float) $order->amount_paid,
                 'amount_due' => (float) $order->amount_due,
                 'payment_status' => $order->payment_status,
+                'payment_summary' => $order->payments
+                    ->groupBy('method')
+                    ->map(fn ($payments, string $method): array => [
+                        'method' => $method,
+                        'method_label' => $payments->first()->formatted_method,
+                        'amount' => round((float) $payments->sum('amount'), 2),
+                        'count' => $payments->count(),
+                    ])
+                    ->values()
+                    ->all(),
             ])
             ->values();
 

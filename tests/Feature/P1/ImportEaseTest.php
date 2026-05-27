@@ -36,7 +36,7 @@ it('publishes a compact product import template while keeping legacy fields hidd
         'descripcion',
     ];
 
-    $hiddenLegacyFields = [
+    $acceptedLegacyFields = [
         'warehouse',
         'categorias_extra',
         'atributos',
@@ -46,18 +46,19 @@ it('publishes a compact product import template while keeping legacy fields hidd
         'code',
         'engine',
         'vin',
-        'upsale_path',
     ];
 
     expect((new ProductImportTemplate)->headings())->toBe($visibleHeaders)
         ->and(collect($import->getColumns())->pluck('key')->all())->toBe($visibleHeaders)
         ->and(array_keys($import->getExampleRow()))->toBe($visibleHeaders);
 
-    foreach ($hiddenLegacyFields as $field) {
+    foreach ($acceptedLegacyFields as $field) {
         expect((new ProductImportTemplate)->headings())->not->toContain($field)
             ->and(collect($import->getColumns())->pluck('key')->all())->not->toContain($field)
             ->and($import->validFields())->toContain($field);
     }
+
+    expect($import->validFields())->not->toContain('upsale_path');
 });
 
 it('imports category default attributes from simple lists and keeps json legacy support', function () {
@@ -188,6 +189,35 @@ it('imports products with simple direct columns for attributes and extra categor
     $variant = $product->variants()->firstOrFail();
 
     expect($variant->inventory()->where('warehouse_id', $warehouse->id)->firstOrFail()->quantity_available)->toBe(3);
+});
+
+it('ignores legacy upsale path during product import', function () {
+    $category = Category::create([
+        'name' => 'Encendido',
+        'slug' => 'encendido-upsale',
+        'upsale_path' => 'ruta-original',
+    ]);
+
+    Brand::create([
+        'name' => 'NGK',
+        'status' => 'active',
+    ]);
+
+    $import = new ProductImport(app(ProductService::class));
+    $import->execute([
+        [
+            '__row' => 2,
+            'nombre' => 'Bujia sin upsale',
+            'sku' => 'NO-UPSALE-1',
+            'brand' => 'NGK',
+            'categoria' => $category->name,
+            'upsale_path' => 'ruta-importada',
+        ],
+    ]);
+
+    expect($import->successCount)->toBe(1)
+        ->and($import->errorCount)->toBe(0)
+        ->and($category->refresh()->upsale_path)->toBe('ruta-original');
 });
 
 it('rolls back partial work when an import row fails during processing', function () {

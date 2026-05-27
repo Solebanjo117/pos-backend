@@ -131,7 +131,9 @@ it('records partial receivable receipt and keeps remaining document open', funct
 
     $statement->assertOk()
         ->assertJsonPath('data.documents.0.id', $order->id)
-        ->assertJsonPath('data.documents.0.amount_due', 60);
+        ->assertJsonPath('data.documents.0.amount_due', 60)
+        ->assertJsonPath('data.documents.0.payment_summary.0.method', 'cash')
+        ->assertJsonPath('data.documents.0.payment_summary.0.amount', 40);
 });
 
 it('rejects credit as accounts receivable receipt method', function () {

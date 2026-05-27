@@ -2,14 +2,22 @@
 
 namespace App\Services;
 
+use App\Models\AccountPaymentBatch;
+use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\InventoryLot;
 use App\Models\InventoryMovement;
+use App\Models\JournalLine;
 use App\Models\OperationalExpense;
+use App\Models\PosSession;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
+use App\Models\SalesOrderPayment;
+use App\Models\Warehouse;
+use Carbon\Carbon;
 use Illuminate\Support\Collection;
 
 class ReportService
@@ -170,11 +178,48 @@ class ReportService
                 'fifo_cost_current' => $currentCost,
             ];
         });
+        $sortBy = $filters['sort_by'] ?? 'name';
+        $sortDirection = $filters['sort_direction'] ?? 'asc';
+        $allowedSorts = [
+            'sku',
+            'name',
+            'brand',
+            'warehouse',
+            'current_stock',
+            'reorder_point',
+            'target_level',
+            'status',
+            'current_cost',
+            'stock_value',
+        ];
+
+        if (! in_array($sortBy, $allowedSorts, true)) {
+            $sortBy = 'name';
+        }
+
+        $products = $products
+            ->sortBy(function (array $product) use ($sortBy) {
+                return $sortBy === 'sku'
+                    ? ($product['variant_sku'] ?? $product['sku'])
+                    : ($product[$sortBy] ?? null);
+            }, SORT_REGULAR, $sortDirection === 'desc')
+            ->values();
+
+        $page = max((int) ($filters['page'] ?? 1), 1);
+        $perPage = 25;
+        $totalProducts = $products->count();
+        $paginatedProducts = $products->forPage($page, $perPage)->values();
 
         return [
             'summary' => $summary,
             'by_warehouse' => $byWarehouse,
-            'products' => $products->values()->all(),
+            'products' => $paginatedProducts->all(),
+            'pagination' => [
+                'current_page' => $page,
+                'last_page' => max((int) ceil($totalProducts / $perPage), 1),
+                'per_page' => $perPage,
+                'total' => $totalProducts,
+            ],
         ];
     }
 
@@ -206,7 +251,12 @@ class ReportService
             $query->where('user_id', $filters['user_id']);
         }
 
-        $movements = $query->orderBy('created_at', 'desc')->get();
+        $movements = (clone $query)->orderBy('created_at', 'desc')->get();
+        $page = max((int) ($filters['page'] ?? 1), 1);
+        $perPage = 25;
+        $paginatedMovements = (clone $query)
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage, ['*'], 'page', $page);
 
         // Calculate summary
         $summary = $this->calculateMovementSummary($movements);
@@ -219,7 +269,7 @@ class ReportService
         $byProduct = $this->groupByProduct($movements);
 
         // Format movements
-        $formattedMovements = $movements->take(100)->map(function ($movement) {
+        $formattedMovements = $paginatedMovements->getCollection()->map(function ($movement) {
             $lotTotalCost = round((float) $movement->lotAllocations->sum('total_cost'), 2);
             $lotAllocations = $movement->lotAllocations->map(fn ($allocation) => [
                 'lot_id' => $allocation->inventory_lot_id,
@@ -257,6 +307,12 @@ class ReportService
             'timeline' => $timeline,
             'by_product' => $byProduct,
             'movements' => $formattedMovements->all(),
+            'pagination' => [
+                'current_page' => $paginatedMovements->currentPage(),
+                'last_page' => $paginatedMovements->lastPage(),
+                'per_page' => $paginatedMovements->perPage(),
+                'total' => $paginatedMovements->total(),
+            ],
         ];
     }
 
@@ -271,19 +327,35 @@ class ReportService
         $normal = 0;
         $optimal = 0;
         $totalValue = 0;
+        $criticalValue = 0;
+        $lowValue = 0;
+        $normalValue = 0;
+        $optimalValue = 0;
 
         foreach ($inventory as $item) {
             $status = $this->getStockStatus($item);
+            $stockValue = $this->fifoStockValue($item);
 
-            match ($status) {
-                'critical' => $critical++,
-                'low' => $low++,
-                'normal' => $normal++,
-                'optimal' => $optimal++,
-                default => null,
-            };
+            switch ($status) {
+                case 'critical':
+                    $critical++;
+                    $criticalValue += $stockValue;
+                    break;
+                case 'low':
+                    $low++;
+                    $lowValue += $stockValue;
+                    break;
+                case 'normal':
+                    $normal++;
+                    $normalValue += $stockValue;
+                    break;
+                case 'optimal':
+                    $optimal++;
+                    $optimalValue += $stockValue;
+                    break;
+            }
 
-            $totalValue += $this->fifoStockValue($item);
+            $totalValue += $stockValue;
         }
 
         return [
@@ -293,6 +365,11 @@ class ReportService
             'normal_stock' => $normal,
             'optimal_stock' => $optimal,
             'total_value' => round($totalValue, 2),
+            'critical_value' => round($criticalValue, 2),
+            'low_value' => round($lowValue, 2),
+            'normal_value' => round($normalValue, 2),
+            'optimal_value' => round($optimalValue, 2),
+            'at_risk_value' => round($criticalValue + $lowValue, 2),
         ];
     }
 
@@ -357,6 +434,10 @@ class ReportService
                 'low' => $metrics['low_stock'],
                 'normal' => $metrics['normal_stock'],
                 'optimal' => $metrics['optimal_stock'],
+                'total_value' => $metrics['total_value'],
+                'critical_value' => $metrics['critical_value'],
+                'low_value' => $metrics['low_value'],
+                'at_risk_value' => $metrics['at_risk_value'],
             ];
         })->values()->all();
     }
@@ -372,6 +453,9 @@ class ReportService
 
         $quantityIn = $movements->where('movement_type', 'in')->sum('quantity');
         $quantityOut = $movements->where('movement_type', 'out')->sum('quantity');
+        $totalAssignedCost = $movements->sum(
+            fn (InventoryMovement $movement): float => (float) $movement->lotAllocations->sum('total_cost')
+        );
 
         return [
             'total_movements' => $movements->count(),
@@ -381,6 +465,7 @@ class ReportService
             'total_quantity_in' => $quantityIn,
             'total_quantity_out' => $quantityOut,
             'net_change' => $quantityIn - $quantityOut,
+            'total_assigned_cost' => round((float) $totalAssignedCost, 2),
         ];
     }
 
@@ -587,6 +672,480 @@ class ReportService
         ];
     }
 
+    public function generateIncomeStatementReport(array $filters): array
+    {
+        $basis = $filters['basis'] ?? 'cash';
+        $financialReport = $basis === 'accrual_operational'
+            ? $this->generateAccrualIncomeStatement($filters)
+            : $this->generateFinancialReport($filters);
+        $summary = $financialReport['summary'];
+        $expenses = $financialReport['operational_expenses'];
+        $creditBalances = $this->financialCreditBalances(array_merge($filters, ['as_of' => true]));
+
+        $incomeTotal = (float) $summary['total_revenue'] - (float) $summary['total_refunds'];
+        $costTotal = (float) $summary['total_cogs'];
+        $operationalExpenseTotal = (float) $summary['total_operational_expenses'];
+
+        return [
+            'basis' => $basis,
+            'period' => [
+                'date_from' => $filters['date_from'],
+                'date_to' => $filters['date_to'],
+                'warehouse_id' => $filters['warehouse_id'] ?? null,
+            ],
+            'summary' => $summary,
+            'sections' => [
+                [
+                    'key' => 'income',
+                    'label' => 'Ingresos',
+                    'amount' => round($incomeTotal, 2),
+                    'rows' => [
+                        $this->statementRow('cash-sales', 'Ventas cobradas', (float) $summary['total_revenue'], 'income', 'Pagos recibidos en el periodo.'),
+                        $this->statementRow('approved-refunds', 'Devoluciones aprobadas', -1 * (float) $summary['total_refunds'], 'expense', 'Contra-ingreso del periodo.'),
+                        $this->statementRow('tax-collected', 'ITBM cobrado', (float) $summary['total_tax'], 'neutral', 'Informativo; no altera utilidad neta.'),
+                        $this->statementRow('discounts', 'Descuentos aplicados', -1 * (float) $summary['total_discounts'], 'neutral', 'Informativo del periodo.'),
+                    ],
+                ],
+                [
+                    'key' => 'cost-of-goods-sold',
+                    'label' => 'Costo de ventas',
+                    'amount' => round($costTotal, 2),
+                    'rows' => [
+                        $this->statementRow('merchandise-cost', 'Costo de mercancia vendida', $costTotal, 'expense', 'Costo registrado en lineas vendidas.'),
+                    ],
+                ],
+                [
+                    'key' => 'gross-profit',
+                    'label' => 'Utilidad bruta',
+                    'amount' => (float) $summary['gross_profit'],
+                    'rows' => [
+                        $this->statementRow('gross-profit-total', 'Utilidad bruta', (float) $summary['gross_profit'], 'profit', 'Ingresos cobrados menos costo y devoluciones.'),
+                    ],
+                ],
+                [
+                    'key' => 'operational-expenses',
+                    'label' => 'Gastos operativos',
+                    'amount' => round($operationalExpenseTotal, 2),
+                    'rows' => collect($expenses['by_category'])
+                        ->map(fn (array $category): array => $this->statementRow(
+                            'operational-expense-'.$category['category'],
+                            $category['label'],
+                            (float) $category['amount'],
+                            'expense',
+                            $category['count'].' registros'
+                        ))
+                        ->values()
+                        ->all(),
+                ],
+                [
+                    'key' => 'open-balances',
+                    'label' => 'Saldos abiertos',
+                    'amount' => round(
+                        (float) $creditBalances['accounts_receivable']['total_open_balance']
+                        - (float) $creditBalances['accounts_payable']['total_open_balance'],
+                        2
+                    ),
+                    'rows' => [
+                        $this->statementRow(
+                            'accounts-receivable',
+                            'Credito cliente',
+                            (float) $creditBalances['accounts_receivable']['total_open_balance'],
+                            'asset',
+                            'Cuentas por cobrar; no son caja cobrada ni modifican utilidad neta.'
+                        ),
+                        $this->statementRow(
+                            'accounts-payable',
+                            'Credito proveedor',
+                            (float) $creditBalances['accounts_payable']['total_open_balance'],
+                            'liability',
+                            'Cuentas por pagar; no son salida de caja hasta pagarse.'
+                        ),
+                    ],
+                ],
+                [
+                    'key' => 'net-profit',
+                    'label' => 'Utilidad neta',
+                    'amount' => (float) $summary['net_profit'],
+                    'rows' => [
+                        $this->statementRow('net-profit-total', 'Utilidad neta', (float) $summary['net_profit'], 'profit', 'Resultado despues de gastos operativos.'),
+                    ],
+                ],
+            ],
+            'timeline' => $financialReport['timeline'],
+            'operational_expenses' => $expenses,
+            'credit_balances' => $creditBalances,
+            'comparison' => ($filters['compare'] ?? 'none') === 'previous_period'
+                ? $this->previousPeriodComparison($filters, $basis)
+                : null,
+            'breakdowns' => $this->financialBreakdowns($filters),
+        ];
+    }
+
+    public function generateFinancialPositionReport(array $filters): array
+    {
+        $warehouseId = $filters['warehouse_id'] ?? null;
+        $mode = $filters['mode'] ?? 'current_snapshot';
+        $dateTo = $filters['date_to'] ?? now()->toDateString();
+        $cash = $mode === 'as_of'
+            ? $this->operationalCashAsOf($dateTo, $warehouseId)
+            : $this->currentOperationalCash($warehouseId);
+        $creditBalances = $mode === 'as_of'
+            ? $this->financialCreditBalances(['warehouse_id' => $warehouseId, 'date_to' => $dateTo, 'as_of' => true])
+            : $this->financialCreditBalances(['warehouse_id' => $warehouseId]);
+        $inventoryValue = $mode === 'as_of'
+            ? $this->inventoryValueAsOf($dateTo, $warehouseId)
+            : $this->currentInventoryValue($warehouseId);
+
+        $accountsReceivable = (float) $creditBalances['accounts_receivable']['total_open_balance'];
+        $accountsPayable = (float) $creditBalances['accounts_payable']['total_open_balance'];
+        $totalAssets = round($cash + $accountsReceivable + $inventoryValue, 2);
+        $totalLiabilities = round($accountsPayable, 2);
+        $operationalEquity = round($totalAssets - $totalLiabilities, 2);
+
+        return [
+            'basis' => 'current_operational_snapshot',
+            'mode' => $mode,
+            'as_of' => $dateTo,
+            'warehouse_id' => $warehouseId,
+            'summary' => [
+                'total_assets' => $totalAssets,
+                'total_liabilities' => $totalLiabilities,
+                'operational_equity' => $operationalEquity,
+                'operational_cash' => round($cash, 2),
+                'accounts_receivable' => round($accountsReceivable, 2),
+                'inventory_value' => round($inventoryValue, 2),
+                'accounts_payable' => round($accountsPayable, 2),
+            ],
+            'sections' => [
+                [
+                    'key' => 'assets',
+                    'label' => 'Activos',
+                    'amount' => $totalAssets,
+                    'rows' => [
+                        $this->statementRow('operational-cash', 'Caja operativa estimada', $cash, 'asset', 'Sesiones de caja abiertas con ingresos y retiros de efectivo.'),
+                        $this->statementRow('accounts-receivable', 'Credito cliente', $accountsReceivable, 'asset', 'Cuentas por cobrar abiertas.'),
+                        $this->statementRow('inventory', 'Inventario disponible', $inventoryValue, 'asset', 'Lotes actuales valorizados por costo landed.'),
+                    ],
+                ],
+                [
+                    'key' => 'liabilities',
+                    'label' => 'Pasivos',
+                    'amount' => $totalLiabilities,
+                    'rows' => [
+                        $this->statementRow('accounts-payable', 'Credito proveedor', $accountsPayable, 'liability', 'Cuentas por pagar abiertas.'),
+                    ],
+                ],
+                [
+                    'key' => 'equity',
+                    'label' => 'Patrimonio operativo',
+                    'amount' => $operationalEquity,
+                    'rows' => [
+                        $this->statementRow('operational-equity', 'Activos menos pasivos', $operationalEquity, 'equity', 'Resultado operativo calculado, no capital contable formal.'),
+                    ],
+                ],
+            ],
+            'credit_balances' => $creditBalances,
+            'aging' => [
+                'accounts_receivable' => $creditBalances['accounts_receivable']['aging_buckets'],
+                'accounts_payable' => $creditBalances['accounts_payable']['aging_buckets'],
+            ],
+            'documents' => [
+                'accounts_receivable' => $creditBalances['accounts_receivable']['documents'],
+                'accounts_payable' => $creditBalances['accounts_payable']['documents'],
+            ],
+            'warnings' => $mode === 'current_snapshot'
+                ? [[
+                    'code' => 'current_snapshot',
+                    'message' => 'Foto actual; no reconstruye saldos historicos al corte.',
+                ]]
+                : [],
+        ];
+    }
+
+    private function statementRow(string $key, string $label, float $amount, string $type, ?string $detail = null): array
+    {
+        return [
+            'key' => $key,
+            'label' => $label,
+            'amount' => round($amount, 2),
+            'type' => $type,
+            'detail' => $detail,
+        ];
+    }
+
+    private function currentOperationalCash(?int $warehouseId = null): float
+    {
+        $sessions = PosSession::query()
+            ->where('status', 'open')
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->where('warehouse_id', $warehouseId);
+            })
+            ->get();
+
+        $cash = $sessions->sum(function (PosSession $session): float {
+            $movementsIn = (float) CashMovement::query()
+                ->where('pos_session_id', $session->id)
+                ->where('type', 'in')
+                ->sum('amount');
+            $movementsOut = (float) CashMovement::query()
+                ->where('pos_session_id', $session->id)
+                ->where('type', 'out')
+                ->sum('amount');
+
+            return (float) $session->opening_amount + $movementsIn - $movementsOut;
+        });
+
+        return round((float) $cash, 2);
+    }
+
+    private function currentInventoryValue(?int $warehouseId = null): float
+    {
+        $value = InventoryLot::query()
+            ->where('quantity_available', '>', 0)
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->where('warehouse_id', $warehouseId);
+            })
+            ->get(['quantity_available', 'landed_unit_cost'])
+            ->sum(fn (InventoryLot $lot): float => (int) $lot->quantity_available * (float) $lot->landed_unit_cost);
+
+        return round((float) $value, 2);
+    }
+
+    private function generateAccrualIncomeStatement(array $filters): array
+    {
+        $warehouseId = $filters['warehouse_id'] ?? null;
+
+        $orders = SalesOrder::with(['items'])
+            ->whereIn('status', ['confirmed', 'processing', 'completed'])
+            ->whereBetween('date', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->whereHas('items', function ($query) use ($warehouseId): void {
+                    $query->where('warehouse_id', $warehouseId);
+                });
+            })
+            ->orderBy('date')
+            ->get();
+
+        $timeline = [];
+        $totalRevenue = 0.0;
+        $totalCogs = 0.0;
+        $totalTax = 0.0;
+        $totalDiscounts = 0.0;
+
+        foreach ($orders as $order) {
+            $date = $order->date->format('Y-m-d');
+            $timeline[$date] ??= [
+                'date' => $date,
+                'revenue' => 0,
+                'cogs' => 0,
+                'profit' => 0,
+                'orders_count' => 0,
+                'operational_expenses' => 0,
+            ];
+
+            $items = $warehouseId ? $order->items->where('warehouse_id', $warehouseId) : $order->items;
+            $orderRevenue = (float) $items->sum('total');
+            $orderCogs = (float) $items->sum(fn ($item): float => (float) $item->unit_cost * (int) $item->quantity);
+
+            $totalRevenue += $orderRevenue;
+            $totalCogs += $orderCogs;
+            $totalTax += (float) $items->sum('tax_amount');
+            $totalDiscounts += (float) $items->sum('discount_amount');
+            $timeline[$date]['revenue'] += $orderRevenue;
+            $timeline[$date]['cogs'] += $orderCogs;
+            $timeline[$date]['orders_count'] += 1;
+        }
+
+        $refundsQuery = \App\Models\SalesReturn::where('status', 'approved')
+            ->whereBetween('created_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+
+        if ($warehouseId) {
+            $refundsQuery->where('warehouse_id', $warehouseId);
+        }
+
+        $totalRefunds = (float) $refundsQuery->sum('total_amount');
+        $expenses = $this->financialOperationalExpenses($filters);
+        $totalOperationalExpenses = (float) $expenses['total'];
+
+        foreach ($expenses['timeline'] as $expenseDay) {
+            $date = $expenseDay['date'];
+            $timeline[$date] ??= [
+                'date' => $date,
+                'revenue' => 0,
+                'cogs' => 0,
+                'profit' => 0,
+                'orders_count' => 0,
+                'operational_expenses' => 0,
+            ];
+            $timeline[$date]['operational_expenses'] = $expenseDay['amount'];
+        }
+
+        foreach ($timeline as &$dayData) {
+            $dayData['gross_profit'] = $dayData['revenue'] - $dayData['cogs'];
+            $dayData['profit'] = $dayData['gross_profit'] - ($dayData['operational_expenses'] ?? 0);
+        }
+
+        $grossProfit = $totalRevenue - $totalCogs - $totalRefunds;
+        $netProfit = $grossProfit - $totalOperationalExpenses;
+        $margin = $totalRevenue > 0 ? ($netProfit / $totalRevenue) * 100 : 0;
+
+        return [
+            'summary' => [
+                'total_revenue' => round($totalRevenue, 2),
+                'total_cogs' => round($totalCogs, 2),
+                'total_refunds' => round($totalRefunds, 2),
+                'total_operational_expenses' => round($totalOperationalExpenses, 2),
+                'gross_profit' => round($grossProfit, 2),
+                'net_profit' => round($netProfit, 2),
+                'margin_percentage' => round($margin, 2),
+                'total_tax' => round($totalTax, 2),
+                'total_discounts' => round($totalDiscounts, 2),
+                'orders_count' => $orders->count(),
+            ],
+            'timeline' => array_values($timeline),
+            'operational_expenses' => [
+                'total' => round($totalOperationalExpenses, 2),
+                'by_category' => $expenses['by_category'],
+                'timeline' => $expenses['timeline'],
+            ],
+            'credit_balances' => $this->financialCreditBalances($filters),
+        ];
+    }
+
+    private function previousPeriodComparison(array $filters, string $basis): array
+    {
+        $from = Carbon::parse($filters['date_from'])->startOfDay();
+        $to = Carbon::parse($filters['date_to'])->startOfDay();
+        $days = $from->diffInDays($to) + 1;
+        $previousTo = $from->copy()->subDay();
+        $previousFrom = $previousTo->copy()->subDays($days - 1);
+        $previousFilters = array_merge($filters, [
+            'date_from' => $previousFrom->toDateString(),
+            'date_to' => $previousTo->toDateString(),
+            'basis' => $basis,
+            'compare' => 'none',
+        ]);
+
+        $current = $basis === 'accrual_operational'
+            ? $this->generateAccrualIncomeStatement($filters)
+            : $this->generateFinancialReport($filters);
+        $previous = $basis === 'accrual_operational'
+            ? $this->generateAccrualIncomeStatement($previousFilters)
+            : $this->generateFinancialReport($previousFilters);
+
+        $variance = collect(['total_revenue', 'total_cogs', 'total_operational_expenses', 'gross_profit', 'net_profit', 'margin_percentage'])
+            ->mapWithKeys(function (string $key) use ($current, $previous): array {
+                $currentValue = (float) ($current['summary'][$key] ?? 0);
+                $previousValue = (float) ($previous['summary'][$key] ?? 0);
+                $amount = round($currentValue - $previousValue, 2);
+
+                return [
+                    $key => [
+                        'amount' => $amount,
+                        'percentage' => $previousValue != 0.0 ? round(($amount / $previousValue) * 100, 2) : null,
+                    ],
+                ];
+            })
+            ->all();
+
+        return [
+            'previous_period' => [
+                'date_from' => $previousFilters['date_from'],
+                'date_to' => $previousFilters['date_to'],
+            ],
+            'previous' => [
+                'summary' => $previous['summary'],
+            ],
+            'variance' => $variance,
+        ];
+    }
+
+    private function financialBreakdowns(array $filters): array
+    {
+        return [
+            'by_brand' => collect($this->generateBrandProfitability($filters)['data'] ?? [])
+                ->map(fn (array $row): array => array_merge($row, ['id' => $row['brand_id']]))
+                ->all(),
+            'by_category' => collect($this->generateCategoryProfitability($filters)['data'] ?? [])
+                ->map(fn (array $row): array => array_merge($row, ['id' => $row['category_id']]))
+                ->all(),
+            'by_warehouse' => $this->warehouseProfitabilityBreakdown($filters),
+        ];
+    }
+
+    private function warehouseProfitabilityBreakdown(array $filters): array
+    {
+        $warehouseIds = ! empty($filters['warehouse_id'])
+            ? collect([(int) $filters['warehouse_id']])
+            : Warehouse::query()->pluck('id');
+
+        return $warehouseIds->map(function (int $warehouseId) use ($filters): array {
+            $warehouse = Warehouse::find($warehouseId);
+            $report = $this->generateFinancialReport(array_merge($filters, ['warehouse_id' => $warehouseId]));
+
+            return [
+                'id' => $warehouseId,
+                'name' => $warehouse?->name ?? 'Sucursal #'.$warehouseId,
+                'revenue' => $report['summary']['total_revenue'],
+                'cogs' => $report['summary']['total_cogs'],
+                'profit' => $report['summary']['net_profit'],
+                'margin' => $report['summary']['margin_percentage'],
+            ];
+        })->values()->all();
+    }
+
+    private function operationalCashAsOf(string $dateTo, ?int $warehouseId = null): float
+    {
+        $end = Carbon::parse($dateTo)->endOfDay();
+
+        $opening = (float) PosSession::query()
+            ->where('opened_at', '<=', $end)
+            ->when($warehouseId, fn ($query) => $query->where('warehouse_id', $warehouseId))
+            ->sum('opening_amount');
+
+        $sessionIds = PosSession::query()
+            ->where('opened_at', '<=', $end)
+            ->when($warehouseId, fn ($query) => $query->where('warehouse_id', $warehouseId))
+            ->pluck('id');
+
+        $movementsIn = (float) CashMovement::query()
+            ->whereIn('pos_session_id', $sessionIds)
+            ->where('type', 'in')
+            ->where('created_at', '<=', $end)
+            ->sum('amount');
+        $movementsOut = (float) CashMovement::query()
+            ->whereIn('pos_session_id', $sessionIds)
+            ->where('type', 'out')
+            ->where('created_at', '<=', $end)
+            ->sum('amount');
+        $cashReceipts = (float) SalesOrderPayment::query()
+            ->where('method', 'cash')
+            ->where('paid_at', '<=', $end)
+            ->when($warehouseId, function ($query) use ($warehouseId): void {
+                $query->whereHas('salesOrder.items', fn ($query) => $query->where('warehouse_id', $warehouseId));
+            })
+            ->sum('amount');
+        $cashPayments = (float) PurchaseOrderPayment::query()
+            ->where('method', 'cash')
+            ->where('paid_at', '<=', $end)
+            ->when($warehouseId, fn ($query) => $query->whereHas('purchaseOrder', fn ($query) => $query->where('warehouse_id', $warehouseId)))
+            ->sum('amount');
+
+        return round($opening + $movementsIn + $cashReceipts - $movementsOut - $cashPayments, 2);
+    }
+
+    private function inventoryValueAsOf(string $dateTo, ?int $warehouseId = null): float
+    {
+        $end = Carbon::parse($dateTo)->endOfDay();
+        $value = InventoryLot::query()
+            ->where('received_at', '<=', $end)
+            ->when($warehouseId, fn ($query) => $query->where('warehouse_id', $warehouseId))
+            ->get(['quantity_available', 'landed_unit_cost'])
+            ->sum(fn (InventoryLot $lot): float => (int) $lot->quantity_available * (float) $lot->landed_unit_cost);
+
+        return round((float) $value, 2);
+    }
+
     /**
      * @return array<string, array<string, float|int>>
      */
@@ -595,11 +1154,16 @@ class ReportService
         $warehouseId = $filters['warehouse_id'] ?? null;
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
+        $asOf = ($filters['as_of'] ?? false) && $dateTo
+            ? Carbon::parse($dateTo)->endOfDay()
+            : null;
 
         $receivableOrders = SalesOrder::query()
-            ->with(['payments', 'returns'])
-            ->whereIn('payment_status', ['pending', 'partial'])
+            ->with(['payments', 'returns', 'customer:id,code,name', 'items:id,sales_order_id,warehouse_id'])
             ->whereNotIn('status', ['cancelled'])
+            ->when(! $asOf, function ($query): void {
+                $query->whereIn('payment_status', ['pending', 'partial']);
+            })
             ->when($dateFrom, function ($query) use ($dateFrom): void {
                 $query->whereDate('date', '>=', $dateFrom);
             })
@@ -612,13 +1176,16 @@ class ReportService
                 });
             })
             ->get()
-            ->filter(fn (SalesOrder $order): bool => (float) $order->amount_due > 0)
+            ->map(fn (SalesOrder $order): array => $this->receivableDocumentRow($order, $asOf))
+            ->filter(fn (array $document): bool => $document['amount_due'] > 0)
             ->values();
 
         $payableOrders = PurchaseOrder::query()
-            ->with('payments')
-            ->whereIn('payment_status', ['pending', 'partial'])
+            ->with(['payments', 'supplier:id,name'])
             ->where('status', '!=', 'cancelled')
+            ->when(! $asOf, function ($query): void {
+                $query->whereIn('payment_status', ['pending', 'partial']);
+            })
             ->when($dateFrom, function ($query) use ($dateFrom): void {
                 $query->whereDate('order_date', '>=', $dateFrom);
             })
@@ -629,25 +1196,142 @@ class ReportService
                 $query->where('warehouse_id', $warehouseId);
             })
             ->get()
-            ->filter(fn (PurchaseOrder $order): bool => (float) $order->amount_due > 0)
+            ->map(fn (PurchaseOrder $order): array => $this->payableDocumentRow($order, $asOf))
+            ->filter(fn (array $document): bool => $document['amount_due'] > 0)
             ->values();
 
         return [
             'accounts_receivable' => [
-                'total_open_balance' => round((float) $receivableOrders->sum(
-                    fn (SalesOrder $order): float => (float) $order->amount_due
-                ), 2),
+                'total_open_balance' => round((float) $receivableOrders->sum('amount_due'), 2),
                 'open_documents_count' => $receivableOrders->count(),
-                'accounts_count' => $receivableOrders->pluck('customer_id')->unique()->count(),
+                'accounts_count' => $receivableOrders->pluck('account_id')->filter()->unique()->count(),
+                'aging_buckets' => $this->agingBuckets($receivableOrders),
+                'documents' => $receivableOrders->all(),
+                'recent_movements' => $this->recentCreditMovements('customer', $filters),
             ],
             'accounts_payable' => [
-                'total_open_balance' => round((float) $payableOrders->sum(
-                    fn (PurchaseOrder $order): float => (float) $order->amount_due
-                ), 2),
+                'total_open_balance' => round((float) $payableOrders->sum('amount_due'), 2),
                 'open_documents_count' => $payableOrders->count(),
-                'accounts_count' => $payableOrders->pluck('supplier_id')->unique()->count(),
+                'accounts_count' => $payableOrders->pluck('account_id')->filter()->unique()->count(),
+                'aging_buckets' => $this->agingBuckets($payableOrders),
+                'documents' => $payableOrders->all(),
+                'recent_movements' => $this->recentCreditMovements('supplier', $filters),
             ],
         ];
+    }
+
+    private function receivableDocumentRow(SalesOrder $order, ?Carbon $asOf = null): array
+    {
+        $paid = $asOf
+            ? (float) $order->payments->where('method', '!=', 'credit')->filter(fn ($payment): bool => $payment->paid_at <= $asOf)->sum('amount')
+            : (float) $order->amount_paid;
+        $returned = $asOf
+            ? (float) $order->returns->where('status', 'approved')->filter(fn ($return): bool => $return->created_at <= $asOf)->sum('total_amount')
+            : (float) $order->total_returned;
+        $effectiveTotal = max(0, (float) $order->total - $returned);
+        $amountDue = round(max(0, $effectiveTotal - $paid), 2);
+        $referenceDate = $order->date?->toDateString();
+        $daysOutstanding = $referenceDate
+            ? Carbon::parse($referenceDate)->diffInDays($asOf ?? now(), false)
+            : 0;
+
+        return [
+            'id' => $order->id,
+            'document_type' => 'sales_order',
+            'document_number' => $order->order_number,
+            'account_id' => $order->customer_id,
+            'account_name' => $order->customer?->name,
+            'date' => $referenceDate,
+            'due_date' => $referenceDate,
+            'total' => round((float) $order->total, 2),
+            'amount_paid' => round($paid, 2),
+            'amount_due' => $amountDue,
+            'days_overdue' => max(0, (int) $daysOutstanding),
+            'warehouse_id' => $order->items->first()?->warehouse_id,
+            'status' => $order->payment_status,
+        ];
+    }
+
+    private function payableDocumentRow(PurchaseOrder $order, ?Carbon $asOf = null): array
+    {
+        $paid = $asOf
+            ? (float) $order->payments->filter(fn ($payment): bool => $payment->paid_at <= $asOf)->sum('amount')
+            : (float) $order->amount_paid;
+        $amountDue = round(max(0, (float) $order->total - $paid), 2);
+        $referenceDate = $order->order_date?->toDateString();
+        $daysOutstanding = $referenceDate
+            ? Carbon::parse($referenceDate)->diffInDays($asOf ?? now(), false)
+            : 0;
+
+        return [
+            'id' => $order->id,
+            'document_type' => 'purchase_order',
+            'document_number' => $order->po_number,
+            'account_id' => $order->supplier_id,
+            'account_name' => $order->supplier?->name,
+            'date' => $referenceDate,
+            'due_date' => $referenceDate,
+            'total' => round((float) $order->total, 2),
+            'amount_paid' => round($paid, 2),
+            'amount_due' => $amountDue,
+            'days_overdue' => max(0, (int) $daysOutstanding),
+            'warehouse_id' => $order->warehouse_id,
+            'status' => $order->payment_status,
+        ];
+    }
+
+    /**
+     * @param  Collection<int, array<string, mixed>>  $documents
+     */
+    private function agingBuckets(Collection $documents): array
+    {
+        $buckets = collect([
+            'current' => ['label' => 'Actual', 'amount' => 0.0, 'count' => 0],
+            '1_30' => ['label' => '1-30 dias', 'amount' => 0.0, 'count' => 0],
+            '31_60' => ['label' => '31-60 dias', 'amount' => 0.0, 'count' => 0],
+            '61_90' => ['label' => '61-90 dias', 'amount' => 0.0, 'count' => 0],
+            '90_plus' => ['label' => '90+ dias', 'amount' => 0.0, 'count' => 0],
+        ])->all();
+
+        foreach ($documents as $document) {
+            $days = (int) $document['days_overdue'];
+            $key = match (true) {
+                $days <= 0 => 'current',
+                $days <= 30 => '1_30',
+                $days <= 60 => '31_60',
+                $days <= 90 => '61_90',
+                default => '90_plus',
+            };
+
+            $buckets[$key]['amount'] = round($buckets[$key]['amount'] + (float) $document['amount_due'], 2);
+            $buckets[$key]['count']++;
+        }
+
+        return $buckets;
+    }
+
+    private function recentCreditMovements(string $accountType, array $filters): array
+    {
+        return AccountPaymentBatch::query()
+            ->where('account_type', $accountType)
+            ->when(! empty($filters['date_from']), fn ($query) => $query->whereDate('paid_at', '>=', $filters['date_from']))
+            ->when(! empty($filters['date_to']), fn ($query) => $query->whereDate('paid_at', '<=', $filters['date_to']))
+            ->orderByDesc('paid_at')
+            ->limit(10)
+            ->get()
+            ->map(fn (AccountPaymentBatch $batch): array => [
+                'id' => $batch->id,
+                'batch_number' => $batch->batch_number,
+                'account_type' => $batch->account_type,
+                'account_id' => $batch->account_id,
+                'direction' => $batch->direction,
+                'amount' => round((float) $batch->amount, 2),
+                'method' => $batch->method,
+                'paid_at' => $batch->paid_at?->toISOString(),
+                'reference_number' => $batch->reference_number,
+            ])
+            ->values()
+            ->all();
     }
 
     private function financialOperationalExpenses(array $filters): array
@@ -655,7 +1339,8 @@ class ReportService
         $warehouseId = $filters['warehouse_id'] ?? null;
 
         $query = OperationalExpense::query()
-            ->whereBetween('expense_date', [$filters['date_from'], $filters['date_to']]);
+            ->whereDate('expense_date', '>=', $filters['date_from'])
+            ->whereDate('expense_date', '<=', $filters['date_to']);
 
         if ($warehouseId) {
             $query->where(function ($query) use ($warehouseId): void {
@@ -689,6 +1374,55 @@ class ReportService
                 ->sortBy('date')
                 ->values()
                 ->all(),
+        ];
+    }
+
+    public function generateLedgerTrialBalance(array $filters): array
+    {
+        $lines = JournalLine::query()
+            ->with('ledgerAccount')
+            ->whereHas('journalEntry', function ($query) use ($filters): void {
+                $query->whereBetween('occurred_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
+                    ->when(! empty($filters['warehouse_id']), fn ($query) => $query->where('warehouse_id', $filters['warehouse_id']));
+            })
+            ->get();
+
+        $accounts = $lines
+            ->groupBy('ledger_account_id')
+            ->map(function (Collection $accountLines): array {
+                $account = $accountLines->first()->ledgerAccount;
+                $debit = round((float) $accountLines->sum('debit'), 2);
+                $credit = round((float) $accountLines->sum('credit'), 2);
+
+                return [
+                    'account_id' => $account?->id,
+                    'account_code' => $account?->code,
+                    'account_name' => $account?->name,
+                    'account_type' => $account?->type,
+                    'debit' => $debit,
+                    'credit' => $credit,
+                    'balance' => round($debit - $credit, 2),
+                ];
+            })
+            ->sortBy('account_code')
+            ->values()
+            ->all();
+
+        $totalDebit = round((float) $lines->sum('debit'), 2);
+        $totalCredit = round((float) $lines->sum('credit'), 2);
+
+        return [
+            'period' => [
+                'date_from' => $filters['date_from'],
+                'date_to' => $filters['date_to'],
+                'warehouse_id' => $filters['warehouse_id'] ?? null,
+            ],
+            'summary' => [
+                'total_debit' => $totalDebit,
+                'total_credit' => $totalCredit,
+                'is_balanced' => abs($totalDebit - $totalCredit) <= 0.005,
+            ],
+            'accounts' => $accounts,
         ];
     }
 
@@ -848,14 +1582,16 @@ class ReportService
     {
         $startOfDay = \Carbon\Carbon::parse($date)->startOfDay();
         $endOfDay = \Carbon\Carbon::parse($date)->endOfDay();
+        $sessions = \App\Models\PosSession::with('user')
+            ->whereBetween('opened_at', [$startOfDay, $endOfDay])
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->when($userId, fn ($q) => $q->where('user_id', $userId))
+            ->get();
 
         // =========================================
         // 1. CASH DRAWER: PosSession opening balance
         // =========================================
-        $openingAmount = (float) \App\Models\PosSession::whereBetween('opened_at', [$startOfDay, $endOfDay])
-            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
-            ->when($userId, fn ($q) => $q->where('user_id', $userId))
-            ->sum('opening_amount');
+        $openingAmount = (float) $sessions->sum('opening_amount');
 
         // =========================================
         // 2. PAYMENTS received today (Cash-basis revenue)
@@ -934,7 +1670,12 @@ class ReportService
                 'cash_sales' => 0,
                 'cash_refunds' => 0,
                 'expected_cash' => 0,
+                'declared_cash' => 0,
+                'closing_amount' => 0,
+                'difference' => 0,
+                'sessions_count' => $sessions->count(),
             ],
+            'by_user' => [],
         ];
 
         // 5a. Payments → total_sales + by_payment_method
@@ -988,19 +1729,89 @@ class ReportService
         $cashRefunds = $totalRefunds;
 
         // Cash movements (retiros / ingresos extra) from sessions of the day
-        $sessionIds = \App\Models\PosSession::whereBetween('opened_at', [$startOfDay, $endOfDay])
-            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
-            ->when($userId, fn ($q) => $q->where('user_id', $userId))
-            ->pluck('id');
+        $sessionIds = $sessions->pluck('id');
 
         $cashMovementsIn = (float) \App\Models\CashMovement::whereIn('pos_session_id', $sessionIds)->where('type', 'in')->sum('amount');
         $cashMovementsOut = (float) \App\Models\CashMovement::whereIn('pos_session_id', $sessionIds)->where('type', 'out')->sum('amount');
+        $sessionExpectedCash = (float) $sessions->sum('expected_amount');
+        $sessionClosingAmount = (float) $sessions->sum('closing_amount');
+        $sessionDeclaredCash = (float) $sessions->sum(function ($session): float {
+            $summary = $session->closing_details['summary'] ?? [];
+
+            return (float) ($summary['declared_cash'] ?? $summary['counted_cash'] ?? $session->closing_amount ?? 0);
+        });
+        $sessionDifference = (float) $sessions->sum(function ($session): float {
+            $summary = $session->closing_details['summary'] ?? [];
+
+            if (array_key_exists('total_difference', $summary)) {
+                return (float) $summary['total_difference'];
+            }
+
+            if (array_key_exists('difference', $summary)) {
+                return (float) $summary['difference'];
+            }
+
+            if ($session->closing_amount !== null && $session->expected_amount !== null) {
+                return (float) $session->closing_amount - (float) $session->expected_amount;
+            }
+
+            return 0.0;
+        });
 
         $summary['cash_drawer']['cash_sales'] = round($cashSales, 2);
         $summary['cash_drawer']['cash_refunds'] = round($cashRefunds, 2);
         $summary['cash_drawer']['cash_movements_in'] = round($cashMovementsIn, 2);
         $summary['cash_drawer']['cash_movements_out'] = round($cashMovementsOut, 2);
-        $summary['cash_drawer']['expected_cash'] = round($openingAmount + $cashSales - $cashRefunds + $cashMovementsIn - $cashMovementsOut, 2);
+        $summary['cash_drawer']['expected_cash'] = round(
+            $sessionExpectedCash > 0
+                ? $sessionExpectedCash
+                : $openingAmount + $cashSales - $cashRefunds + $cashMovementsIn - $cashMovementsOut,
+            2
+        );
+        $summary['cash_drawer']['declared_cash'] = round($sessionDeclaredCash, 2);
+        $summary['cash_drawer']['closing_amount'] = round($sessionClosingAmount, 2);
+        $summary['cash_drawer']['difference'] = round($sessionDifference, 2);
+        $summary['by_user'] = $sessions
+            ->groupBy('user_id')
+            ->map(function (Collection $userSessions, $groupedUserId): array {
+                $declaredCash = (float) $userSessions->sum(function ($session): float {
+                    $summary = $session->closing_details['summary'] ?? [];
+
+                    return (float) ($summary['declared_cash'] ?? $summary['counted_cash'] ?? $session->closing_amount ?? 0);
+                });
+                $expectedCash = (float) $userSessions->sum('expected_amount');
+                $closingAmount = (float) $userSessions->sum('closing_amount');
+                $difference = (float) $userSessions->sum(function ($session): float {
+                    $summary = $session->closing_details['summary'] ?? [];
+
+                    if (array_key_exists('total_difference', $summary)) {
+                        return (float) $summary['total_difference'];
+                    }
+
+                    if (array_key_exists('difference', $summary)) {
+                        return (float) $summary['difference'];
+                    }
+
+                    if ($session->closing_amount !== null && $session->expected_amount !== null) {
+                        return (float) $session->closing_amount - (float) $session->expected_amount;
+                    }
+
+                    return 0.0;
+                });
+
+                return [
+                    'user_id' => (int) $groupedUserId,
+                    'user_name' => $userSessions->first()->user?->name,
+                    'sessions_count' => $userSessions->count(),
+                    'opening_amount' => round((float) $userSessions->sum('opening_amount'), 2),
+                    'expected_cash' => round($expectedCash, 2),
+                    'declared_cash' => round($declaredCash, 2),
+                    'closing_amount' => round($closingAmount, 2),
+                    'difference' => round($difference, 2),
+                ];
+            })
+            ->values()
+            ->all();
 
         // Round everything
         $summary['total_sales'] = round($summary['total_sales'], 2);

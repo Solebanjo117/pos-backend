@@ -13,6 +13,7 @@ Route::prefix('customers')->middleware('role:admin,manager,seller,cashier')->gro
     Route::post('/{customer}/vehicles', [CustomerVehicleController::class, 'store']);
     Route::put('/{customer}/vehicles/{vehicle}', [CustomerVehicleController::class, 'update']);
     Route::delete('/{customer}/vehicles/{vehicle}', [CustomerVehicleController::class, 'destroy']);
+    Route::get('/{customer}/sales-history', [CustomerController::class, 'salesHistory']);
     Route::get('/{customer}', [CustomerController::class, 'show']);
     Route::put('/{customer}', [CustomerController::class, 'update']);
     Route::get('/{id}/orders', [CustomerController::class, 'orders']);

@@ -3,10 +3,11 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\CustomerSalesHistoryRequest;
 use App\Models\Customer;
 use App\Services\CustomerService;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class CustomerController extends Controller
 {
@@ -25,9 +26,9 @@ class CustomerController extends Controller
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'ilike', "%{$search}%")
-                  ->orWhere('email', 'ilike', "%{$search}%")
-                  ->orWhere('phone', 'ilike', "%{$search}%")
-                  ->orWhere('code', 'ilike', "%{$search}%");
+                    ->orWhere('email', 'ilike', "%{$search}%")
+                    ->orWhere('phone', 'ilike', "%{$search}%")
+                    ->orWhere('code', 'ilike', "%{$search}%");
             });
         }
 
@@ -42,7 +43,7 @@ class CustomerController extends Controller
 
         $perPage = $request->input('per_page', 15);
         $customers = $query->latest()->paginate($perPage);
-        
+
         return response()->json($customers);
     }
 
@@ -85,11 +86,25 @@ class CustomerController extends Controller
     {
         $customer = $this->customerService->getCustomerWithTransactions($id);
         $balanceSummary = $this->customerService->getBalanceSummary($customer);
-        
+
         return response()->json([
             'customer' => $customer,
             'balance_summary' => $balanceSummary,
         ]);
+    }
+
+    /**
+     * Get customer sales history with items and payments
+     */
+    public function salesHistory(CustomerSalesHistoryRequest $request, Customer $customer): JsonResponse
+    {
+        $validated = $request->validated();
+
+        return response()->json($this->customerService->getSalesHistory(
+            $customer,
+            $validated,
+            (int) ($validated['per_page'] ?? 15)
+        ));
     }
 
     /**
@@ -98,7 +113,7 @@ class CustomerController extends Controller
     public function update(Request $request, Customer $customer): JsonResponse
     {
         $validated = $request->validate([
-            'code' => 'sometimes|string|max:50|unique:customers,code,' . $customer->id,
+            'code' => 'sometimes|string|max:50|unique:customers,code,'.$customer->id,
             'type' => 'sometimes|in:individual,business',
             'name' => 'sometimes|string|max:255',
             'email' => 'nullable|email|max:255',
@@ -130,6 +145,7 @@ class CustomerController extends Controller
     {
         try {
             $this->customerService->deleteCustomer($customer);
+
             return response()->json(['message' => 'Cliente eliminado exitosamente']);
         } catch (\Exception $e) {
             return response()->json(['error' => $e->getMessage()], 400);
@@ -143,7 +159,7 @@ class CustomerController extends Controller
     {
         $customer = Customer::findOrFail($id);
         $transactions = $customer->transactions()->paginate(50);
-        
+
         return response()->json($transactions);
     }
 
@@ -154,7 +170,7 @@ class CustomerController extends Controller
     {
         $customer = Customer::findOrFail($id);
         $orders = $customer->salesOrders()->latest()->paginate(20);
-        
+
         return response()->json($orders);
     }
 
@@ -165,9 +181,9 @@ class CustomerController extends Controller
     {
         $term = $request->input('q', '');
         $limit = $request->input('limit', 10);
-        
+
         $customers = $this->customerService->searchCustomers($term, $limit);
-        
+
         return response()->json($customers);
     }
 

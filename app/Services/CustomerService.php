@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\SalesOrder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
@@ -130,6 +131,76 @@ class CustomerService
     }
 
     /**
+     * @param  array<string, mixed>  $filters
+     * @return array<string, mixed>
+     */
+    public function getSalesHistory(Customer $customer, array $filters = [], int $perPage = 15): array
+    {
+        $orders = $customer->salesOrders()
+            ->with([
+                'items.product:id,sku_base,name',
+                'items.variant:id,sku,brand_id',
+                'items.variant.brand:id,name',
+                'items.warehouse:id,name',
+                'items.seller:id,name',
+                'payments.creator:id,name',
+                'returns',
+            ])
+            ->when(! empty($filters['date_from']), function ($query) use ($filters): void {
+                $query->whereDate('date', '>=', $filters['date_from']);
+            })
+            ->when(! empty($filters['date_to']), function ($query) use ($filters): void {
+                $query->whereDate('date', '<=', $filters['date_to']);
+            })
+            ->when(! empty($filters['status']), function ($query) use ($filters): void {
+                $query->where('status', $filters['status']);
+            })
+            ->when(! empty($filters['payment_status']), function ($query) use ($filters): void {
+                $statuses = collect(explode(',', (string) $filters['payment_status']))
+                    ->map(fn (string $status): string => trim($status))
+                    ->filter()
+                    ->values()
+                    ->all();
+
+                if (! empty($statuses)) {
+                    $query->whereIn('payment_status', $statuses);
+                }
+            })
+            ->when(! empty($filters['search']), function ($query) use ($filters): void {
+                $search = (string) $filters['search'];
+
+                $query->where(function ($query) use ($search): void {
+                    $operator = $this->caseInsensitiveLikeOperator();
+
+                    $query->where('order_number', $operator, "%{$search}%")
+                        ->orWhereHas('items.product', function ($query) use ($search, $operator): void {
+                            $query->where('name', $operator, "%{$search}%")
+                                ->orWhere('sku_base', $operator, "%{$search}%");
+                        })
+                        ->orWhereHas('items', function ($query) use ($search, $operator): void {
+                            $query->where('custom_description', $operator, "%{$search}%");
+                        });
+                });
+            })
+            ->latest('date')
+            ->latest('id')
+            ->paginate($perPage);
+
+        return [
+            'data' => $orders->getCollection()
+                ->map(fn (SalesOrder $order): array => $this->salesHistoryOrderRow($order))
+                ->values()
+                ->all(),
+            'meta' => [
+                'current_page' => $orders->currentPage(),
+                'last_page' => $orders->lastPage(),
+                'per_page' => $orders->perPage(),
+                'total' => $orders->total(),
+            ],
+        ];
+    }
+
+    /**
      * Create customer transaction
      */
     public function createTransaction(
@@ -193,6 +264,81 @@ class CustomerService
             'credit_days' => $customer->credit_days,
             'is_over_limit' => $customer->current_balance > $customer->credit_limit,
         ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function salesHistoryOrderRow(SalesOrder $order): array
+    {
+        return [
+            'id' => $order->id,
+            'document_type' => 'sales_order',
+            'document_number' => $order->order_number,
+            'order_number' => $order->order_number,
+            'date' => optional($order->date)->toDateString(),
+            'status' => $order->status,
+            'status_label' => $order->status_label,
+            'payment_status' => $order->payment_status,
+            'subtotal' => (float) $order->subtotal,
+            'discount_amount' => (float) $order->discount_amount,
+            'tax_amount' => (float) $order->tax_amount,
+            'shipping_cost' => (float) $order->shipping_cost,
+            'total' => (float) $order->total,
+            'amount_paid' => (float) $order->amount_paid,
+            'amount_due' => (float) $order->amount_due,
+            'total_returned' => (float) $order->total_returned,
+            'payment_summary' => $order->payments
+                ->groupBy('method')
+                ->map(fn ($payments, string $method): array => [
+                    'method' => $method,
+                    'method_label' => $payments->first()->formatted_method,
+                    'amount' => round((float) $payments->sum('amount'), 2),
+                    'count' => $payments->count(),
+                ])
+                ->values()
+                ->all(),
+            'items' => $order->items
+                ->map(fn ($item): array => [
+                    'id' => $item->id,
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'product_name' => $item->product_name,
+                    'product_sku' => $item->product_sku,
+                    'variant_sku' => $item->variant?->sku,
+                    'brand_name' => $item->variant?->brand?->name,
+                    'warehouse_name' => $item->warehouse?->name,
+                    'seller_name' => $item->seller?->name,
+                    'quantity' => (int) $item->quantity,
+                    'unit_price' => (float) $item->unit_price,
+                    'discount_amount' => (float) $item->discount_amount,
+                    'tax_percent' => (float) $item->tax_percent,
+                    'tax_amount' => (float) $item->tax_amount,
+                    'subtotal' => (float) $item->subtotal,
+                    'total' => (float) $item->total,
+                    'notes' => $item->notes,
+                    'is_custom_line' => (bool) $item->is_custom_line,
+                ])
+                ->values()
+                ->all(),
+            'payments' => $order->payments
+                ->map(fn ($payment): array => [
+                    'id' => $payment->id,
+                    'method' => $payment->method,
+                    'method_label' => $payment->formatted_method,
+                    'amount' => (float) $payment->amount,
+                    'paid_at' => $payment->paid_at?->toISOString(),
+                    'notes' => $payment->notes,
+                    'creator_name' => $payment->creator?->name,
+                ])
+                ->values()
+                ->all(),
+        ];
+    }
+
+    private function caseInsensitiveLikeOperator(): string
+    {
+        return DB::connection()->getDriverName() === 'sqlite' ? 'like' : 'ilike';
     }
 
     /**

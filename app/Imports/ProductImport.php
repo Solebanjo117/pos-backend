@@ -35,7 +35,6 @@ class ProductImport extends BaseImport
         'code',
         'engine',
         'vin',
-        'upsale_path',
     ];
 
     private string $mode = 'create_update';
@@ -178,8 +177,9 @@ class ProductImport extends BaseImport
     private function suggestedFieldForHeader(string $header): string
     {
         $mapped = $this->mapHeader($header);
+        $visibleFields = collect($this->getColumns())->pluck('key')->all();
 
-        return in_array($mapped, $this->validFields(), true) && $mapped !== self::FIELD_IGNORE
+        return in_array($mapped, $visibleFields, true)
             ? $mapped
             : self::FIELD_IGNORE;
     }
@@ -199,7 +199,6 @@ class ProductImport extends BaseImport
             'costo' => 2,
             'precio' => 2,
             'cantidad' => 2,
-            'warehouse' => 1,
         ];
 
         foreach ($headerWeights as $header => $weight) {
@@ -274,7 +273,6 @@ class ProductImport extends BaseImport
             'code', 'codigo', 'chassis', 'chassis_code' => 'code',
             'engine', 'motor', 'engine_code' => 'engine',
             'vin', 'numero_vin', 'vin_number' => 'vin',
-            'upsale_path', 'path_upsale', 'categoria_upsale', 'category_upsale' => 'upsale_path',
             default => $header,
         };
     }
@@ -344,11 +342,6 @@ class ProductImport extends BaseImport
 
         $categoryId = $this->resolveExistingIdByNameOrCode(Category::class, $row['categoria'], ['name', 'slug']);
         $category = Category::query()->findOrFail($categoryId);
-        $upsalePath = $this->nullIfEmpty($row['upsale_path'] ?? null);
-
-        if ($upsalePath !== null) {
-            Category::query()->whereKey($categoryId)->update(['upsale_path' => $upsalePath]);
-        }
 
         $extraCategoryIds = $this->resolveExtraCategoryIds($row['categorias_extra'] ?? null, $categoryId);
         $technicalCategories = $this->categoriesForTechnicalExtraction($category, $extraCategoryIds);

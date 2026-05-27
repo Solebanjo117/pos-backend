@@ -8,6 +8,9 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/movement-history', [ReportController::class, 'movementHistory']);
 
     Route::get('/financial', [ReportController::class, 'financial']);
+    Route::get('/income-statement', [ReportController::class, 'incomeStatement']);
+    Route::get('/financial-position', [ReportController::class, 'financialPosition']);
+    Route::get('/ledger-trial-balance', [ReportController::class, 'ledgerTrialBalance']);
     Route::get('/customer-references', [ReportController::class, 'customerReferences']);
     Route::get('/brand-profitability', [ReportController::class, 'brandProfitability']);
     Route::get('/category-profitability', [ReportController::class, 'categoryProfitability']);

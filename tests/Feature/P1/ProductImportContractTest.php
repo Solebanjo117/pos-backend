@@ -1856,6 +1856,38 @@ it('returns detected columns suggested mapping and applies manual mapping in pre
         ->assertJsonPath('data.rows.0.data.system_id', 'MAN-001');
 });
 
+it('does not suggest hidden legacy product columns in preview mapping', function () {
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Generica']);
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Category', 'System ID', 'Warehouse', 'Make', 'Model', 'Engine', 'VIN'],
+        ['Aceite legacy', 'Aceite Motor', 'LS-LEG-001', 'MAIN', 'Toyota', 'Yaris', '1NZFE', 'JTDBT933X01109408'],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $file,
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.suggested_mapping.description', 'nombre')
+        ->assertJsonPath('data.suggested_mapping.category', 'categoria')
+        ->assertJsonPath('data.suggested_mapping.system_id', 'system_id')
+        ->assertJsonPath('data.suggested_mapping.warehouse', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.make', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.model', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.engine', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.vin', 'ignore');
+});
+
 it('validates a full product import without creating products', function () {
     Queue::fake();
     Storage::fake('local');

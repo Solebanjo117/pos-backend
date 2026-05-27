@@ -3,6 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\FinancialPositionReportRequest;
+use App\Http\Requests\IncomeStatementReportRequest;
+use App\Http\Requests\LedgerTrialBalanceReportRequest;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,7 +25,13 @@ class ReportController extends Controller
      */
     public function stockLevels(Request $request): JsonResponse
     {
-        $filters = $request->only(['warehouse_id', 'brand_id', 'category_id', 'status']);
+        $request->validate([
+            'page' => 'nullable|integer|min:1',
+            'sort_by' => 'nullable|in:sku,name,brand,warehouse,current_stock,reorder_point,target_level,status,current_cost,stock_value',
+            'sort_direction' => 'nullable|in:asc,desc',
+        ]);
+
+        $filters = $request->only(['warehouse_id', 'brand_id', 'category_id', 'status', 'page', 'sort_by', 'sort_direction']);
 
         $report = $this->reportService->generateStockLevelsReport($filters);
 
@@ -42,6 +51,7 @@ class ReportController extends Controller
             'user_id' => 'nullable|exists:users,id',
             'movement_type' => 'nullable|in:in,out,transfer',
             'group_by' => 'nullable|in:day,week,month',
+            'page' => 'nullable|integer|min:1',
         ]);
 
         $filters = $request->only([
@@ -52,6 +62,7 @@ class ReportController extends Controller
             'user_id',
             'movement_type',
             'group_by',
+            'page',
         ]);
 
         $report = $this->reportService->generateMovementHistoryReport($filters);
@@ -148,6 +159,27 @@ class ReportController extends Controller
         return response()->json($report);
     }
 
+    public function incomeStatement(IncomeStatementReportRequest $request): JsonResponse
+    {
+        $report = $this->reportService->generateIncomeStatementReport($request->validated());
+
+        return response()->json($report);
+    }
+
+    public function financialPosition(FinancialPositionReportRequest $request): JsonResponse
+    {
+        $report = $this->reportService->generateFinancialPositionReport($request->validated());
+
+        return response()->json($report);
+    }
+
+    public function ledgerTrialBalance(LedgerTrialBalanceReportRequest $request): JsonResponse
+    {
+        $report = $this->reportService->generateLedgerTrialBalance($request->validated());
+
+        return response()->json($report);
+    }
+
     public function customerReferences(Request $request): JsonResponse
     {
         $request->validate([
@@ -205,6 +237,7 @@ class ReportController extends Controller
         $request->validate([
             'date' => 'nullable|date',
             'warehouse_id' => 'nullable|exists:warehouses,id',
+            'user_id' => 'nullable|exists:users,id',
         ]);
 
         $date = $request->input('date', now()->toDateString());
@@ -223,6 +256,7 @@ class ReportController extends Controller
         $request->validate([
             'date' => 'nullable|date',
             'warehouse_id' => 'nullable|exists:warehouses,id',
+            'user_id' => 'nullable|exists:users,id',
         ]);
 
         $date = $request->input('date', now()->toDateString());

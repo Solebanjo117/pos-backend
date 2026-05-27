@@ -2,6 +2,7 @@
 
 use App\Models\CashMovement;
 use App\Models\Customer;
+use App\Models\InventoryLot;
 use App\Models\OperationalExpense;
 use App\Models\PosSession;
 use App\Models\Product;
@@ -628,4 +629,235 @@ it('includes open customer and supplier credit balances in financial report with
         ->assertJsonPath('credit_balances.accounts_payable.total_open_balance', 125)
         ->assertJsonPath('credit_balances.accounts_payable.open_documents_count', 1)
         ->assertJsonPath('credit_balances.accounts_payable.accounts_count', 1);
+});
+
+it('generates an income statement with customer and supplier credit kept out of cash revenue', function () {
+    [$admin, $warehouse] = operationalExpenseAdminContext();
+
+    $product = Product::create([
+        'sku_base' => 'INC-STMT-1',
+        'name' => 'Producto Estado Resultados',
+        'status' => 'active',
+    ]);
+
+    $customer = Customer::create([
+        'code' => 'CLI-INC-STMT',
+        'name' => 'Cliente Credito Resultados',
+        'email' => 'cliente-resultados@example.test',
+    ]);
+
+    $order = SalesOrder::create([
+        'order_number' => 'SO-INC-STMT',
+        'customer_id' => $customer->id,
+        'user_id' => $admin->id,
+        'date' => '2026-05-12',
+        'status' => 'completed',
+        'subtotal' => 150,
+        'tax_amount' => 7,
+        'discount_amount' => 3,
+        'shipping_cost' => 0,
+        'total' => 150,
+        'payment_status' => 'partial',
+    ]);
+
+    SalesOrderItem::create([
+        'sales_order_id' => $order->id,
+        'product_id' => $product->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 150,
+        'unit_cost' => 80,
+        'discount_percent' => 0,
+        'discount_amount' => 3,
+        'tax_percent' => 7,
+        'tax_amount' => 7,
+        'subtotal' => 150,
+        'total' => 150,
+    ]);
+
+    SalesOrderPayment::create([
+        'sales_order_id' => $order->id,
+        'amount' => 40,
+        'method' => 'cash',
+        'paid_at' => '2026-05-12 10:00:00',
+        'created_by' => $admin->id,
+    ]);
+
+    OperationalExpense::create([
+        'expense_date' => '2026-05-12',
+        'category' => 'rent',
+        'description' => 'Alquiler de prueba',
+        'amount' => 10,
+        'payment_method' => 'transfer',
+        'warehouse_id' => $warehouse->id,
+        'created_by' => $admin->id,
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/income-statement?date_from=2026-05-01&date_to=2026-05-31&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('summary.total_revenue', 40)
+        ->assertJsonPath('summary.total_cogs', 80)
+        ->assertJsonPath('summary.total_operational_expenses', 10)
+        ->assertJsonPath('summary.net_profit', -50)
+        ->assertJsonPath('sections.0.key', 'income')
+        ->assertJsonPath('sections.0.rows.0.key', 'cash-sales')
+        ->assertJsonPath('sections.0.rows.0.amount', 40)
+        ->assertJsonPath('sections.4.key', 'open-balances')
+        ->assertJsonPath('sections.4.rows.0.key', 'accounts-receivable')
+        ->assertJsonPath('sections.4.rows.0.amount', 117.5)
+        ->assertJsonPath('sections.4.rows.1.key', 'accounts-payable')
+        ->assertJsonPath('sections.4.rows.1.amount', 0);
+});
+
+it('generates a current operational financial position statement', function () {
+    [$admin, $warehouse] = operationalExpenseAdminContext();
+    $otherWarehouse = Warehouse::create([
+        'code' => 'W-FP-OTHER',
+        'name' => 'Otro Almacen Situacion',
+    ]);
+
+    $product = Product::create([
+        'sku_base' => 'FIN-POS-1',
+        'name' => 'Producto Situacion',
+        'status' => 'active',
+    ]);
+
+    $customer = Customer::create([
+        'code' => 'CLI-FIN-POS',
+        'name' => 'Cliente Situacion',
+        'email' => 'cliente-situacion@example.test',
+    ]);
+
+    $supplier = Supplier::create([
+        'name' => 'Proveedor Situacion',
+        'email' => 'proveedor-situacion@example.test',
+    ]);
+
+    $session = PosSession::create([
+        'user_id' => $admin->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-05-12 08:00:00',
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    CashMovement::create([
+        'pos_session_id' => $session->id,
+        'user_id' => $admin->id,
+        'type' => 'in',
+        'amount' => 25,
+        'reason' => 'adjustment',
+    ]);
+
+    CashMovement::create([
+        'pos_session_id' => $session->id,
+        'user_id' => $admin->id,
+        'type' => 'out',
+        'amount' => 5,
+        'reason' => 'adjustment',
+    ]);
+
+    InventoryLot::create([
+        'product_id' => $product->id,
+        'warehouse_id' => $warehouse->id,
+        'source_type' => 'opening_balance',
+        'received_quantity' => 5,
+        'quantity_available' => 5,
+        'unit_cost_base' => 10,
+        'tax_per_unit' => 0,
+        'misc_per_unit' => 0,
+        'landed_unit_cost' => 10,
+        'received_at' => '2026-05-12 09:00:00',
+    ]);
+
+    InventoryLot::create([
+        'product_id' => $product->id,
+        'warehouse_id' => $otherWarehouse->id,
+        'source_type' => 'opening_balance',
+        'received_quantity' => 9,
+        'quantity_available' => 9,
+        'unit_cost_base' => 99,
+        'tax_per_unit' => 0,
+        'misc_per_unit' => 0,
+        'landed_unit_cost' => 99,
+        'received_at' => '2026-05-12 09:00:00',
+    ]);
+
+    $sale = SalesOrder::create([
+        'order_number' => 'SO-FIN-POS',
+        'customer_id' => $customer->id,
+        'user_id' => $admin->id,
+        'date' => '2026-05-12',
+        'status' => 'completed',
+        'subtotal' => 100,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 100,
+        'payment_status' => 'partial',
+    ]);
+
+    SalesOrderItem::create([
+        'sales_order_id' => $sale->id,
+        'product_id' => $product->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 100,
+        'unit_cost' => 30,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 100,
+        'total' => 100,
+    ]);
+
+    SalesOrderPayment::create([
+        'sales_order_id' => $sale->id,
+        'amount' => 40,
+        'method' => 'cash',
+        'paid_at' => '2026-05-12 10:00:00',
+        'created_by' => $admin->id,
+    ]);
+
+    $purchaseOrder = PurchaseOrder::create([
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $admin->id,
+        'status' => 'received',
+        'payment_status' => 'partial',
+        'order_date' => '2026-05-12',
+        'subtotal' => 200,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 200,
+    ]);
+
+    PurchaseOrderPayment::create([
+        'purchase_order_id' => $purchaseOrder->id,
+        'amount' => 75,
+        'method' => 'transfer',
+        'paid_at' => '2026-05-12 11:00:00',
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-position?warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('basis', 'current_operational_snapshot')
+        ->assertJsonPath('summary.total_assets', 230)
+        ->assertJsonPath('summary.total_liabilities', 125)
+        ->assertJsonPath('summary.operational_equity', 105)
+        ->assertJsonPath('sections.0.key', 'assets')
+        ->assertJsonPath('sections.0.rows.0.key', 'operational-cash')
+        ->assertJsonPath('sections.0.rows.0.amount', 120)
+        ->assertJsonPath('sections.0.rows.1.key', 'accounts-receivable')
+        ->assertJsonPath('sections.0.rows.1.amount', 60)
+        ->assertJsonPath('sections.0.rows.2.key', 'inventory')
+        ->assertJsonPath('sections.0.rows.2.amount', 50)
+        ->assertJsonPath('sections.1.rows.0.key', 'accounts-payable')
+        ->assertJsonPath('sections.1.rows.0.amount', 125);
 });
