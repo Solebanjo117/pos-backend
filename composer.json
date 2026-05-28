@@ -15,6 +15,7 @@
         "laravel/sanctum": "*",
         "laravel/tinker": "^2.10.1",
         "maatwebsite/excel": "*",
+        "openspout/openspout": "^5.7",
         "picqer/php-barcode-generator": "*",
         "spatie/laravel-activitylog": "*"
     },

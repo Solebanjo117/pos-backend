@@ -47,6 +47,20 @@ class ProductImport extends BaseImport
 
     private array $productIdsByImportKey = [];
 
+    private ?Collection $cachedCategories = null;
+
+    private ?Collection $cachedBrands = null;
+
+    private ?Collection $cachedVehicleCatalog = null;
+
+    private array $categorySuggestionsCache = [];
+
+    private array $brandSuggestionsCache = [];
+
+    private array $vehicleNameResolutionCache = [];
+
+    private array $vehicleCandidateCache = [];
+
     public function __construct(private readonly ProductService $productService) {}
 
     public function forMode(string $mode): self
@@ -99,20 +113,15 @@ class ProductImport extends BaseImport
     }
 
     /**
-     * @return array{rows: array<int, array<string, mixed>>, max_rows: int, summary: array<string, mixed>, sheets: array<int, array<string, mixed>>, selected_sheet: array<string, mixed>, recommended_sheet: ?array<string, mixed>, sheet_detection_warning: ?string}
+     * @return array{rows: array<int, array<string, mixed>>, total_rows: int, max_rows: int, preview_limited: bool, summary: array<string, mixed>, sheets: array<int, array<string, mixed>>, selected_sheet: array<string, mixed>, recommended_sheet: ?array<string, mixed>, sheet_detection_warning: ?string}
      */
     public function previewWithSummary(UploadedFile $file, ?int $maxRows = 200, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
     {
-        $sheets = $this->inspectSheets($file, $mapping);
-        $recommendedSheet = collect($sheets)->firstWhere('is_recommended', true);
-
-        if ($recommendedSheet === null && $sheetIndex === null && ($sheetName === null || trim($sheetName) === '')) {
-            throw new \RuntimeException('No se encontro una hoja compatible con productos. Selecciona una hoja o revisa los encabezados.');
-        }
-
-        $selectedSheet = $this->resolveSelectedSheet($file, $sheetIndex, $sheetName, $mapping);
-        $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping);
-        $rowsForPreview = $maxRows === null ? $rows : $rows->take($maxRows);
+        $metadata = $this->previewMetadata($file, $sheetIndex, $sheetName, $mapping);
+        $selectedSheet = $metadata['selected_sheet'];
+        $rowsForPreview = $this->extractRows($file, $sheetIndex, $sheetName, $mapping, $maxRows);
+        $shownCount = $rowsForPreview->count();
+        $totalRows = (int) ($selectedSheet['row_count'] ?? $shownCount);
         $previewRows = $rowsForPreview
             ->map(function (array $row): array {
                 $rowErrors = $this->validateRow($row);
@@ -131,8 +140,32 @@ class ProductImport extends BaseImport
 
         return [
             'rows' => $previewRows,
-            'max_rows' => $maxRows ?? $rows->count(),
+            'total_rows' => $totalRows,
+            'max_rows' => $maxRows ?? $shownCount,
+            'preview_limited' => $totalRows > $shownCount,
             'summary' => $this->buildPreviewSummary($rowsForPreview),
+            'sheets' => $metadata['sheets'],
+            'selected_sheet' => $selectedSheet,
+            'recommended_sheet' => $metadata['recommended_sheet'],
+            'detected_columns' => $metadata['detected_columns'],
+            'suggested_mapping' => $metadata['suggested_mapping'],
+            'required_fields' => $metadata['required_fields'],
+            'sheet_detection_warning' => $metadata['sheet_detection_warning'],
+        ];
+    }
+
+    public function previewMetadata(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
+    {
+        $sheets = $this->inspectSheets($file, $mapping);
+        $recommendedSheet = collect($sheets)->firstWhere('is_recommended', true);
+
+        if ($recommendedSheet === null && $sheetIndex === null && ($sheetName === null || trim($sheetName) === '')) {
+            throw new \RuntimeException('No se encontro una hoja compatible con productos. Selecciona una hoja o revisa los encabezados.');
+        }
+
+        $selectedSheet = $this->resolveSelectedSheet($file, $sheetIndex, $sheetName, $mapping);
+
+        return [
             'sheets' => $sheets,
             'selected_sheet' => $selectedSheet,
             'recommended_sheet' => $recommendedSheet,
@@ -287,12 +320,8 @@ class ProductImport extends BaseImport
 
         if (trim((string) ($row['categoria'] ?? '')) === '') {
             $errors[] = 'El campo categoria es obligatorio.';
-        } else {
-            try {
-                $this->resolveExistingIdByNameOrCode(Category::class, $row['categoria'], ['name', 'slug']);
-            } catch (\RuntimeException) {
-                $errors[] = "La categoria '{$row['categoria']}' no existe. Creala primero para evitar duplicados.";
-            }
+        } elseif ($this->findCategoryByNameOrCode($row['categoria']) === null) {
+            $errors[] = "La categoria '{$row['categoria']}' no existe. Creala primero para evitar duplicados.";
         }
 
         $brandName = $this->brandNameForRow($row);
@@ -309,7 +338,10 @@ class ProductImport extends BaseImport
 
         if (! $this->hasExplicitVehicleColumns($row) && trim((string) ($row['nombre'] ?? '')) !== '') {
             try {
-                $this->resolveVehicleCompatibilityFromName((string) $row['nombre']);
+                $vehicleMatch = $this->resolveVehicleCompatibilityFromName((string) $row['nombre']);
+                if ($vehicleMatch === null && $this->vehicleCreationCandidateFromName((string) $row['nombre']) !== null) {
+                    $errors[] = 'No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.';
+                }
             } catch (\RuntimeException $e) {
                 $errors[] = $e->getMessage();
             }
@@ -340,8 +372,11 @@ class ProductImport extends BaseImport
             return ['id' => null];
         }
 
-        $categoryId = $this->resolveExistingIdByNameOrCode(Category::class, $row['categoria'], ['name', 'slug']);
-        $category = Category::query()->findOrFail($categoryId);
+        $category = $this->findCategoryByNameOrCode($row['categoria']);
+        if (! $category) {
+            throw new \RuntimeException("La categoria '{$row['categoria']}' no existe. Creala primero para evitar duplicados.");
+        }
+        $categoryId = (int) $category->id;
 
         $extraCategoryIds = $this->resolveExtraCategoryIds($row['categorias_extra'] ?? null, $categoryId);
         $technicalCategories = $this->categoriesForTechnicalExtraction($category, $extraCategoryIds);
@@ -430,7 +465,7 @@ class ProductImport extends BaseImport
         }
 
         $brandName = $this->nullIfEmpty($row['brand'] ?? null) ?? 'Generica';
-        $brand = Brand::query()->whereRaw('LOWER(name) = ?', [mb_strtolower($brandName)])->first();
+        $brand = $this->brandByName($brandName);
 
         if (! $brand) {
             return false;
@@ -450,6 +485,7 @@ class ProductImport extends BaseImport
         $detectedAttributes = [];
         $categorySuggestions = [];
         $brandSuggestions = [];
+        $missingVehicleCandidates = [];
 
         foreach ($rows as $row) {
             $categoryName = trim((string) ($row['categoria'] ?? ''));
@@ -520,6 +556,23 @@ class ProductImport extends BaseImport
                     $detectedAttributes[] = $attribute['name'];
                 }
             }
+
+            if (! $this->hasExplicitVehicleColumns($row) && trim((string) ($row['nombre'] ?? '')) !== '') {
+                try {
+                    $vehicleMatch = $this->resolveVehicleCompatibilityFromName((string) $row['nombre']);
+                    if ($vehicleMatch === null) {
+                        $candidate = $this->vehicleCreationCandidateFromName((string) $row['nombre']);
+                        if ($candidate !== null) {
+                            $missingVehicleCandidates[] = $candidate;
+                        }
+                    }
+                } catch (\RuntimeException) {
+                    $candidate = $this->vehicleCreationCandidateFromName((string) $row['nombre']);
+                    if ($candidate !== null) {
+                        $missingVehicleCandidates[] = $candidate;
+                    }
+                }
+            }
         }
 
         return [
@@ -555,6 +608,10 @@ class ProductImport extends BaseImport
                 'brands' => array_values(array_unique($missingBrands)),
             ],
             'detected_attributes' => array_values(array_unique($detectedAttributes)),
+            'missing_vehicle_candidates' => collect($missingVehicleCandidates)
+                ->unique(fn (array $candidate): string => $this->vehicleCandidateKey($candidate))
+                ->values()
+                ->all(),
             'suggestions' => [
                 'categories' => collect($categorySuggestions)->unique('value')->values()->all(),
                 'brands' => collect($brandSuggestions)->unique('value')->values()->all(),
@@ -564,10 +621,15 @@ class ProductImport extends BaseImport
 
     private function suggestCategory(string $value): ?array
     {
+        $cacheKey = $this->attributeNameKey($value);
+        if (array_key_exists($cacheKey, $this->categorySuggestionsCache)) {
+            return $this->categorySuggestionsCache[$cacheKey];
+        }
+
         $normalizedValue = $this->attributeNameKey($value);
         $best = null;
 
-        foreach (Category::query()->select(['id', 'name'])->get() as $category) {
+        foreach ($this->categories() as $category) {
             $normalizedCategory = $this->attributeNameKey($category->name);
             similar_text($normalizedValue, $normalizedCategory, $score);
 
@@ -579,7 +641,7 @@ class ProductImport extends BaseImport
             }
         }
 
-        return ($best !== null && $best['score'] >= 70) ? $best : null;
+        return $this->categorySuggestionsCache[$cacheKey] = ($best !== null && $best['score'] >= 70) ? $best : null;
     }
 
     public function referenceSummary(): array
@@ -615,9 +677,7 @@ class ProductImport extends BaseImport
 
     private function brandExists(string $brandName): bool
     {
-        return Brand::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim($brandName))])
-            ->exists();
+        return $this->brandByName($brandName) !== null;
     }
 
     private function rememberMissingBrand(string $brandName): void
@@ -637,15 +697,27 @@ class ProductImport extends BaseImport
 
     private function suggestBrand(string $value): ?array
     {
-        return $this->suggestModelName(Brand::class, $value);
+        $cacheKey = $this->attributeNameKey($value);
+        if (array_key_exists($cacheKey, $this->brandSuggestionsCache)) {
+            return $this->brandSuggestionsCache[$cacheKey];
+        }
+
+        return $this->brandSuggestionsCache[$cacheKey] = $this->suggestNameFromCollection($this->brands(), $value);
     }
 
     private function suggestModelName(string $modelClass, string $value): ?array
     {
+        $collection = $modelClass === Brand::class ? $this->brands() : $modelClass::query()->select(['id', 'name'])->get();
+
+        return $this->suggestNameFromCollection($collection, $value);
+    }
+
+    private function suggestNameFromCollection(Collection $models, string $value): ?array
+    {
         $normalizedValue = $this->attributeNameKey($value);
         $best = null;
 
-        foreach ($modelClass::query()->select(['id', 'name'])->get() as $model) {
+        foreach ($models as $model) {
             $normalizedName = $this->attributeNameKey($model->name);
             similar_text($normalizedValue, $normalizedName, $score);
 
@@ -658,6 +730,38 @@ class ProductImport extends BaseImport
         }
 
         return ($best !== null && $best['score'] >= 70) ? $best : null;
+    }
+
+    private function categories(): Collection
+    {
+        if ($this->cachedCategories === null) {
+            $this->cachedCategories = Category::query()->get();
+        }
+
+        return $this->cachedCategories;
+    }
+
+    private function categoryById(int $categoryId): ?Category
+    {
+        return $this->categories()
+            ->first(fn (Category $category): bool => (int) $category->id === $categoryId);
+    }
+
+    private function brands(): Collection
+    {
+        if ($this->cachedBrands === null) {
+            $this->cachedBrands = Brand::query()->select(['id', 'name'])->get();
+        }
+
+        return $this->cachedBrands;
+    }
+
+    private function brandByName(string $brandName): ?Brand
+    {
+        $normalized = $this->attributeNameKey($brandName);
+
+        return $this->brands()
+            ->first(fn (Brand $brand): bool => $this->attributeNameKey($brand->name) === $normalized);
     }
 
     private function productGroupingKey(array $row): string
@@ -993,14 +1097,23 @@ class ProductImport extends BaseImport
             return null;
         }
 
+        if (array_key_exists($normalizedName, $this->vehicleNameResolutionCache)) {
+            $cached = $this->vehicleNameResolutionCache[$normalizedName];
+            if (is_array($cached) && ($cached['__error'] ?? null)) {
+                throw new \RuntimeException((string) $cached['__error']);
+            }
+
+            return $cached;
+        }
+
         $modelSignalFound = false;
         $matches = [];
 
-        VehicleModel::query()
-            ->with(['make', 'chassis', 'engines', 'enginesMany'])
-            ->get()
-            ->each(function (VehicleModel $model) use ($normalizedName, &$modelSignalFound, &$matches): void {
-                $make = $model->make;
+        $this->vehicleCatalog()
+            ->each(function (array $entry) use ($normalizedName, &$modelSignalFound, &$matches): void {
+                /** @var VehicleModel $model */
+                $model = $entry['model'];
+                $make = $entry['make'];
                 if (! $make) {
                     return;
                 }
@@ -1011,16 +1124,8 @@ class ProductImport extends BaseImport
 
                 $modelSignalFound = true;
 
-                $chassisRecords = $model->chassis
-                    ->concat(VehicleChassis::query()
-                        ->where('model_id', $model->id)
-                        ->get())
-                    ->unique('id')
-                    ->values();
-                $engineRecords = $model->engines
-                    ->concat($model->enginesMany)
-                    ->unique('id')
-                    ->values();
+                $chassisRecords = $entry['chassis'];
+                $engineRecords = $entry['engines'];
 
                 foreach ($chassisRecords as $chassis) {
                     if (! $chassis instanceof VehicleChassis) {
@@ -1061,20 +1166,28 @@ class ProductImport extends BaseImport
             ->values();
 
         if ($matches->count() > 1) {
+            $this->vehicleNameResolutionCache[$normalizedName] = [
+                '__error' => 'Se detecto mas de un vehiculo completo en el nombre del producto. Usa las columnas de vehiculo para importar una compatibilidad especifica.',
+            ];
+
             throw new \RuntimeException('Se detecto mas de un vehiculo completo en el nombre del producto. Usa las columnas de vehiculo para importar una compatibilidad especifica.');
         }
 
         if ($matches->isEmpty()) {
             if ($modelSignalFound) {
+                $this->vehicleNameResolutionCache[$normalizedName] = [
+                    '__error' => 'No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.',
+                ];
+
                 throw new \RuntimeException('No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.');
             }
 
-            return null;
+            return $this->vehicleNameResolutionCache[$normalizedName] = null;
         }
 
         $match = $matches->first();
 
-        return [
+        return $this->vehicleNameResolutionCache[$normalizedName] = [
             'label' => $match['label'],
             'compatibility' => [
                 'makes' => [['make_id' => $match['make_id']]],
@@ -1083,6 +1196,166 @@ class ProductImport extends BaseImport
                 'engines' => [['engine_id' => $match['engine_id']]],
             ],
         ];
+    }
+
+    private function vehicleCreationCandidateFromName(string $name): ?array
+    {
+        $normalizedName = $this->vehicleNameKey($name);
+        if ($normalizedName === '') {
+            return null;
+        }
+
+        if (array_key_exists($normalizedName, $this->vehicleCandidateCache)) {
+            return $this->vehicleCandidateCache[$normalizedName];
+        }
+
+        $candidates = [];
+
+        $this->vehicleCatalog()
+            ->each(function (array $entry) use ($normalizedName, &$candidates): void {
+                /** @var VehicleModel $model */
+                $model = $entry['model'];
+                $make = $entry['make'];
+                if (! $make) {
+                    return;
+                }
+
+                if (! $this->vehicleTextContains($normalizedName, $make->name) || ! $this->vehicleTextContains($normalizedName, $model->name)) {
+                    return;
+                }
+
+                $tailTokens = $this->vehicleTailTokensAfterModel($normalizedName, $make->name, $model->name);
+
+                $candidates[] = [
+                    'make_id' => (int) $make->id,
+                    'make' => $make->name,
+                    'model_id' => (int) $model->id,
+                    'model' => $model->name,
+                    'chassis' => $tailTokens[0] ?? null,
+                    'engine' => $tailTokens[1] ?? null,
+                    'source' => 'nombre',
+                    'can_create' => true,
+                    'label' => trim(implode(' ', array_filter([
+                        $make->name,
+                        $model->name,
+                        $tailTokens[0] ?? null,
+                        $tailTokens[1] ?? null,
+                    ]))),
+                ];
+            });
+
+        return $this->vehicleCandidateCache[$normalizedName] = collect($candidates)
+            ->sortBy(fn (array $candidate): string => $candidate['label'])
+            ->first() ?? $this->heuristicVehicleCreationCandidateFromName($normalizedName);
+    }
+
+    private function vehicleCatalog(): Collection
+    {
+        if ($this->cachedVehicleCatalog !== null) {
+            return $this->cachedVehicleCatalog;
+        }
+
+        $directChassisByModel = VehicleChassis::query()
+            ->whereNotNull('model_id')
+            ->get()
+            ->groupBy('model_id');
+
+        $this->cachedVehicleCatalog = VehicleModel::query()
+            ->with(['make', 'chassis', 'engines', 'enginesMany'])
+            ->get()
+            ->map(function (VehicleModel $model) use ($directChassisByModel): array {
+                return [
+                    'model' => $model,
+                    'make' => $model->make,
+                    'chassis' => $model->chassis
+                        ->concat($directChassisByModel->get($model->id, collect()))
+                        ->unique('id')
+                        ->values(),
+                    'engines' => $model->engines
+                        ->concat($model->enginesMany)
+                        ->unique('id')
+                        ->values(),
+                ];
+            })
+            ->values();
+
+        return $this->cachedVehicleCatalog;
+    }
+
+    private function heuristicVehicleCreationCandidateFromName(string $normalizedName): ?array
+    {
+        $tokens = collect(explode(' ', $normalizedName))
+            ->map(fn (string $token): string => strtoupper(trim($token)))
+            ->filter(fn (string $token): bool => $token !== '')
+            ->values();
+
+        if ($tokens->count() < 4) {
+            return null;
+        }
+
+        $tail = $tokens->slice(-4)->values();
+        $make = (string) $tail[0];
+        $model = (string) $tail[1];
+        $chassis = (string) $tail[2];
+        $engine = (string) $tail[3];
+
+        if (
+            preg_match('/^[A-Z]{2,}$/', $make) !== 1
+            || preg_match('/^[A-Z][A-Z0-9]{1,}$/', $model) !== 1
+            || ! $this->looksLikeVehicleCode($chassis)
+            || ! $this->looksLikeVehicleCode($engine)
+        ) {
+            return null;
+        }
+
+        return [
+            'make_id' => null,
+            'make' => $make,
+            'model_id' => null,
+            'model' => $model,
+            'chassis' => $chassis,
+            'engine' => $engine,
+            'source' => 'nombre',
+            'can_create' => true,
+            'label' => $tail->implode(' '),
+        ];
+    }
+
+    private function looksLikeVehicleCode(string $value): bool
+    {
+        return preg_match('/^(?=.*[A-Z])(?=.*\d)[A-Z0-9]{2,12}$/', $value) === 1;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function vehicleTailTokensAfterModel(string $normalizedName, string $makeName, string $modelName): array
+    {
+        $makeModel = $this->vehicleNameKey($makeName.' '.$modelName);
+        if ($makeModel === '') {
+            return [];
+        }
+
+        if (preg_match('/(?:^| )'.preg_quote($makeModel, '/').'(?: |$)(.*)$/', $normalizedName, $matches) !== 1) {
+            return [];
+        }
+
+        return collect(explode(' ', trim((string) ($matches[1] ?? ''))))
+            ->map(fn (string $token): string => strtoupper($token))
+            ->filter(fn (string $token): bool => $token !== '')
+            ->take(2)
+            ->values()
+            ->all();
+    }
+
+    private function vehicleCandidateKey(array $candidate): string
+    {
+        return mb_strtolower(implode('|', [
+            $candidate['make_id'] ?? '',
+            $candidate['model_id'] ?? '',
+            $candidate['chassis'] ?? '',
+            $candidate['engine'] ?? '',
+        ]));
     }
 
     private function vehicleCandidateOffset(string $normalizedName, array $candidateSequences): ?int
@@ -1128,7 +1401,14 @@ class ProductImport extends BaseImport
     private function resolveExtraCategoryIds(mixed $value, int $primaryCategoryId): array
     {
         return collect($this->splitDelimitedValues($value))
-            ->map(fn ($categoryName) => $this->resolveExistingIdByNameOrCode(Category::class, $categoryName, ['name', 'slug']))
+            ->map(function ($categoryName): int {
+                $category = $this->findCategoryByNameOrCode($categoryName);
+                if (! $category) {
+                    throw new \RuntimeException("No se encontro el registro '{$categoryName}'.");
+                }
+
+                return (int) $category->id;
+            })
             ->reject(fn (int $categoryId) => $categoryId === $primaryCategoryId)
             ->unique()
             ->values()
@@ -1147,7 +1427,7 @@ class ProductImport extends BaseImport
     private function categoriesForTechnicalExtraction(Category $primaryCategory, array $extraCategoryIds = []): Collection
     {
         $extraCategories = collect($extraCategoryIds)
-            ->map(fn (int $categoryId): ?Category => Category::query()->find($categoryId))
+            ->map(fn (int $categoryId): ?Category => $this->categoryById($categoryId))
             ->filter();
 
         return collect([$primaryCategory])
@@ -1212,13 +1492,13 @@ class ProductImport extends BaseImport
         }
 
         if (preg_match('/^\d+$/', $normalized) === 1) {
-            return Category::query()->find((int) $normalized);
+            return $this->categoryById((int) $normalized);
         }
 
-        return Category::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower($normalized)])
-            ->orWhereRaw('LOWER(slug) = ?', [mb_strtolower($normalized)])
-            ->first();
+        $key = $this->attributeNameKey($normalized);
+
+        return $this->categories()
+            ->first(fn (Category $category): bool => $this->attributeNameKey($category->name) === $key || $this->attributeNameKey((string) $category->slug) === $key);
     }
 
     protected function mapRowToPreview(array $row, ?array $errors = null, ?array $warnings = null): array
@@ -1245,9 +1525,12 @@ class ProductImport extends BaseImport
                 if ($vehicleMatch !== null) {
                     $mapped['__vehicle_compatibility'] = $vehicleMatch['compatibility'];
                     $mapped['__vehicle_label'] = $vehicleMatch['label'];
+                } else {
+                    $mapped['__vehicle_creation_candidate'] = $this->vehicleCreationCandidateFromName((string) ($row['nombre'] ?? ''));
                 }
             } catch (\RuntimeException) {
                 $mapped['__vehicle_compatibility'] = null;
+                $mapped['__vehicle_creation_candidate'] = $this->vehicleCreationCandidateFromName((string) ($row['nombre'] ?? ''));
             }
         }
 
@@ -1541,9 +1824,7 @@ class ProductImport extends BaseImport
             throw new \RuntimeException('La marca seleccionada no existe.');
         }
 
-        $brand = Brand::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower($brandName)])
-            ->first();
+        $brand = $this->brandByName($brandName);
 
         if (! $brand) {
             throw new \RuntimeException("La marca \"{$brandName}\" no existe. Creala antes de importar.");

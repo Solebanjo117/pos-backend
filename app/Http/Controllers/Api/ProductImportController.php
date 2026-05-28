@@ -24,6 +24,8 @@ use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class ProductImportController extends Controller
 {
+    private const ASYNC_PREVIEW_ROW_THRESHOLD = 200;
+
     public function __construct(private readonly ProductService $productService) {}
 
     public function template(): BinaryFileResponse
@@ -35,6 +37,24 @@ class ProductImportController extends Controller
     {
         $import = new ProductImport($this->productService);
         try {
+            $metadata = $import->previewMetadata(
+                $request->file('file'),
+                $request->has('sheet_index') ? $request->integer('sheet_index') : null,
+                $request->input('sheet_name'),
+                $request->input('mapping', [])
+            );
+
+            $totalRows = (int) ($metadata['selected_sheet']['row_count'] ?? 0);
+            if ($totalRows > self::ASYNC_PREVIEW_ROW_THRESHOLD) {
+                return $this->startFileRun(
+                    $request,
+                    ImportRun::TYPE_VALIDATION,
+                    ImportRun::MODE_VALIDATE_ONLY,
+                    $metadata,
+                    true
+                );
+            }
+
             $preview = $import->previewWithSummary(
                 $request->file('file'),
                 null,
@@ -55,8 +75,9 @@ class ProductImportController extends Controller
                 'rows' => $preview['rows'],
                 'count' => count($preview['rows']),
                 'shown_count' => count($preview['rows']),
+                'total_rows' => $preview['total_rows'],
                 'max_rows' => $preview['max_rows'],
-                'preview_limited' => false,
+                'preview_limited' => $preview['preview_limited'],
                 'summary' => $preview['summary'],
                 'sheets' => $preview['sheets'],
                 'selected_sheet' => $preview['selected_sheet'],
@@ -96,7 +117,7 @@ class ProductImportController extends Controller
         return $this->startFileRun($request, ImportRun::TYPE_VALIDATION, ImportRun::MODE_VALIDATE_ONLY);
     }
 
-    private function startFileRun(PreviewImportRequest $request, string $runType, string $mode): JsonResponse
+    private function startFileRun(PreviewImportRequest $request, string $runType, string $mode, ?array $metadata = null, bool $asyncPreview = false): JsonResponse
     {
         $file = $request->file('file');
         $sheetIndex = $request->has('sheet_index') ? $request->integer('sheet_index') : null;
@@ -127,7 +148,7 @@ class ProductImportController extends Controller
 
         if ($sheetName === null || trim((string) $sheetName) === '') {
             try {
-                $selectedSheet = (new ProductImport($this->productService))->resolveSelectedSheet($file, $sheetIndex, null, $mapping);
+                $selectedSheet = $metadata['selected_sheet'] ?? (new ProductImport($this->productService))->resolveSelectedSheet($file, $sheetIndex, null, $mapping);
                 $sheetIndex = $selectedSheet['index'];
                 $sheetName = $selectedSheet['name'];
             } catch (\RuntimeException $e) {
@@ -157,11 +178,21 @@ class ProductImportController extends Controller
             'sheet_name' => $sheetName,
             'run_type' => $runType,
             'mode' => $mode,
+            'total_rows' => (int) ($metadata['selected_sheet']['row_count'] ?? 0),
             'mapping' => $mapping,
             'status' => ImportRun::STATUS_PENDING,
             'results' => [],
             'errors' => [],
-            'summary' => [],
+            'summary' => $asyncPreview ? [
+                'preview_async' => true,
+                'sheets' => $metadata['sheets'] ?? [],
+                'selected_sheet' => $metadata['selected_sheet'] ?? null,
+                'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
+                'detected_columns' => $metadata['detected_columns'] ?? [],
+                'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
+                'required_fields' => $metadata['required_fields'] ?? [],
+                'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+            ] : [],
         ]);
 
         ProcessProductImportRun::dispatch($importRun->id);
@@ -172,14 +203,28 @@ class ProductImportController extends Controller
                 'import_run_id' => $importRun->id,
                 'status' => $importRun->status,
                 'mode' => $importRun->mode,
+                'run_type' => $importRun->run_type,
+                'async' => $asyncPreview,
+                'total_rows' => $importRun->total_rows,
+                'preview_limited' => false,
+                'sheets' => $metadata['sheets'] ?? [],
+                'selected_sheet' => $metadata['selected_sheet'] ?? null,
+                'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
+                'detected_columns' => $metadata['detected_columns'] ?? [],
+                'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
+                'required_fields' => $metadata['required_fields'] ?? [],
+                'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
             ],
-            'message' => 'Importacion en proceso. Puede consultar el avance desde esta pantalla.',
+            'message' => $asyncPreview
+                ? 'Previsualizacion en cola. Puede consultar el avance desde esta pantalla.'
+                : 'Importacion en proceso. Puede consultar el avance desde esta pantalla.',
         ]);
     }
 
     public function runs(Request $request): JsonResponse
     {
         $query = ImportRun::query()
+            ->with('user:id,name')
             ->where('entity', 'products')
             ->visibleTo($request->user());
 
@@ -265,24 +310,43 @@ class ProductImportController extends Controller
     {
         $this->abortUnlessVisibleImportRun($importRun, $request->user());
 
-        if ($importRun->run_type !== ImportRun::TYPE_VALIDATION || $importRun->mode !== ImportRun::MODE_VALIDATE_ONLY) {
+        $importModes = [
+            ImportRun::MODE_CREATE_UPDATE,
+            ImportRun::MODE_CREATE_ONLY,
+            ImportRun::MODE_UPDATE_STOCK_PRICE,
+            ImportRun::MODE_RETRY_FAILED,
+        ];
+        $isValidationRun = $importRun->run_type === ImportRun::TYPE_VALIDATION
+            && $importRun->mode === ImportRun::MODE_VALIDATE_ONLY;
+        $isImportRun = $importRun->run_type === ImportRun::TYPE_IMPORT
+            && in_array($importRun->mode, $importModes, true);
+
+        if (! $isValidationRun && ! $isImportRun) {
             return response()->json([
                 'success' => false,
-                'message' => 'Solo se puede procesar inmediatamente una validacion completa pendiente.',
+                'message' => 'Este import no se puede procesar inmediatamente.',
             ], 422);
         }
 
         if ($importRun->status !== ImportRun::STATUS_PENDING) {
             return response()->json([
                 'success' => false,
-                'message' => 'La validacion ya fue tomada por la cola o ya finalizo.',
+                'message' => 'El proceso ya fue tomado por la cola o ya finalizo.',
+                'data' => $this->importRunDetail($importRun),
             ], 409);
         }
 
-        if (! is_string($importRun->stored_path) || $importRun->stored_path === '' || ! Storage::disk('local')->exists($importRun->stored_path)) {
+        if ($importRun->mode === ImportRun::MODE_RETRY_FAILED && empty($importRun->failed_rows)) {
             return response()->json([
                 'success' => false,
-                'message' => 'No se encontro el archivo almacenado para validar.',
+                'message' => 'No hay filas fallidas guardadas para reintentar.',
+            ], 422);
+        }
+
+        if ($importRun->mode !== ImportRun::MODE_RETRY_FAILED && (! is_string($importRun->stored_path) || $importRun->stored_path === '' || ! Storage::disk('local')->exists($importRun->stored_path))) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se encontro el archivo almacenado para procesar.',
             ], 422);
         }
 
@@ -325,6 +389,23 @@ class ProductImportController extends Controller
         }, "errores-importacion-{$importRun->id}.xlsx", [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ]);
+    }
+
+    public function source(Request $request, ImportRun $importRun): BinaryFileResponse|JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        if (! $this->sourceFileExists($importRun)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se encontro el archivo original de esta importacion.',
+            ], 404);
+        }
+
+        return response()->download(
+            Storage::disk('local')->path($importRun->stored_path),
+            $importRun->original_filename ?: basename((string) $importRun->stored_path)
+        );
     }
 
     public function retryFailed(Request $request, ImportRun $importRun): JsonResponse
@@ -449,6 +530,9 @@ class ProductImportController extends Controller
 
     private function importRunSummary(ImportRun $importRun): array
     {
+        $hasSourceFile = $this->sourceFileExists($importRun);
+        $summary = $importRun->summary ?? [];
+
         return [
             'id' => $importRun->id,
             'entity' => $importRun->entity,
@@ -464,7 +548,14 @@ class ProductImportController extends Controller
             'error_count' => $importRun->error_count,
             'progress_percent' => $this->progressPercent($importRun),
             'has_errors' => $importRun->error_count > 0,
-            'has_source_file' => is_string($importRun->stored_path) && Storage::disk('local')->exists($importRun->stored_path),
+            'has_source_file' => $hasSourceFile,
+            'source_download_url' => $hasSourceFile ? "/api/v1/products/import/runs/{$importRun->id}/source" : null,
+            'errors_download_url' => "/api/v1/products/import/runs/{$importRun->id}/errors.xlsx",
+            'preview_async' => (bool) ($summary['preview_async'] ?? false),
+            'user' => $importRun->user ? [
+                'id' => $importRun->user->id,
+                'name' => $importRun->user->name,
+            ] : null,
             'can_retry_failed' => $importRun->isTerminal() && $this->failedRowsForRetry($importRun) !== [],
             'can_cancel' => $importRun->canCancel(),
             'started_at' => $importRun->started_at,
@@ -501,5 +592,12 @@ class ProductImportController extends Controller
     private function abortUnlessVisibleImportRun(ImportRun $importRun, User $user): void
     {
         abort_unless($user->isAdmin() || $importRun->user_id === $user->id, 404);
+    }
+
+    private function sourceFileExists(ImportRun $importRun): bool
+    {
+        return is_string($importRun->stored_path)
+            && $importRun->stored_path !== ''
+            && Storage::disk('local')->exists($importRun->stored_path);
     }
 }

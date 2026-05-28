@@ -12,6 +12,7 @@ Route::prefix('products/import')->middleware('role:admin,manager')->group(functi
     Route::post('/execute', [ProductImportController::class, 'execute']);
     Route::get('/runs', [ProductImportController::class, 'runs']);
     Route::get('/runs/{importRun}/errors.xlsx', [ProductImportController::class, 'errors']);
+    Route::get('/runs/{importRun}/source', [ProductImportController::class, 'source']);
     Route::post('/runs/{importRun}/retry-failed', [ProductImportController::class, 'retryFailed']);
     Route::post('/runs/{importRun}/process-now', [ProductImportController::class, 'processNow']);
     Route::post('/runs/{importRun}/cancel', [ProductImportController::class, 'cancel']);

@@ -2,11 +2,17 @@
 
 namespace App\Imports;
 
+use Generator;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use OpenSpout\Common\Entity\Row;
+use OpenSpout\Reader\CSV\Reader as CsvReader;
+use OpenSpout\Reader\ODS\Reader as OdsReader;
+use OpenSpout\Reader\ReaderInterface;
+use OpenSpout\Reader\XLSX\Reader as XlsxReader;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
 
@@ -134,7 +140,7 @@ abstract class BaseImport
 
     public function import(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): void
     {
-        $this->execute($this->extractRows($file, $sheetIndex, $sheetName, $mapping)->all());
+        $this->importInChunks($file, 500, null, $sheetIndex, $sheetName, $mapping);
     }
 
     public function importInChunks(
@@ -145,18 +151,36 @@ abstract class BaseImport
         ?string $sheetName = null,
         array $mapping = []
     ): void {
-        $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping);
-        $totalRows = $rows->count();
+        $selectedSheet = $this->resolveSelectedSheet($file, $sheetIndex, $sheetName, $mapping);
+        $totalRows = (int) ($selectedSheet['row_count'] ?? 0);
+        $chunk = [];
 
-        foreach ($rows->chunk($chunkSize) as $chunk) {
-            $this->execute($chunk->values()->all());
+        foreach ($this->extractRowsLazy($file, (int) $selectedSheet['index'], (string) $selectedSheet['name'], $mapping) as $row) {
+            $chunk[] = $row;
+
+            if (count($chunk) < $chunkSize) {
+                continue;
+            }
+
+            $this->execute($chunk);
+            $chunk = [];
 
             if ($afterChunk !== null) {
                 $shouldContinue = $afterChunk($this, $this->processedCount, $totalRows);
                 if ($shouldContinue === false) {
-                    break;
+                    return;
                 }
             }
+        }
+
+        if ($chunk === []) {
+            return;
+        }
+
+        $this->execute($chunk);
+
+        if ($afterChunk !== null) {
+            $afterChunk($this, $this->processedCount, $totalRows);
         }
     }
 
@@ -168,18 +192,36 @@ abstract class BaseImport
         ?string $sheetName = null,
         array $mapping = []
     ): void {
-        $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping);
-        $totalRows = $rows->count();
+        $selectedSheet = $this->resolveSelectedSheet($file, $sheetIndex, $sheetName, $mapping);
+        $totalRows = (int) ($selectedSheet['row_count'] ?? 0);
+        $chunk = [];
 
-        foreach ($rows->chunk($chunkSize) as $chunk) {
-            $this->validateRows($chunk->values()->all());
+        foreach ($this->extractRowsLazy($file, (int) $selectedSheet['index'], (string) $selectedSheet['name'], $mapping) as $row) {
+            $chunk[] = $row;
+
+            if (count($chunk) < $chunkSize) {
+                continue;
+            }
+
+            $this->validateRows($chunk);
+            $chunk = [];
 
             if ($afterChunk !== null) {
                 $shouldContinue = $afterChunk($this, $this->processedCount, $totalRows);
                 if ($shouldContinue === false) {
-                    break;
+                    return;
                 }
             }
+        }
+
+        if ($chunk === []) {
+            return;
+        }
+
+        $this->validateRows($chunk);
+
+        if ($afterChunk !== null) {
+            $afterChunk($this, $this->processedCount, $totalRows);
         }
     }
 
@@ -263,25 +305,33 @@ abstract class BaseImport
 
     protected function extractRows(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = [], ?int $maxRows = null): Collection
     {
+        return collect(iterator_to_array($this->extractRowsLazy($file, $sheetIndex, $sheetName, $mapping, $maxRows), false));
+    }
+
+    /**
+     * @return Generator<int, array<string, mixed>>
+     */
+    protected function extractRowsLazy(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = [], ?int $maxRows = null): Generator
+    {
         $sheets = $this->inspectSheets($file, $mapping);
         $resolvedIndex = $this->resolveSheetIndex($sheets, $sheetIndex, $sheetName);
-        $sheetRows = collect($this->sheetRows($file, (string) ($sheets[$resolvedIndex]['name'] ?? ''), $maxRows));
+        $resolvedSheetName = (string) ($sheets[$resolvedIndex]['name'] ?? '');
+        $headers = null;
+        $yielded = 0;
 
-        if ($sheetRows->isEmpty()) {
-            return collect();
-        }
+        foreach ($this->sheetRows($file, $resolvedSheetName, $maxRows) as $physicalRow => $values) {
+            if ($headers === null) {
+                $headers = collect($values ?? [])
+                    ->map(function ($header) use ($mapping): string {
+                        $sourceHeader = $this->normalizeRawHeader((string) $header);
 
-        $rawHeaders = $sheetRows->shift();
-        $headers = collect($rawHeaders ?? [])
-            ->map(function ($header) use ($mapping): string {
-                $sourceHeader = $this->normalizeRawHeader((string) $header);
+                        return $this->applyHeaderMapping($this->mapHeader($sourceHeader), $sourceHeader, $mapping);
+                    })
+                    ->all();
 
-                return $this->applyHeaderMapping($this->mapHeader($sourceHeader), $sourceHeader, $mapping);
-            })
-            ->all();
+                continue;
+            }
 
-        $rows = collect();
-        foreach ($sheetRows->values() as $index => $values) {
             $assoc = [];
 
             foreach ($headers as $position => $header) {
@@ -291,16 +341,19 @@ abstract class BaseImport
                 $assoc[$header] = $this->cleanCell($values[$position] ?? null);
             }
 
-            $assoc['__row'] = $index + 2;
+            $assoc['__row'] = $physicalRow;
 
             if ($this->isEmptyDataRow($assoc)) {
                 continue;
             }
 
-            $rows->push($assoc);
-        }
+            yield $assoc;
 
-        return $rows;
+            $yielded++;
+            if ($maxRows !== null && $yielded >= $maxRows) {
+                return;
+            }
+        }
     }
 
     /**
@@ -358,6 +411,119 @@ abstract class BaseImport
             return [];
         }
 
+        if (! $this->supportsOpenSpout($path)) {
+            return $this->legacySheetInfo($path);
+        }
+
+        $reader = null;
+
+        try {
+            $reader = $this->openSpoutReaderForFile($path);
+            $reader->open($path);
+            $sheets = [];
+
+            foreach ($reader->getSheetIterator() as $sheet) {
+                $totalRows = 0;
+                $totalColumns = 0;
+
+                foreach ($sheet->getRowIterator() as $row) {
+                    $totalRows++;
+                    $totalColumns = max($totalColumns, $row->getNumCells());
+                }
+
+                $sheets[] = [
+                    'worksheetName' => $sheet->getName(),
+                    'totalRows' => $totalRows,
+                    'totalColumns' => $totalColumns,
+                ];
+            }
+
+            return $sheets;
+        } catch (\Throwable) {
+            return [[
+                'worksheetName' => 'Hoja 1',
+                'totalRows' => 0,
+                'totalColumns' => 0,
+            ]];
+        } finally {
+            if ($reader !== null) {
+                $reader->close();
+                unset($reader);
+            }
+        }
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    private function sheetHeader(UploadedFile|string $file, ?string $sheetName): array
+    {
+        foreach ($this->sheetRows($file, (string) $sheetName, 0) as $row) {
+            return $row;
+        }
+
+        return [];
+    }
+
+    /**
+     * @return Generator<int, array<int, mixed>>
+     */
+    private function sheetRows(UploadedFile|string $file, string $sheetName, ?int $maxDataRows = null): Generator
+    {
+        $path = $file instanceof UploadedFile ? $file->getRealPath() : $file;
+
+        if (! is_string($path) || $path === '') {
+            return;
+        }
+
+        if (! $this->supportsOpenSpout($path)) {
+            foreach ($this->legacySheetRows($path, $sheetName, $maxDataRows) as $rowNumber => $row) {
+                yield $rowNumber + 1 => $row;
+            }
+
+            return;
+        }
+
+        $reader = $this->openSpoutReaderForFile($path);
+        $reader->open($path);
+
+        try {
+            foreach ($reader->getSheetIterator() as $sheet) {
+                if ($sheetName !== '' && $sheet->getName() !== $sheetName) {
+                    continue;
+                }
+
+                $dataRows = 0;
+                foreach ($sheet->getRowIterator() as $rowNumber => $row) {
+                    if (! $row instanceof Row) {
+                        continue;
+                    }
+
+                    yield (int) $rowNumber => $this->rowValues($row);
+
+                    if ($rowNumber === 1) {
+                        continue;
+                    }
+
+                    $dataRows++;
+                    if ($maxDataRows !== null && $dataRows >= $maxDataRows) {
+                        return;
+                    }
+                }
+
+                return;
+            }
+        } finally {
+            $reader->close();
+            unset($reader);
+        }
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function legacySheetInfo(string $path): array
+    {
         try {
             return $this->readerForFile($path)->listWorksheetInfo($path);
         } catch (\Throwable) {
@@ -370,24 +536,10 @@ abstract class BaseImport
     }
 
     /**
-     * @return array<int, mixed>
-     */
-    private function sheetHeader(UploadedFile|string $file, ?string $sheetName): array
-    {
-        return $this->sheetRows($file, (string) $sheetName, 0)[0] ?? [];
-    }
-
-    /**
      * @return array<int, array<int, mixed>>
      */
-    private function sheetRows(UploadedFile|string $file, string $sheetName, ?int $maxDataRows = null): array
+    private function legacySheetRows(string $path, string $sheetName, ?int $maxDataRows = null): array
     {
-        $path = $file instanceof UploadedFile ? $file->getRealPath() : $file;
-
-        if (! is_string($path) || $path === '') {
-            return [];
-        }
-
         $reader = $this->readerForFile($path);
         if ($sheetName !== '') {
             $reader->setLoadSheetsOnly([$sheetName]);
@@ -403,6 +555,42 @@ abstract class BaseImport
         $spreadsheet->disconnectWorksheets();
 
         return $rows;
+    }
+
+    private function openSpoutReaderForFile(string $path): ReaderInterface
+    {
+        $extension = mb_strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'csv', 'txt' => new CsvReader,
+            'ods' => new OdsReader,
+            default => new XlsxReader,
+        };
+    }
+
+    private function supportsOpenSpout(string $path): bool
+    {
+        return in_array(mb_strtolower(pathinfo($path, PATHINFO_EXTENSION)), ['csv', 'txt', 'xlsx', 'ods'], true);
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    private function rowValues(Row $row): array
+    {
+        $values = [];
+
+        foreach ($row->cells as $position => $cell) {
+            $values[(int) $position] = $cell->getValue();
+        }
+
+        if ($values === []) {
+            return [];
+        }
+
+        ksort($values);
+
+        return $values;
     }
 
     private function readerForFile(string $path): \PhpOffice\PhpSpreadsheet\Reader\IReader

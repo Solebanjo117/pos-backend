@@ -94,8 +94,6 @@ class ProcessProductImportRun implements ShouldQueue
                 return;
             }
 
-            $sourceFileDeleted = $this->deleteSourceFile($importRun);
-
             $importRun->update([
                 'status' => ImportRun::STATUS_COMPLETED,
                 'total_rows' => $import->processedCount,
@@ -109,7 +107,7 @@ class ProcessProductImportRun implements ShouldQueue
                     'latest_results_limited_to' => 100,
                     'latest_errors_limited_to' => 100,
                     'records' => $importRun->records()->selectRaw('action, count(*) as total')->groupBy('action')->pluck('total', 'action')->all(),
-                    'source_file_deleted' => $sourceFileDeleted,
+                    'source_file_deleted' => false,
                 ]),
                 'finished_at' => now(),
             ]);
@@ -125,24 +123,13 @@ class ProcessProductImportRun implements ShouldQueue
             && Storage::disk('local')->exists($importRun->stored_path);
     }
 
-    private function deleteSourceFile(ImportRun $importRun): bool
-    {
-        if (! $this->sourceFileExists($importRun)) {
-            return false;
-        }
-
-        return Storage::disk('local')->delete($importRun->stored_path);
-    }
-
     private function markCancelled(ImportRun $importRun, int $processedRows): void
     {
-        $deleted = $this->deleteSourceFile($importRun);
-
         $importRun->update([
             'status' => ImportRun::STATUS_CANCELLED,
             'processed_rows' => $processedRows,
             'summary' => array_merge($importRun->summary ?? [], [
-                'source_file_deleted' => $deleted,
+                'source_file_deleted' => false,
             ]),
             'finished_at' => now(),
         ]);
@@ -180,6 +167,7 @@ class ProcessProductImportRun implements ShouldQueue
     private function summaryForImportRun(ImportRun $importRun, ProductImport $import, array $summary): array
     {
         return array_merge(
+            $importRun->summary ?? [],
             $summary,
             $import->referenceSummary(),
             $this->validationRowsSummary($importRun, $import),
