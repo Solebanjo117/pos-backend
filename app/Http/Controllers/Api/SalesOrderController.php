@@ -8,6 +8,8 @@ use App\Http\Requests\PosCheckoutRequest;
 use App\Models\CustomerVehicle;
 use App\Models\Inventory;
 use App\Models\PaymentMethod;
+use App\Models\SalesOrder;
+use App\Services\SalesOrderOperationalDetailService;
 use App\Services\SalesOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,6 +24,18 @@ class SalesOrderController extends Controller
     public function __construct(SalesOrderService $salesOrderService)
     {
         $this->salesOrderService = $salesOrderService;
+    }
+
+    /**
+     * GET /api/sales-orders/{salesOrder}/operational-detail
+     * Get the complete operational profile for an invoice/order.
+     */
+    public function operationalDetail(SalesOrder $salesOrder, SalesOrderOperationalDetailService $operationalDetailService): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'data' => $operationalDetailService->get($salesOrder),
+        ]);
     }
 
     /**

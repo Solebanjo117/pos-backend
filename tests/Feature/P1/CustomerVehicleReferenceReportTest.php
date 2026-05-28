@@ -145,6 +145,71 @@ it('stores customer vehicles without chassis when the selected model has no chas
     ]);
 });
 
+it('stores customer vehicles without vin and does not sync a catalog vin', function (): void {
+    $customer = Customer::create([
+        'code' => 'CV-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente sin VIN',
+    ]);
+    [$model, $chassis, $engine] = customerVehicleCatalogScope();
+
+    $this->postJson("/api/v1/customers/{$customer->id}/vehicles", [
+        'vehicle_model_id' => $model->id,
+        'vehicle_chassis_id' => $chassis->id,
+        'vehicle_engine_id' => $engine->id,
+        'label' => 'Carro sin placa VIN',
+    ])
+        ->assertCreated()
+        ->assertJsonPath('data.vin', null)
+        ->assertJsonPath('data.label', 'Carro sin placa VIN');
+
+    $this->assertDatabaseHas('customer_vehicles', [
+        'customer_id' => $customer->id,
+        'vehicle_model_id' => $model->id,
+        'vehicle_chassis_id' => $chassis->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => null,
+    ]);
+    $this->assertDatabaseMissing('vehicle_vins', [
+        'model_id' => $model->id,
+        'engine_id' => $engine->id,
+    ]);
+});
+
+it('allows clearing a customer vehicle vin and removes the linked catalog vin', function (): void {
+    $customer = Customer::create([
+        'code' => 'CV-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente que borra VIN',
+    ]);
+    [$model, $chassis, $engine] = customerVehicleCatalogScope();
+
+    $createResponse = $this->postJson("/api/v1/customers/{$customer->id}/vehicles", [
+        'vehicle_model_id' => $model->id,
+        'vehicle_chassis_id' => $chassis->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => 'CLEARVIN001',
+    ])->assertCreated();
+
+    $this->putJson("/api/v1/customers/{$customer->id}/vehicles/{$createResponse->json('data.id')}", [
+        'vehicle_model_id' => $model->id,
+        'vehicle_chassis_id' => $chassis->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => null,
+        'status' => 'active',
+    ])
+        ->assertOk()
+        ->assertJsonPath('data.vin', null);
+
+    $this->assertDatabaseHas('customer_vehicles', [
+        'customer_id' => $customer->id,
+        'vin' => null,
+    ]);
+    $this->assertDatabaseMissing('vehicle_vins', [
+        'model_id' => $model->id,
+        'engine_id' => $engine->id,
+        'vin' => 'CLEARVIN001',
+    ]);
+});
+
 it('moves the linked catalog vin when a customer vehicle changes vin or engine', function (): void {
     $customer = Customer::create([
         'code' => 'CV-'.fake()->unique()->randomNumber(5),

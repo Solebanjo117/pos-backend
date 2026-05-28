@@ -33,9 +33,10 @@ class CustomerVehicleController extends Controller
             $data = $request->validated();
             $data['status'] = $data['status'] ?? 'active';
 
-            $duplicateExists = $customer->vehicles()
-                ->where('vin', $data['vin'])
-                ->exists();
+            $duplicateExists = filled($data['vin'] ?? null)
+                && $customer->vehicles()
+                    ->where('vin', $data['vin'])
+                    ->exists();
 
             if ($duplicateExists) {
                 throw ValidationException::withMessages([
@@ -61,7 +62,7 @@ class CustomerVehicleController extends Controller
         $vehicle = DB::transaction(function () use ($request, $customer, $vehicle): CustomerVehicle {
             $data = $request->validated();
 
-            if (isset($data['vin'])) {
+            if (filled($data['vin'] ?? null)) {
                 $duplicateExists = $customer->vehicles()
                     ->where('vin', $data['vin'])
                     ->whereKeyNot($vehicle->id)

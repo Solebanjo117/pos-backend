@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Brand;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\ProductVariant;
@@ -30,10 +31,17 @@ beforeEach(function () {
         'name' => 'Quote Flow Product',
         'type' => 'simple',
         'status' => 'active',
+        'sku_base' => 'QF-PRODUCT',
+    ]);
+
+    $this->brand = Brand::create([
+        'name' => 'Quote Flow Brand',
+        'status' => 'active',
     ]);
 
     $this->variant = ProductVariant::create([
         'product_id' => $this->product->id,
+        'brand_id' => $this->brand->id,
         'sku' => 'QF-001',
         'name' => 'Quote Flow Variant',
     ]);

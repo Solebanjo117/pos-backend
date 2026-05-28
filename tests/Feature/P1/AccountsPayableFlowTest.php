@@ -79,6 +79,13 @@ it('records partial and full accounts payable payments from supplier account', f
         ->assertJsonPath('data.0.id', $supplier->id)
         ->assertJsonPath('data.0.total_debt', 120);
 
+    $this->actingAs($buyer)->getJson("/api/v1/accounts-payable/{$supplier->id}/statement")
+        ->assertOk()
+        ->assertJsonPath('data.summary.open_documents_count', 1)
+        ->assertJsonPath('data.summary.total_open_balance', 120)
+        ->assertJsonPath('data.summary.total_documents_amount', 120)
+        ->assertJsonPath('data.summary.total_paid', 0);
+
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 50,
         'method' => 'transfer',
@@ -92,6 +99,13 @@ it('records partial and full accounts payable payments from supplier account', f
         ->and((float) $purchaseOrder->fresh()->amount_due)->toBe(70.0)
         ->and(PurchaseOrderPayment::firstOrFail()->pos_session_id)->not->toBeNull()
         ->and(AccountPaymentBatch::firstOrFail()->pos_session_id)->not->toBeNull();
+
+    $this->actingAs($buyer)->getJson("/api/v1/accounts-payable/{$supplier->id}/statement")
+        ->assertOk()
+        ->assertJsonPath('data.summary.open_documents_count', 1)
+        ->assertJsonPath('data.summary.total_open_balance', 70)
+        ->assertJsonPath('data.summary.total_documents_amount', 120)
+        ->assertJsonPath('data.summary.total_paid', 50);
 
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 70,

@@ -218,6 +218,25 @@
             border-top: 1px solid #e5e7eb;
         }
 
+        .summary-grid {
+            clear: both;
+            width: 100%;
+            display: table;
+            margin-top: 18px;
+        }
+
+        .summary-cell {
+            display: table-cell;
+            width: 50%;
+            padding-right: 10px;
+            vertical-align: top;
+        }
+
+        .summary-cell:last-child {
+            padding-right: 0;
+            padding-left: 10px;
+        }
+
         .checkbox {
             display: inline-block;
             width: 13px;
@@ -437,6 +456,54 @@
             <div class="total-row grand-total">
                 <div class="total-label">TOTAL</div>
                 <div class="total-value">${{ number_format((float) $purchaseOrder->total, 2) }}</div>
+            </div>
+        </div>
+
+        @php
+            $amountPaid = (float) $purchaseOrder->amount_paid;
+            $amountDue = (float) $purchaseOrder->amount_due;
+            $receivedPackages = $purchaseOrder->items->sum(fn($item) => (int) ($item->effective_received_quantity ?? $item->quantity_received ?? 0));
+            $orderedPackages = $purchaseOrder->items->sum(fn($item) => (int) $item->quantity_ordered);
+        @endphp
+
+        <div class="summary-grid">
+            <div class="summary-cell">
+                <div class="section-title">Resumen de pago</div>
+                <table>
+                    <tbody>
+                        <tr>
+                            <td>Total OC</td>
+                            <td class="text-right mono">${{ number_format((float) $purchaseOrder->total, 2) }}</td>
+                        </tr>
+                        <tr>
+                            <td>Pagado</td>
+                            <td class="text-right mono">${{ number_format($amountPaid, 2) }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Saldo AP</strong></td>
+                            <td class="text-right mono"><strong>${{ number_format($amountDue, 2) }}</strong></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="summary-cell">
+                <div class="section-title">Resumen de recepcion</div>
+                <table>
+                    <tbody>
+                        <tr>
+                            <td>Paquetes ordenados</td>
+                            <td class="text-right mono">{{ number_format($orderedPackages, 0) }}</td>
+                        </tr>
+                        <tr>
+                            <td>Paquetes recibidos</td>
+                            <td class="text-right mono">{{ number_format($receivedPackages, 0) }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Pendientes</strong></td>
+                            <td class="text-right mono"><strong>{{ number_format(max(0, $orderedPackages - $receivedPackages), 0) }}</strong></td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     @endif

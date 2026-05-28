@@ -37,7 +37,7 @@ class ProductImportController extends Controller
         try {
             $preview = $import->previewWithSummary(
                 $request->file('file'),
-                200,
+                null,
                 $request->has('sheet_index') ? $request->integer('sheet_index') : null,
                 $request->input('sheet_name'),
                 $request->input('mapping', [])
@@ -56,7 +56,7 @@ class ProductImportController extends Controller
                 'count' => count($preview['rows']),
                 'shown_count' => count($preview['rows']),
                 'max_rows' => $preview['max_rows'],
-                'preview_limited' => true,
+                'preview_limited' => false,
                 'summary' => $preview['summary'],
                 'sheets' => $preview['sheets'],
                 'selected_sheet' => $preview['selected_sheet'],

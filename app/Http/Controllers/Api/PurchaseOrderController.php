@@ -41,7 +41,7 @@ class PurchaseOrderController extends Controller
      */
     public function show(int $id): JsonResponse
     {
-        $order = $this->purchaseOrderService->getById($id);
+        $order = $this->purchaseOrderService->getOperationalDetail($id);
 
         return response()->json(['data' => $order]);
     }

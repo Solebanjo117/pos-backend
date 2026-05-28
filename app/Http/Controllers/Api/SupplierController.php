@@ -4,11 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSupplierRequest;
+use App\Http\Requests\SupplierCommercialDashboardRequest;
+use App\Http\Requests\SupplierPurchaseHistoryRequest;
 use App\Http\Requests\UpsertSupplierVariantRequest;
 use App\Models\Product;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\Supplier;
+use App\Services\SupplierProfileService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Http\JsonResponse;
@@ -16,6 +19,10 @@ use Illuminate\Http\Request;
 
 class SupplierController extends Controller
 {
+    public function __construct(
+        private SupplierProfileService $supplierProfileService
+    ) {}
+
     /**
      * GET /api/v1/suppliers
      * List all suppliers with filters
@@ -47,6 +54,13 @@ class SupplierController extends Controller
         $suppliers = $query->paginate($perPage);
 
         return response()->json($suppliers);
+    }
+
+    public function commercialDashboard(SupplierCommercialDashboardRequest $request): JsonResponse
+    {
+        return response()->json([
+            'data' => $this->supplierProfileService->commercialDashboard($request->validated()),
+        ]);
     }
 
     /**
@@ -93,19 +107,7 @@ class SupplierController extends Controller
      */
     public function store(StoreSupplierRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'contact_name' => 'nullable|string|max:255',
-            'email' => 'nullable|email|max:255',
-            'phone' => 'nullable|string|max:50',
-            'address' => 'nullable|string|max:500',
-            'city' => 'nullable|string|max:100',
-            'country' => 'nullable|string|max:100',
-            'payment_terms' => 'nullable|string|max:255',
-            'lead_time_days' => 'nullable|integer|min:0',
-            'notes' => 'nullable|string',
-            'status' => 'nullable|in:active,inactive',
-        ]);
+        $validated = $request->validated();
 
         $supplier = Supplier::create($validated);
 
@@ -195,6 +197,14 @@ class SupplierController extends Controller
             ->paginate(15);
 
         return response()->json($orders);
+    }
+
+    public function purchaseHistory(SupplierPurchaseHistoryRequest $request, Supplier $supplier): JsonResponse
+    {
+        return response()->json($this->supplierProfileService->purchaseHistory(
+            $supplier,
+            $request->validated()
+        ));
     }
 
     /**
@@ -397,7 +407,7 @@ class SupplierController extends Controller
 
     private function supplierVariantRow(ProductSupplier $ps): array
     {
-        return [
+        return array_merge([
             'id' => $ps->id,
             'product_id' => $ps->product_id,
             'variant_id' => $ps->variant_id,
@@ -414,6 +424,6 @@ class SupplierController extends Controller
                 ?? $ps->product?->inventory?->sum('quantity_available')
                 ?? 0
             ),
-        ];
+        ], $this->supplierProfileService->suppliedProductMetrics($ps));
     }
 }

@@ -12,7 +12,9 @@ class StoreCustomerVehicleRequest extends FormRequest
     protected function prepareForValidation(): void
     {
         if ($this->has('vin')) {
-            $this->merge(['vin' => strtoupper(trim((string) $this->input('vin')))]);
+            $vin = trim((string) $this->input('vin'));
+
+            $this->merge(['vin' => $vin === '' ? null : strtoupper($vin)]);
         }
     }
 
@@ -27,7 +29,7 @@ class StoreCustomerVehicleRequest extends FormRequest
             'vehicle_model_id' => 'required|integer|exists:vehicle_models,id',
             'vehicle_chassis_id' => 'nullable|integer|exists:vehicle_chassis,id',
             'vehicle_engine_id' => 'required|integer|exists:vehicle_engines,id',
-            'vin' => 'required|string|max:40',
+            'vin' => 'nullable|string|max:40',
             'label' => 'nullable|string|max:255',
             'notes' => 'nullable|string|max:5000',
             'status' => 'nullable|in:active,inactive',
@@ -80,7 +82,6 @@ class StoreCustomerVehicleRequest extends FormRequest
         return [
             'vehicle_model_id.required' => 'Selecciona el modelo del carro.',
             'vehicle_engine_id.required' => 'Selecciona el motor del carro.',
-            'vin.required' => 'El VIN del carro es obligatorio.',
         ];
     }
 }

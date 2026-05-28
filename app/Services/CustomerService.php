@@ -333,6 +333,21 @@ class CustomerService
                 ])
                 ->values()
                 ->all(),
+            'returns' => $order->returns
+                ->sortByDesc('created_at')
+                ->map(fn ($return): array => [
+                    'id' => $return->id,
+                    'return_number' => $return->return_number,
+                    'status' => $return->status,
+                    'status_label' => $return->status_label,
+                    'refund_method' => $return->refund_method,
+                    'total_amount' => (float) $return->total_amount,
+                    'reason' => $return->reason,
+                    'created_at' => $return->created_at?->toISOString(),
+                    'href' => "/returns/{$return->id}",
+                ])
+                ->values()
+                ->all(),
         ];
     }
 

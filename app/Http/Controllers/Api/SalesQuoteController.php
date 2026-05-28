@@ -10,6 +10,7 @@ use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesQuote;
 use App\Models\Setting;
+use App\Services\SalesQuoteOperationalDetailService;
 use App\Services\SalesQuoteService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -18,7 +19,10 @@ use Illuminate\Validation\ValidationException;
 
 class SalesQuoteController extends Controller
 {
-    public function __construct(private SalesQuoteService $salesQuoteService) {}
+    public function __construct(
+        private SalesQuoteService $salesQuoteService,
+        private SalesQuoteOperationalDetailService $operationalDetailService
+    ) {}
 
     /**
      * GET /api/sales-quotes
@@ -34,6 +38,12 @@ class SalesQuoteController extends Controller
             }
             if ($request->filled('customer_id')) {
                 $query->where('customer_id', $request->customer_id);
+            }
+            if ($request->filled('user_id')) {
+                $query->where('user_id', $request->user_id);
+            }
+            if ($request->filled('warehouse_id')) {
+                $query->where('warehouse_id', $request->warehouse_id);
             }
             if ($request->filled('search')) {
                 $search = $request->search;
@@ -71,6 +81,19 @@ class SalesQuoteController extends Controller
         } catch (\Exception $e) {
             return response()->json(['message' => 'Cotización no encontrada', 'error' => $e->getMessage()], 404);
         }
+    }
+
+    /**
+     * GET /api/sales-quotes/{id}/operational-detail
+     */
+    public function operationalDetail(int $id): JsonResponse
+    {
+        $quote = SalesQuote::findOrFail($id);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->operationalDetailService->build($quote),
+        ]);
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\CustomerVehicle;
 use App\Models\VehicleEngine;
 use App\Models\VehicleModel;
 use App\Models\VehicleVin;
@@ -57,7 +58,11 @@ class VehicleVinController extends Controller
     {
         $this->resolveModelAndEngine($modelId, $engineId);
 
-        return response()->json(['data' => $this->modelEngineVins($modelId, $engineId)->get()]);
+        return response()->json([
+            'data' => $this->modelEngineVins($modelId, $engineId)
+                ->get()
+                ->map(fn (VehicleVin $vin): array => $this->vehicleVinPayload($vin)),
+        ]);
     }
 
     public function storeByModelEngine(Request $request, int $modelId, int $engineId): JsonResponse
@@ -78,7 +83,11 @@ class VehicleVinController extends Controller
     {
         $this->resolveModelAndEngine($modelId, $engineId);
 
-        return response()->json(['data' => $this->modelEngineVins($modelId, $engineId)->get()]);
+        return response()->json([
+            'data' => $this->modelEngineVins($modelId, $engineId)
+                ->get()
+                ->map(fn (VehicleVin $vin): array => $this->vehicleVinPayload($vin)),
+        ]);
     }
 
     public function storeByModelChassisEngine(Request $request, int $modelId, int $chassisId, int $engineId): JsonResponse
@@ -108,6 +117,14 @@ class VehicleVinController extends Controller
     private function modelEngineVins(int $modelId, int $engineId): \Illuminate\Database\Eloquent\Builder
     {
         return VehicleVin::query()
+            ->addSelect([
+                'customer_vehicle_count' => CustomerVehicle::query()
+                    ->selectRaw('count(*)')
+                    ->whereColumn('vehicle_model_id', 'vehicle_vins.model_id')
+                    ->whereColumn('vehicle_engine_id', 'vehicle_vins.engine_id')
+                    ->whereColumn('vin', 'vehicle_vins.vin')
+                    ->where('status', 'active'),
+            ])
             ->where('model_id', $modelId)
             ->where('engine_id', $engineId)
             ->orderBy('created_at', 'desc');
@@ -139,7 +156,10 @@ class VehicleVinController extends Controller
             $vin->update(['chassis_id' => null]);
         }
 
-        return response()->json(['data' => $vin->refresh()], $wasRecentlyCreated ? 201 : 200);
+        return response()->json(
+            ['data' => $this->vehicleVinPayload($vin->refresh())],
+            $wasRecentlyCreated ? 201 : 200
+        );
     }
 
     private function destroyModelEngineVin(int $modelId, int $engineId, int $vinId): JsonResponse
@@ -148,6 +168,12 @@ class VehicleVinController extends Controller
             ->where('model_id', $modelId)
             ->where('engine_id', $engineId)
             ->findOrFail($vinId);
+
+        abort_if(
+            $this->activeCustomerVehicleCount($vin) > 0,
+            422,
+            'Este VIN está vinculado a un cliente. Elimínalo desde la ficha del cliente.'
+        );
 
         $vin->delete();
 
@@ -168,5 +194,57 @@ class VehicleVinController extends Controller
         abort_unless($engineBelongsToModel, 422, 'El motor no pertenece al modelo seleccionado.');
 
         return [$model, $engine];
+    }
+
+    private function activeCustomerVehicleCount(VehicleVin $vin): int
+    {
+        return $this->activeCustomerVehiclesQuery($vin)
+            ->count();
+    }
+
+    private function activeCustomerVehiclesQuery(VehicleVin $vin): \Illuminate\Database\Eloquent\Builder
+    {
+        return CustomerVehicle::query()
+            ->where('vehicle_model_id', $vin->model_id)
+            ->where('vehicle_engine_id', $vin->engine_id)
+            ->where('vin', $vin->vin)
+            ->where('status', 'active');
+    }
+
+    /**
+     * @return array<int, array{id: int, name: string, code: string|null, customer_vehicle_id: int}>
+     */
+    private function activeCustomerLinks(VehicleVin $vin): array
+    {
+        return $this->activeCustomerVehiclesQuery($vin)
+            ->with('customer:id,code,name')
+            ->orderBy('id')
+            ->get()
+            ->filter(fn (CustomerVehicle $vehicle): bool => $vehicle->customer !== null)
+            ->unique('customer_id')
+            ->map(fn (CustomerVehicle $vehicle): array => [
+                'id' => $vehicle->customer->id,
+                'name' => $vehicle->customer->name,
+                'code' => $vehicle->customer->code,
+                'customer_vehicle_id' => $vehicle->id,
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function vehicleVinPayload(VehicleVin $vin): array
+    {
+        $data = $vin->toArray();
+        $customerVehicleCount = (int) (
+            $vin->customer_vehicle_count ?? $this->activeCustomerVehicleCount($vin)
+        );
+
+        $data['customer_vehicle_count'] = $customerVehicleCount;
+        $data['is_customer_linked'] = $customerVehicleCount > 0;
+        $data['linked_customers'] = $customerVehicleCount > 0
+            ? $this->activeCustomerLinks($vin)
+            : [];
+
+        return $data;
     }
 }

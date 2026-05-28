@@ -1,5 +1,7 @@
 <?php
 
+use App\Models\Customer;
+use App\Models\CustomerVehicle;
 use App\Models\User;
 use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
@@ -133,6 +135,101 @@ it('skips duplicate model engine vins without failing', function (): void {
     $this->postJson($basePath, $payload)->assertOk();
 
     $this->assertDatabaseCount('vehicle_vins', 1);
+});
+
+it('marks model engine vins linked to active customer vehicles', function (): void {
+    [$model, , $engine] = createVehicleVinScope();
+    $customer = Customer::create([
+        'code' => 'CUST-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente con VIN',
+    ]);
+    $secondCustomer = Customer::create([
+        'code' => 'CUST-'.fake()->unique()->randomNumber(5),
+        'name' => 'Segundo cliente con VIN',
+    ]);
+
+    VehicleVin::create([
+        'model_id' => $model->id,
+        'engine_id' => $engine->id,
+        'vin' => 'CLIENTVIN001',
+    ]);
+    CustomerVehicle::create([
+        'customer_id' => $customer->id,
+        'vehicle_model_id' => $model->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => 'CLIENTVIN001',
+        'status' => 'active',
+    ]);
+    CustomerVehicle::create([
+        'customer_id' => $secondCustomer->id,
+        'vehicle_model_id' => $model->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => 'CLIENTVIN001',
+        'status' => 'active',
+    ]);
+
+    $this->getJson("/api/v1/vehicle-models/{$model->id}/engines/{$engine->id}/vins")
+        ->assertOk()
+        ->assertJsonPath('data.0.vin', 'CLIENTVIN001')
+        ->assertJsonPath('data.0.is_customer_linked', true)
+        ->assertJsonPath('data.0.customer_vehicle_count', 2)
+        ->assertJsonPath('data.0.linked_customers.0.id', $customer->id)
+        ->assertJsonPath('data.0.linked_customers.0.name', 'Cliente con VIN')
+        ->assertJsonPath('data.0.linked_customers.1.id', $secondCustomer->id)
+        ->assertJsonPath('data.0.linked_customers.1.name', 'Segundo cliente con VIN');
+});
+
+it('blocks deleting model engine vins linked to active customer vehicles', function (): void {
+    [$model, , $engine] = createVehicleVinScope();
+    $customer = Customer::create([
+        'code' => 'CUST-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente protegido',
+    ]);
+    $vin = VehicleVin::create([
+        'model_id' => $model->id,
+        'engine_id' => $engine->id,
+        'vin' => 'PROTECTEDVIN001',
+    ]);
+    CustomerVehicle::create([
+        'customer_id' => $customer->id,
+        'vehicle_model_id' => $model->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => 'PROTECTEDVIN001',
+        'status' => 'active',
+    ]);
+
+    $this
+        ->deleteJson("/api/v1/vehicle-models/{$model->id}/engines/{$engine->id}/vins/{$vin->id}")
+        ->assertUnprocessable()
+        ->assertJsonPath('message', 'Este VIN está vinculado a un cliente. Elimínalo desde la ficha del cliente.');
+
+    $this->assertDatabaseHas('vehicle_vins', ['id' => $vin->id]);
+});
+
+it('allows deleting customer linked vins after no active customer vehicles remain', function (): void {
+    [$model, , $engine] = createVehicleVinScope();
+    $customer = Customer::create([
+        'code' => 'CUST-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente inactivo',
+    ]);
+    $vin = VehicleVin::create([
+        'model_id' => $model->id,
+        'engine_id' => $engine->id,
+        'vin' => 'RELEASEDVIN001',
+    ]);
+    CustomerVehicle::create([
+        'customer_id' => $customer->id,
+        'vehicle_model_id' => $model->id,
+        'vehicle_engine_id' => $engine->id,
+        'vin' => 'RELEASEDVIN001',
+        'status' => 'inactive',
+    ]);
+
+    $this
+        ->deleteJson("/api/v1/vehicle-models/{$model->id}/engines/{$engine->id}/vins/{$vin->id}")
+        ->assertOk();
+
+    $this->assertDatabaseMissing('vehicle_vins', ['id' => $vin->id]);
 });
 
 it('keeps legacy chassis vin routes as aliases for model and engine scope', function (): void {

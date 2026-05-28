@@ -1060,7 +1060,7 @@ it('returns preview grouping metadata and technical attribute warnings without i
 
     $response->assertOk()
         ->assertJsonPath('data.count', 4)
-        ->assertJsonPath('data.preview_limited', true)
+        ->assertJsonPath('data.preview_limited', false)
         ->assertJsonPath('data.rows.0.data.nombre', '220LENGTH')
         ->assertJsonPath('data.rows.0.data.__original_name', 'M14x1.50RACK 220LENGTH')
         ->assertJsonPath('data.rows.0.data.__clean_name', '220LENGTH')
@@ -1916,6 +1916,41 @@ it('validates a full product import without creating products', function () {
         ->and($importRun->run_type)->toBe(ImportRun::TYPE_VALIDATION);
 
     Queue::assertPushed(ProcessProductImportRun::class);
+});
+
+it('returns every product row in preview without limiting to 200 rows', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $rows = collect(range(1, 251))
+        ->map(fn (int $index): array => [
+            "Aceite 10W30 {$index}",
+            "OIL-PREVIEW-{$index}",
+            "LS-PREVIEW-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => productImportUploadedSpreadsheet($rows),
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.count', 251)
+        ->assertJsonPath('data.shown_count', 251)
+        ->assertJsonPath('data.preview_limited', false)
+        ->assertJsonPath('data.rows.0.data.nombre', 'Aceite 10W30 1')
+        ->assertJsonPath('data.rows.250.data.nombre', 'Aceite 10W30 251');
 });
 
 it('runs validation jobs without creating products and stores row errors', function () {

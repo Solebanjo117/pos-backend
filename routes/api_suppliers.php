@@ -16,11 +16,13 @@ Route::prefix('suppliers')->middleware('role:admin,manager,buyer')->group(functi
     // CRUD
     Route::get('/', [SupplierController::class, 'index']);
     Route::post('/', [SupplierController::class, 'store']);
+    Route::get('/commercial-dashboard', [SupplierController::class, 'commercialDashboard']);
     Route::get('/{id}', [SupplierController::class, 'show']);
     Route::put('/{id}', [SupplierController::class, 'update']);
     Route::delete('/{id}', [SupplierController::class, 'destroy']);
 
     // Sub-resources
+    Route::get('/{supplier}/purchase-history', [SupplierController::class, 'purchaseHistory']);
     Route::get('/{id}/purchase-orders', [SupplierController::class, 'purchaseOrders']);
     Route::get('/{id}/variants', [SupplierController::class, 'variants']);
     Route::post('/{id}/variants', [SupplierController::class, 'attachVariant']);

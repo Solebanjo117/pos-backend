@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Brand;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\ProductVariant;
@@ -31,12 +32,18 @@ beforeEach(function () {
 
     $this->product = Product::create([
         'name' => 'Test Product P2',
+        'sku_base' => 'P2-BASE',
         'type' => 'simple',
         'status' => 'active',
     ]);
 
+    $brand = Brand::create([
+        'name' => 'Phase 2 Brand',
+    ]);
+
     $this->variant = ProductVariant::create([
         'product_id' => $this->product->id,
+        'brand_id' => $brand->id,
         'sku' => 'SKU-P2-001',
         'name' => 'Variant P2',
     ]);

@@ -101,7 +101,7 @@ class ProductImport extends BaseImport
     /**
      * @return array{rows: array<int, array<string, mixed>>, max_rows: int, summary: array<string, mixed>, sheets: array<int, array<string, mixed>>, selected_sheet: array<string, mixed>, recommended_sheet: ?array<string, mixed>, sheet_detection_warning: ?string}
      */
-    public function previewWithSummary(UploadedFile $file, int $maxRows = 200, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
+    public function previewWithSummary(UploadedFile $file, ?int $maxRows = 200, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
     {
         $sheets = $this->inspectSheets($file, $mapping);
         $recommendedSheet = collect($sheets)->firstWhere('is_recommended', true);
@@ -112,8 +112,8 @@ class ProductImport extends BaseImport
 
         $selectedSheet = $this->resolveSelectedSheet($file, $sheetIndex, $sheetName, $mapping);
         $rows = $this->extractRows($file, $sheetIndex, $sheetName, $mapping);
-        $previewRows = $rows
-            ->take($maxRows)
+        $rowsForPreview = $maxRows === null ? $rows : $rows->take($maxRows);
+        $previewRows = $rowsForPreview
             ->map(function (array $row): array {
                 $rowErrors = $this->validateRow($row);
                 $rowWarnings = $this->getWarningsForRow($row);
@@ -131,8 +131,8 @@ class ProductImport extends BaseImport
 
         return [
             'rows' => $previewRows,
-            'max_rows' => $maxRows,
-            'summary' => $this->buildPreviewSummary($rows->take($maxRows)),
+            'max_rows' => $maxRows ?? $rows->count(),
+            'summary' => $this->buildPreviewSummary($rowsForPreview),
             'sheets' => $sheets,
             'selected_sheet' => $selectedSheet,
             'recommended_sheet' => $recommendedSheet,

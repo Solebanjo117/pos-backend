@@ -5,16 +5,19 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ClosePosSessionRequest;
 use App\Http\Requests\CurrentPosSessionRequest;
+use App\Http\Requests\IndexPosSessionRequest;
 use App\Http\Requests\OpenPosSessionRequest;
 use App\Models\PosSession;
+use App\Services\PosSessionOperationalDetailService;
 use App\Services\PosSessionReconciliationService;
-use Illuminate\Http\Request;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 
 class PosSessionController extends Controller
 {
     public function __construct(
-        private PosSessionReconciliationService $reconciliationService
+        private PosSessionReconciliationService $reconciliationService,
+        private PosSessionOperationalDetailService $operationalDetailService
     ) {}
 
     /**
@@ -142,12 +145,13 @@ class PosSessionController extends Controller
     /**
      * List session history for reporting.
      */
-    public function index(Request $request)
+    public function index(IndexPosSessionRequest $request)
     {
         $query = PosSession::with(['user:id,name', 'warehouse:id,name'])
-            ->orderBy('closed_at', 'desc');
+            ->orderByRaw('COALESCE(closed_at, opened_at) DESC')
+            ->orderByDesc('id');
 
-        if ($request->has('status')) {
+        if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
 
@@ -159,12 +163,28 @@ class PosSessionController extends Controller
             $query->where('user_id', $request->user_id);
         }
 
-        if ($request->filled('date_from')) {
-            $query->whereDate('closed_at', '>=', $request->date_from);
-        }
+        if ($request->filled('date_from') || $request->filled('date_to')) {
+            $dateColumn = match ($request->input('status')) {
+                'open' => 'opened_at',
+                'closed' => 'closed_at',
+                default => null,
+            };
 
-        if ($request->filled('date_to')) {
-            $query->whereDate('closed_at', '<=', $request->date_to);
+            $query->where(function ($query) use ($request, $dateColumn): void {
+                if ($dateColumn) {
+                    $this->applySessionDateRange($query, $dateColumn, $request);
+
+                    return;
+                }
+
+                $query->where(function (Builder $query) use ($request): void {
+                    $query->where('status', 'open');
+                    $this->applySessionDateRange($query, 'opened_at', $request);
+                })->orWhere(function (Builder $query) use ($request): void {
+                    $query->where('status', 'closed');
+                    $this->applySessionDateRange($query, 'closed_at', $request);
+                });
+            });
         }
 
         return response()->json([
@@ -177,11 +197,11 @@ class PosSessionController extends Controller
      */
     public function show(PosSession $posSession)
     {
-        $posSession->load(['user:id,name', 'warehouse:id,name', 'cashMovements']);
+        $posSession->load(['user:id,name', 'warehouse:id,name', 'cashMovements.user:id,name']);
 
         $salesOrders = \App\Models\SalesOrder::where('pos_session_id', $posSession->id)
-            ->select('id', 'order_number', 'total', 'subtotal', 'tax_amount', 'discount_amount', 'status', 'payment_method', 'customer_id', 'created_at')
-            ->with('customer:id,name')
+            ->select('id', 'order_number', 'user_id', 'total', 'subtotal', 'tax_amount', 'discount_amount', 'status', 'payment_method', 'customer_id', 'created_at')
+            ->with(['customer:id,name', 'user:id,name'])
             ->orderBy('created_at', 'asc')
             ->get();
 
@@ -269,7 +289,7 @@ class PosSessionController extends Controller
                     'document_id' => $application->document_id,
                     'document_number' => $application->document_number,
                     'amount' => $application->amount,
-                ])->values(),
+                ])->values()->all(),
             ]);
 
         $operationalExpenses = \App\Models\OperationalExpense::query()
@@ -279,13 +299,36 @@ class PosSessionController extends Controller
             ->orderBy('id', 'asc')
             ->get();
 
+        $operationalDetail = $this->operationalDetailService->build(
+            $posSession,
+            $salesOrders,
+            $purchasePayments,
+            $accountPayments,
+            $operationalExpenses
+        );
+
         return response()->json([
             'data' => $posSession,
+            'summary' => $closingDetails['summary'],
+            'reconciliation_rows' => $closingDetails['reconciliation_rows'],
+            'documents' => $operationalDetail['documents'],
+            'timeline' => $operationalDetail['timeline'],
             'sales_orders' => $salesOrders,
             'cash_movements' => $posSession->cashMovements,
             'purchase_payments' => $purchasePayments,
             'account_payments' => $accountPayments,
             'operational_expenses' => $operationalExpenses,
         ]);
+    }
+
+    private function applySessionDateRange(Builder $query, string $column, IndexPosSessionRequest $request): void
+    {
+        if ($request->filled('date_from')) {
+            $query->whereDate($column, '>=', $request->date_from);
+        }
+
+        if ($request->filled('date_to')) {
+            $query->whereDate($column, '<=', $request->date_to);
+        }
     }
 }

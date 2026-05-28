@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AssignAttributesRequest;
+use App\Http\Requests\ProductProfileRequest;
 use App\Http\Requests\RegenerateProductNameRequest;
 use App\Http\Requests\StoreProductRequest;
 use App\Http\Requests\UpdateProductRequest;
@@ -11,6 +12,7 @@ use App\Http\Resources\ProductDetailResource;
 use App\Http\Resources\ProductResource;
 use App\Models\Product;
 use App\Models\ProductVehicleCompatibility;
+use App\Services\ProductProfileService;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -19,7 +21,8 @@ use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 class ProductController extends Controller
 {
     public function __construct(
-        private readonly ProductService $productService
+        private readonly ProductService $productService,
+        private readonly ProductProfileService $productProfileService
     ) {}
 
     /**
@@ -362,6 +365,16 @@ class ProductController extends Controller
         $product = $this->productService->getProductDetail($id, $includesArray, $warehouseId);
 
         return new ProductDetailResource($product);
+    }
+
+    /**
+     * Display the operational 360 profile for a product and its variants.
+     */
+    public function profile(ProductProfileRequest $request, Product $product): JsonResponse
+    {
+        return response()->json([
+            'data' => $this->productProfileService->profile($product, $request->validated()),
+        ]);
     }
 
     /**

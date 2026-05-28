@@ -235,6 +235,12 @@ class AccountLedgerService
                 'email' => $supplier->email,
                 'phone' => $supplier->phone,
             ],
+            'summary' => [
+                'open_documents_count' => $documents->count(),
+                'total_open_balance' => round((float) $documents->sum('amount_due'), 2),
+                'total_documents_amount' => round((float) $documents->sum('total'), 2),
+                'total_paid' => round((float) $documents->sum('amount_paid'), 2),
+            ],
             'documents' => $documents,
             'entries' => $this->ledgerEntries('supplier', $supplier->id),
         ];

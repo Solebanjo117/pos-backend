@@ -3,22 +3,34 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreSalesReturnRequest;
 use App\Models\SalesOrder;
 use App\Models\SalesReturn;
+use App\Services\SalesReturnOperationalDetailService;
+use App\Services\SalesReturnService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class SalesReturnController extends Controller
 {
-    /**
-     * GET /api/sales-returns
-     * List all returns with optional status filter.
-     */
+    public function __construct(
+        private SalesReturnService $salesReturnService,
+        private SalesReturnOperationalDetailService $operationalDetailService,
+    ) {}
+
     public function listAll(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'status' => 'nullable|in:pending,approved,rejected',
+            'customer_id' => 'nullable|integer|exists:customers,id',
+            'sales_order_id' => 'nullable|integer|exists:sales_orders,id',
+            'warehouse_id' => 'nullable|integer|exists:warehouses,id',
+            'refund_method' => 'nullable|in:cash,card,transfer,balance',
+            'date_from' => 'nullable|date',
+            'date_to' => 'nullable|date|after_or_equal:date_from',
+            'search' => 'nullable|string|max:100',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
@@ -27,44 +39,67 @@ class SalesReturnController extends Controller
         $returns = SalesReturn::with([
             'salesOrder:id,order_number,customer_id,status,total,created_at',
             'customer:id,name,code',
+            'warehouse:id,code,name',
             'user:id,name',
             'items.product',
         ])
-            ->when(!empty($validated['status']), fn($q) => $q->where('status', $validated['status']))
+            ->when(! empty($validated['status']), fn ($query) => $query->where('status', $validated['status']))
+            ->when(! empty($validated['customer_id']), fn ($query) => $query->where('customer_id', $validated['customer_id']))
+            ->when(! empty($validated['sales_order_id']), fn ($query) => $query->where('sales_order_id', $validated['sales_order_id']))
+            ->when(! empty($validated['warehouse_id']), fn ($query) => $query->where('warehouse_id', $validated['warehouse_id']))
+            ->when(! empty($validated['refund_method']), fn ($query) => $query->where('refund_method', $validated['refund_method']))
+            ->when(! empty($validated['date_from']), fn ($query) => $query->whereDate('created_at', '>=', $validated['date_from']))
+            ->when(! empty($validated['date_to']), fn ($query) => $query->whereDate('created_at', '<=', $validated['date_to']))
+            ->when(! empty($validated['search']), function ($query) use ($validated): void {
+                $search = '%'.$validated['search'].'%';
+                $operator = DB::connection()->getDriverName() === 'sqlite' ? 'like' : 'ilike';
+
+                $query->where(function ($query) use ($operator, $search): void {
+                    $query->where('return_number', $operator, $search)
+                        ->orWhere('reason', $operator, $search)
+                        ->orWhereHas('salesOrder', fn ($query) => $query->where('order_number', $operator, $search))
+                        ->orWhereHas('customer', fn ($query) => $query->where('name', $operator, $search)->orWhere('code', $operator, $search));
+                });
+            })
             ->orderBy('created_at', 'desc')
             ->paginate($perPage);
 
-        $returns->getCollection()->transform(function ($return) {
+        $returns->getCollection()->transform(function (SalesReturn $return): array {
             $mapped = $return->toArray();
             $mapped['processed_by_name'] = $return->user ? $return->user->name : 'Sistema';
             $mapped['processed_at'] = $return->created_at?->toISOString();
+
             return $mapped;
         });
 
         return response()->json($returns);
     }
 
-    /**
-     * GET /api/sales-orders/{orderId}/returns
-     * List all returns for a specific sales order.
-     */
+    public function operationalDetail(SalesReturn $salesReturn): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'data' => $this->operationalDetailService->get($salesReturn),
+        ]);
+    }
+
     public function index(int $orderId): JsonResponse
     {
         $order = SalesOrder::findOrFail($orderId);
 
-        $returns = SalesReturn::where('sales_order_id', $orderId)
+        $returns = SalesReturn::where('sales_order_id', $order->id)
             ->with(['items.product', 'items.variant', 'user', 'items.seller'])
             ->orderBy('created_at', 'desc')
             ->get();
 
-        $data = $returns->map(function ($return) {
+        $data = $returns->map(function (SalesReturn $return): array {
             $mapped = $return->toArray();
             $mapped['processed_by_name'] = $return->user ? $return->user->name : 'Sistema';
             $mapped['processed_at'] = $return->created_at->toISOString();
-            
-            $mapped['items'] = $return->items->map(function ($item) {
+            $mapped['items'] = $return->items->map(function ($item): array {
                 $mappedItem = $item->toArray();
                 $mappedItem['seller_name'] = $item->seller ? $item->seller->name : null;
+
                 return $mappedItem;
             });
 
@@ -74,215 +109,71 @@ class SalesReturnController extends Controller
         return response()->json($data);
     }
 
-    /**
-     * POST /api/sales-orders/{orderId}/returns
-     * Create a new return (pending approval) for the given order.
-     */
-    public function store(Request $request, int $orderId): JsonResponse
+    public function store(StoreSalesReturnRequest $request, int $orderId): JsonResponse
     {
-        $order = SalesOrder::with('items')->findOrFail($orderId);
-
-        // Only allow returns on confirmed/completed orders
-        if (! in_array($order->status, ['confirmed', 'completed'])) {
-            return response()->json([
-                'message' => 'Solo se pueden devolver órdenes confirmadas o completadas.',
-            ], 422);
-        }
-
-        // Require an open POS Session to process a return
-        $session = \App\Models\PosSession::where('user_id', auth()->id())->where('status', 'open')->first();
-        if (!$session) {
-            return response()->json([
-                'message' => 'Debe tener una sesión de caja abierta para registrar una devolución.',
-            ], 403);
-        }
-
-        $validated = $request->validate([
-            'reason'         => 'nullable|string|max:500',
-            'refund_method'  => 'required|string|in:cash,card,transfer,balance',
-            'refund_notes'   => 'nullable|string|max:500',
-            'items'          => 'required|array|min:1',
-            'items.*.sales_order_item_id' => 'required|exists:sales_order_items,id',
-            'items.*.quantity'            => 'required|integer|min:1',
-            'items.*.user_id'             => 'nullable|exists:users,id',
-            'items.*.seller_id'           => 'nullable|exists:users,id',
-        ]);
-
-        // Validate quantities don't exceed what was sold (minus already returned)
-        $errors = [];
-        foreach ($validated['items'] as $returnItem) {
-            $orderItem = $order->items->firstWhere('id', $returnItem['sales_order_item_id']);
-
-            if (! $orderItem) {
-                $errors[] = "Línea #{$returnItem['sales_order_item_id']} no pertenece a esta orden.";
-                continue;
-            }
-
-            if ($orderItem->is_custom_line) {
-                $errors[] = "La linea '{$orderItem->custom_description}' es miscelanea y no puede devolverse.";
-                continue;
-            }
-
-            // Sum previously returned quantities for this order item
-            $alreadyReturned = \App\Models\SalesReturnItem::whereHas('salesReturn', function ($q) use ($orderId) {
-                $q->where('sales_order_id', $orderId)->where('status', 'approved');
-            })->where('sales_order_item_id', $returnItem['sales_order_item_id'])
-              ->sum('quantity');
-
-            $maxReturnable = $orderItem->quantity - $alreadyReturned;
-
-            if ($returnItem['quantity'] > $maxReturnable) {
-                $label = $orderItem->product?->name ?? "Producto #{$orderItem->product_id}";
-                $errors[] = "{$label}: máximo devolvible es {$maxReturnable}, solicitado {$returnItem['quantity']}.";
-            }
-        }
-
-        if (! empty($errors)) {
-            return response()->json([
-                'message' => 'La cantidad excede lo permitido para devolución.',
-                'errors'  => $errors,
-            ], 422);
-        }
+        $order = SalesOrder::with('items.product')->findOrFail($orderId);
 
         try {
-            $return = DB::transaction(function () use ($order, $validated) {
-                $salesReturn = SalesReturn::create([
-                    'sales_order_id' => $order->id,
-                    'warehouse_id'   => $order->items->first()->warehouse_id ?? 1,
-                    'customer_id'    => $order->customer_id,
-                    'user_id'        => auth()->id(),
-                    'reason'         => $validated['reason'] ?? null,
-                    'refund_method'  => $validated['refund_method'],
-                    'refund_notes'   => $validated['refund_notes'] ?? null,
-                    'status'         => 'pending',
-                ]);
-
-                $totalAmount = 0;
-
-                foreach ($validated['items'] as $returnItem) {
-                    $orderItem = $order->items->firstWhere('id', $returnItem['sales_order_item_id']);
-
-                    $orderedQty = max((int) $orderItem->quantity, 1);
-                    $returnQty = (int) $returnItem['quantity'];
-
-                    // Reuse stored line amounts from the original sale so refunds respect
-                    // category ITBM applicability and any tax override at sale time.
-                    $lineSubtotal = (float) ($orderItem->subtotal ?? 0);
-                    $lineTax = (float) ($orderItem->tax_amount ?? 0);
-                    $lineTotal = (float) ($orderItem->total ?? 0);
-
-                    if ($lineTotal <= 0) {
-                        $lineTotal = $lineSubtotal + $lineTax;
-                    }
-
-                    $unitAfterDiscount = $lineSubtotal > 0 ? ($lineSubtotal / $orderedQty) : 0.0;
-                    $unitTax = $lineTax > 0 ? ($lineTax / $orderedQty) : 0.0;
-                    $unitTotal = $lineTotal > 0 ? ($lineTotal / $orderedQty) : 0.0;
-
-                    // Fallback for legacy rows where line totals were not persisted consistently.
-                    if ($unitAfterDiscount <= 0 && $unitTotal <= 0) {
-                        $discountPercent = (float) ($orderItem->discount_percent ?? 0);
-                        $unitAfterDiscount = (float) $orderItem->unit_price * (1 - ($discountPercent / 100));
-                        $unitTax = $unitAfterDiscount * ((float) ($orderItem->tax_percent ?? 0) / 100);
-                        $unitTotal = $unitAfterDiscount + $unitTax;
-                    }
-
-                    $unitAfterDiscount = round($unitAfterDiscount, 2);
-                    $subtotal = round($unitAfterDiscount * $returnQty, 2);
-                    $lineTotalAmount = round($unitTotal * $returnQty, 2);
-
-                    if ($lineTotalAmount <= 0) {
-                        $lineTotalAmount = $subtotal;
-                    }
-
-                    $salesReturn->items()->create([
-                        'sales_order_item_id' => $orderItem->id,
-                        'product_id'          => $orderItem->product_id,
-                        'variant_id'          => $orderItem->variant_id,
-                        'quantity'            => $returnQty,
-                        'unit_price'          => $unitAfterDiscount,
-                        'subtotal'            => $subtotal,
-                        'user_id'             => $returnItem['user_id'] ?? auth()->id(),
-                        'seller_id'           => $returnItem['seller_id'] ?? $orderItem->seller_id,
-                    ]);
-
-                    $totalAmount += $lineTotalAmount;
-                }
-
-                $salesReturn->update(['total_amount' => round($totalAmount, 2)]);
-
-                return $salesReturn->load('items.product', 'items.variant');
-            });
+            $return = $this->salesReturnService->createForOrder($order, $request->validated(), $request->user());
 
             return response()->json([
                 'message' => 'Devolución creada exitosamente.',
-                'data'    => $return,
+                'data' => $return,
             ], 201);
-        } catch (\Exception $e) {
+        } catch (ValidationException $exception) {
+            return $this->validationError($exception);
+        } catch (\Exception $exception) {
             return response()->json([
                 'message' => 'Error al crear la devolución.',
-                'error'   => $e->getMessage() . ' en la línea ' . $e->getLine() . ' de ' . basename($e->getFile()),
+                'error' => $exception->getMessage().' en la línea '.$exception->getLine().' de '.basename($exception->getFile()),
             ], 500);
         }
     }
 
-    /**
-     * POST /api/sales-returns/{id}/approve
-     * Approve a pending return (restores inventory, adjusts customer balance).
-     */
     public function approve(int $id): JsonResponse
     {
-        $return = SalesReturn::with('items', 'salesOrder')->findOrFail($id);
-
-        if ($return->status !== 'pending') {
-            return response()->json([
-                'message' => 'Esta devolución ya fue procesada.',
-            ], 422);
-        }
-
-        // Require an open POS Session to approve a return if money is returned directly
-        if (in_array($return->refund_method, ['cash', 'card', 'transfer'])) {
-            $session = \App\Models\PosSession::where('user_id', auth()->id())->where('status', 'open')->first();
-            if (!$session) {
-                return response()->json([
-                    'message' => 'Debe tener una sesión de caja abierta para aprobar un reembolso directo.',
-                ], 403);
-            }
-        }
+        $return = SalesReturn::findOrFail($id);
 
         try {
-            DB::transaction(function () use ($return) {
-                $return->approve();
-            });
+            $return = $this->salesReturnService->approve($return, request()->user());
 
             return response()->json([
                 'message' => 'Devolución aprobada. Inventario y saldo actualizados.',
-                'data'    => $return->fresh()->load('items.product'),
+                'data' => $return,
             ]);
-        } catch (\Exception $e) {
+        } catch (ValidationException $exception) {
+            return $this->validationError($exception);
+        } catch (\Exception $exception) {
             return response()->json([
                 'message' => 'Error al aprobar la devolución.',
-                'error'   => $e->getMessage(),
+                'error' => $exception->getMessage(),
             ], 500);
         }
     }
 
-    /**
-     * POST /api/sales-returns/{id}/reject
-     */
     public function reject(int $id): JsonResponse
     {
         $return = SalesReturn::findOrFail($id);
 
-        if (! $return->reject()) {
-            return response()->json([
-                'message' => 'Esta devolución ya fue procesada.',
-            ], 422);
+        try {
+            $return = $this->salesReturnService->reject($return);
+        } catch (ValidationException $exception) {
+            return $this->validationError($exception);
         }
 
         return response()->json([
             'message' => 'Devolución rechazada.',
-            'data'    => $return,
+            'data' => $return,
         ]);
+    }
+
+    private function validationError(ValidationException $exception): JsonResponse
+    {
+        $errors = collect($exception->errors())->flatten()->values()->all();
+
+        return response()->json([
+            'message' => $errors[0] ?? 'No se pudo procesar la devolución.',
+            'errors' => $errors,
+        ], 422);
     }
 }

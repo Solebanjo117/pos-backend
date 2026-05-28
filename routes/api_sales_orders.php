@@ -1,9 +1,9 @@
 <?php
 
+use App\Http\Controllers\Api\PosController;
 use App\Http\Controllers\Api\SalesOrderController;
 use App\Http\Controllers\Api\SalesOrderPaymentController;
 use App\Http\Controllers\Api\SalesReturnController;
-use App\Http\Controllers\Api\PosController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -26,6 +26,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
     // CRUD endpoints (dynamic routes go AFTER specific routes)
     Route::get('/', [SalesOrderController::class, 'index']);
     Route::post('/', [SalesOrderController::class, 'store']);
+    Route::get('/{salesOrder}/operational-detail', [SalesOrderController::class, 'operationalDetail']);
     Route::get('/{id}', [SalesOrderController::class, 'show']);
     Route::put('/{id}', [SalesOrderController::class, 'update']);
     Route::delete('/{id}', [SalesOrderController::class, 'destroy']);
@@ -57,7 +58,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
 // Standalone return actions
 Route::middleware(['web'])->prefix('sales-returns')->group(function () {
     Route::get('/', [SalesReturnController::class, 'listAll']);
+    Route::get('/{salesReturn}/operational-detail', [SalesReturnController::class, 'operationalDetail']);
     Route::post('/{id}/approve', [SalesReturnController::class, 'approve']);
     Route::post('/{id}/reject', [SalesReturnController::class, 'reject']);
 });
-

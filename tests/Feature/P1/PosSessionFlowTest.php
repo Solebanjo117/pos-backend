@@ -1,11 +1,16 @@
 <?php
 
+use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
 use App\Models\Customer;
+use App\Models\OperationalExpense;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
+use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
+use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -548,6 +553,250 @@ it('requires a note when closing totals have a difference', function () {
 
     $response->assertStatus(422)
         ->assertJsonValidationErrors('notes');
+});
+
+it('shows normalized documents and an ordered timeline for a pos session', function () {
+    $warehouse = Warehouse::create([
+        'code' => 'W-SESSION-DETAIL',
+        'name' => 'Warehouse Session Detail',
+    ]);
+
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach($warehouse->id);
+
+    createPaymentMethodForPosTest('cash', 'Efectivo', true, true, 1);
+    createPaymentMethodForPosTest('card', 'Tarjeta', true, true, 2);
+    createPaymentMethodForPosTest('credit', 'Credito', true, true, 3);
+    createPaymentMethodForPosTest('store_credit', 'Saldo a favor', true, true, 4);
+
+    $session = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->setTime(8, 0),
+        'closed_at' => now()->setTime(16, 0),
+        'opening_amount' => 100,
+        'closing_amount' => 125,
+        'expected_amount' => 125,
+        'status' => 'closed',
+    ]);
+
+    $customer = Customer::create([
+        'code' => 'CUST-SESSION-DETAIL',
+        'name' => 'Cliente Caja Detalle',
+    ]);
+    $supplier = Supplier::create([
+        'name' => 'Proveedor Caja Detalle',
+        'status' => 'active',
+    ]);
+
+    $sale = SalesOrder::create([
+        'order_number' => 'SO-SESSION-001',
+        'user_id' => $cashier->id,
+        'customer_id' => $customer->id,
+        'pos_session_id' => $session->id,
+        'date' => now()->toDateString(),
+        'status' => 'completed',
+        'subtotal' => 100,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 100,
+        'payment_status' => 'paid',
+        'payment_method' => 'cash',
+        'created_at' => now()->setTime(9, 0),
+    ]);
+
+    SalesOrderPayment::create([
+        'sales_order_id' => $sale->id,
+        'amount' => 80,
+        'method' => 'cash',
+        'paid_at' => now()->setTime(9, 5),
+        'created_by' => $cashier->id,
+    ]);
+
+    $receipt = AccountPaymentBatch::create([
+        'account_type' => 'customer',
+        'account_id' => $customer->id,
+        'pos_session_id' => $session->id,
+        'direction' => 'incoming',
+        'batch_number' => 'REC-SESSION-001',
+        'amount' => 25,
+        'method' => 'cash',
+        'paid_at' => now()->setTime(10, 0),
+        'created_by' => $cashier->id,
+    ]);
+    $receipt->applications()->create([
+        'document_type' => 'sales_order',
+        'document_id' => $sale->id,
+        'document_number' => $sale->order_number,
+        'amount' => 25,
+    ]);
+
+    $purchaseOrder = PurchaseOrder::create([
+        'po_number' => 'PO-SESSION-001',
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $cashier->id,
+        'status' => 'received',
+        'payment_status' => 'partial',
+        'order_date' => now()->toDateString(),
+        'subtotal' => 60,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 60,
+    ]);
+
+    PurchaseOrderPayment::create([
+        'purchase_order_id' => $purchaseOrder->id,
+        'pos_session_id' => $session->id,
+        'user_id' => $cashier->id,
+        'amount' => 30,
+        'method' => 'card',
+        'paid_at' => now()->setTime(11, 0),
+    ]);
+
+    OperationalExpense::create([
+        'warehouse_id' => $warehouse->id,
+        'created_by' => $cashier->id,
+        'pos_session_id' => $session->id,
+        'expense_date' => now()->toDateString(),
+        'category' => 'maintenance',
+        'description' => 'Servicio menor',
+        'amount' => 12,
+        'payment_method' => 'transfer',
+        'created_at' => now()->setTime(12, 0),
+    ]);
+
+    CashMovement::create([
+        'pos_session_id' => $session->id,
+        'user_id' => $cashier->id,
+        'type' => 'in',
+        'amount' => 20,
+        'reason' => 'Fondo adicional',
+        'created_at' => now()->setTime(13, 0),
+    ]);
+
+    $response = $this->actingAs($cashier)->getJson("/api/v1/pos-sessions/{$session->id}");
+
+    $response->assertOk()
+        ->assertJsonPath('reconciliation_rows.0.code', 'cash');
+
+    $documents = collect($response->json('documents'));
+    $saleDocument = $documents->firstWhere('type', 'sale');
+    $receiptDocument = $documents->firstWhere('type', 'ar_receipt');
+    expect($documents->pluck('type')->all())->toContain('sale', 'ar_receipt', 'ap_payment', 'operational_expense', 'cash_movement');
+    expect($saleDocument['href'])->toBe("/sales-orders/{$sale->id}");
+    expect($saleDocument['actor_name'])->toBe($cashier->name);
+    expect($saleDocument['customer_name'])->toBe($customer->name);
+    expect($saleDocument['direction'])->toBe('in');
+    expect($saleDocument['is_cash_counted'])->toBeTrue();
+    expect($receiptDocument['href'])->toBe("/ar?customer_id={$customer->id}");
+    expect($receiptDocument['actor_name'])->toBe($cashier->name);
+    expect($receiptDocument['customer_name'])->toBe($customer->name);
+    expect($receiptDocument['direction'])->toBe('in');
+    expect($receiptDocument['is_cash_counted'])->toBeTrue();
+    expect($receiptDocument['applications'])->toBeArray();
+    expect($receiptDocument['applications'][0]['document_number'])->toBe($sale->order_number);
+    expect($documents->firstWhere('type', 'ap_payment')['href'])->toBe("/accounts-payable?supplier_id={$supplier->id}");
+    expect($documents->firstWhere('type', 'operational_expense')['is_cash_counted'])->toBeFalse();
+
+    $timeline = collect($response->json('timeline'));
+    expect($timeline->pluck('type')->all())->toContain('opening', 'sale', 'ar_receipt', 'ap_payment', 'operational_expense', 'cash_movement', 'closing');
+    expect($timeline->pluck('occurred_at')->values()->all())->toBe($timeline->pluck('occurred_at')->sort()->values()->all());
+});
+
+it('filters open sessions by opened date and closed sessions by closed date', function () {
+    $warehouse = Warehouse::create([
+        'code' => 'W-SESSION-FILTER',
+        'name' => 'Warehouse Session Filter',
+    ]);
+
+    $manager = User::factory()->create([
+        'role' => 'manager',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $manager->warehouses()->attach($warehouse->id);
+
+    $openSession = PosSession::create([
+        'user_id' => $manager->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-05-10 09:00:00',
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $closedSession = PosSession::create([
+        'user_id' => $manager->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-05-01 09:00:00',
+        'closed_at' => '2026-05-10 18:00:00',
+        'opening_amount' => 100,
+        'closing_amount' => 120,
+        'expected_amount' => 120,
+        'status' => 'closed',
+    ]);
+
+    $closedOutsideRange = PosSession::create([
+        'user_id' => $manager->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-05-10 09:00:00',
+        'closed_at' => '2026-05-11 18:00:00',
+        'opening_amount' => 100,
+        'closing_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'closed',
+    ]);
+
+    $openOutsideRange = PosSession::create([
+        'user_id' => $manager->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-05-09 09:00:00',
+        'opening_amount' => 100,
+        'closing_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $mixedResponse = $this->actingAs($manager)->getJson('/api/v1/pos-sessions?date_from=2026-05-10&date_to=2026-05-10');
+    $mixedResponse->assertOk();
+    $mixedIds = collect($mixedResponse->json('data.data'))->pluck('id')->all();
+    expect($mixedIds)->toHaveCount(2);
+    expect($mixedIds)->toContain($openSession->id, $closedSession->id);
+    expect($mixedIds)->not->toContain($closedOutsideRange->id);
+    expect($mixedIds)->not->toContain($openOutsideRange->id);
+
+    $openResponse = $this->actingAs($manager)->getJson('/api/v1/pos-sessions?status=open&date_from=2026-05-10&date_to=2026-05-10');
+    $openResponse->assertOk();
+    expect(collect($openResponse->json('data.data'))->pluck('id')->all())->toBe([$openSession->id]);
+
+    $closedResponse = $this->actingAs($manager)->getJson('/api/v1/pos-sessions?status=closed&date_from=2026-05-10&date_to=2026-05-10');
+    $closedResponse->assertOk();
+    expect(collect($closedResponse->json('data.data'))->pluck('id')->all())->toBe([$closedSession->id]);
+});
+
+it('validates pos session index filters before querying', function () {
+    $warehouse = Warehouse::create([
+        'code' => 'W-SESSION-FILTER-VALIDATION',
+        'name' => 'Warehouse Session Filter Validation',
+    ]);
+
+    $manager = User::factory()->create([
+        'role' => 'manager',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $manager->warehouses()->attach($warehouse->id);
+
+    $this->actingAs($manager)
+        ->getJson('/api/v1/pos-sessions?status=archived&date_from=bad-date&per_page=101')
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['status', 'date_from', 'per_page']);
 });
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\InventoryLot;
 use App\Models\Product;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
@@ -413,4 +414,124 @@ it('includes misc_cost per line in purchase order totals', function () {
         // Accessor total on each item
         ->and((float) $order->items[0]->total)->toBe(117.0)
         ->and((float) $order->items[1]->total)->toBe(105.0);
+});
+
+it('returns complete purchase order detail summaries for operations workbench', function () {
+    [$buyer, $warehouse, $supplier, $firstProduct, $secondProduct] = purchaseOrderBuyerContext();
+
+    $created = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'shipping_cost' => 4.50,
+        'items' => [
+            [
+                'product_id' => $firstProduct->id,
+                'quantity_ordered' => 2,
+                'units_per_package' => 2,
+                'unit_cost' => 10,
+                'tax_rate' => 7,
+                'misc_cost' => 3.25,
+            ],
+            [
+                'product_id' => $secondProduct->id,
+                'quantity_ordered' => 1,
+                'unit_cost' => 20,
+                'tax_amount' => 1.50,
+                'misc_cost' => 2.00,
+            ],
+        ],
+    ])->assertCreated();
+
+    $this->actingAs($buyer)
+        ->getJson('/api/v1/purchase-orders/'.$created->json('data.id'))
+        ->assertOk()
+        ->assertJsonPath('data.cost_summary.subtotal', 60)
+        ->assertJsonPath('data.cost_summary.tax_total', 4.3)
+        ->assertJsonPath('data.cost_summary.misc_total', 5.25)
+        ->assertJsonPath('data.cost_summary.shipping_total', 4.5)
+        ->assertJsonPath('data.cost_summary.grand_total', 74.05)
+        ->assertJsonPath('data.receipt_summary.ordered_packages', 3)
+        ->assertJsonPath('data.receipt_summary.pending_packages', 3)
+        ->assertJsonPath('data.payment_summary.amount_due', 74.05)
+        ->assertJsonPath('data.ap_impact.status', 'open')
+        ->assertJsonPath('data.items.0.line_cost_summary.misc_total', 3.25)
+        ->assertJsonPath('data.items.0.line_cost_summary.landed_unit_cost', 11.5125);
+});
+
+it('shows received inventory impact from purchase order detail', function () {
+    [$buyer, $warehouse, $supplier, $product] = purchaseOrderBuyerContext();
+
+    $created = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'items' => [
+            [
+                'product_id' => $product->id,
+                'quantity_ordered' => 2,
+                'units_per_package' => 3,
+                'unit_cost' => 8,
+                'tax_amount' => 4.80,
+                'misc_cost' => 1.20,
+            ],
+        ],
+    ])->assertCreated();
+
+    $order = PurchaseOrder::with('items')->findOrFail($created->json('data.id'));
+    $item = $order->items->first();
+
+    $this->actingAs($buyer)->postJson('/api/v1/purchase-orders/'.$order->id.'/receive', [
+        'items' => [
+            [
+                'item_id' => $item->id,
+                'quantity_received' => 1,
+            ],
+        ],
+    ])->assertOk();
+
+    expect(InventoryLot::where('source_type', 'purchase_order')->where('source_id', $item->id)->count())->toBe(1);
+
+    $this->actingAs($buyer)
+        ->getJson('/api/v1/purchase-orders/'.$order->id)
+        ->assertOk()
+        ->assertJsonPath('data.receipt_summary.received_packages', 1)
+        ->assertJsonPath('data.receipt_summary.pending_packages', 1)
+        ->assertJsonPath('data.inventory_impact.received_units', 3)
+        ->assertJsonPath('data.inventory_impact.landed_value', 27)
+        ->assertJsonPath('data.inventory_impact.lots.0.source_item_id', $item->id)
+        ->assertJsonPath('data.inventory_impact.lots.0.tax_total', 2.4)
+        ->assertJsonPath('data.inventory_impact.lots.0.misc_total', 0.6)
+        ->assertJsonPath('data.inventory_impact.lots.0.landed_unit_cost', 9);
+});
+
+it('renders purchase order PDF with cost and accounts payable summary', function () {
+    [$buyer, $warehouse, $supplier, $product] = purchaseOrderBuyerContext();
+
+    $created = $this->actingAs($buyer)->postJson('/api/v1/purchase-orders', [
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'items' => [
+            [
+                'product_id' => $product->id,
+                'quantity_ordered' => 1,
+                'unit_cost' => 100,
+                'tax_amount' => 7,
+                'misc_cost' => 5,
+            ],
+        ],
+    ])->assertCreated();
+
+    $order = PurchaseOrder::with(['supplier', 'warehouse', 'user', 'items.product', 'items.variant.brand', 'payments'])
+        ->findOrFail($created->json('data.id'));
+
+    $html = view('pdf.purchase-order', [
+        'purchaseOrder' => $order,
+        'mode' => 'standard',
+        'store_name' => 'HermeX POS',
+    ])->render();
+
+    expect($html)->toContain('ITBM')
+        ->and($html)->toContain('Misc')
+        ->and($html)->toContain('Resumen de pago')
+        ->and($html)->toContain('Saldo AP')
+        ->and($html)->toContain('$112.00');
 });

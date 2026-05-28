@@ -9,7 +9,7 @@ class CustomerVehicleVinSyncService
 {
     public function sync(CustomerVehicle $vehicle): void
     {
-        if ($vehicle->status !== 'active') {
+        if ($vehicle->status !== 'active' || blank($vehicle->vin)) {
             return;
         }
 
@@ -29,10 +29,14 @@ class CustomerVehicleVinSyncService
     }
 
     /**
-     * @param  array{vehicle_model_id:int, vehicle_engine_id:int, vin:string}  $scope
+     * @param  array{vehicle_model_id:int, vehicle_engine_id:int, vin:?string}  $scope
      */
     public function cleanupScope(array $scope): void
     {
+        if (blank($scope['vin'])) {
+            return;
+        }
+
         $replacement = CustomerVehicle::query()
             ->with('customer')
             ->where('vehicle_model_id', $scope['vehicle_model_id'])
@@ -56,7 +60,7 @@ class CustomerVehicleVinSyncService
     }
 
     /**
-     * @return array{vehicle_model_id:int, vehicle_engine_id:int, vin:string}
+     * @return array{vehicle_model_id:int, vehicle_engine_id:int, vin:?string}
      */
     public function scopeFromVehicle(CustomerVehicle $vehicle): array
     {
@@ -68,8 +72,8 @@ class CustomerVehicleVinSyncService
     }
 
     /**
-     * @param  array{vehicle_model_id:int, vehicle_engine_id:int, vin:string}  $first
-     * @param  array{vehicle_model_id:int, vehicle_engine_id:int, vin:string}  $second
+     * @param  array{vehicle_model_id:int, vehicle_engine_id:int, vin:?string}  $first
+     * @param  array{vehicle_model_id:int, vehicle_engine_id:int, vin:?string}  $second
      */
     public function sameScope(array $first, array $second): bool
     {

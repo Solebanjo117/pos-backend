@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Helpers\TaxRateHelper;
+use App\Models\InventoryLot;
 use App\Models\ProductBatch;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
@@ -80,12 +81,47 @@ class PurchaseOrderService
             'supplier',
             'warehouse',
             'user:id,name',
+            'payments.user:id,name',
             'items.supplier:id,name', // Item-level supplier for daily POs
             'items.product:id,sku_base,name',
             'items.variant:id,product_id,brand_id,sku',
             'items.variant.brand:id,name',
             'items.product.pricing:id,product_id,cost,base_price',
         ])->findOrFail($id);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function getOperationalDetail(int $id): array
+    {
+        $purchaseOrder = $this->getById($id);
+        $items = $purchaseOrder->items;
+        $itemIds = $items->pluck('id')->all();
+
+        $lots = InventoryLot::query()
+            ->with(['warehouse:id,name', 'sourceMovement:id,reference_type,reference_id'])
+            ->where('source_type', 'purchase_order')
+            ->whereIn('source_id', $itemIds)
+            ->orderBy('received_at')
+            ->orderBy('id')
+            ->get();
+
+        $lotsByItem = $lots->groupBy('source_id');
+        $payload = $purchaseOrder->toArray();
+        $payload['items'] = $items
+            ->map(fn (PurchaseOrderItem $item): array => $this->serializeOperationalItem($item, $lotsByItem->get($item->id, collect())))
+            ->values()
+            ->all();
+        $payload['payments'] = $this->serializePayments($purchaseOrder);
+        $payload['cost_summary'] = $this->costSummary($purchaseOrder);
+        $payload['receipt_summary'] = $this->receiptSummary($purchaseOrder);
+        $payload['payment_summary'] = $this->paymentSummary($purchaseOrder);
+        $payload['supplier_summary'] = $this->supplierSummary($purchaseOrder);
+        $payload['ap_impact'] = $this->accountsPayableImpact($purchaseOrder);
+        $payload['inventory_impact'] = $this->inventoryImpact($lots);
+
+        return $payload;
     }
 
     /**
@@ -940,5 +976,208 @@ class PurchaseOrderService
             : $item->product?->pricing;
 
         return $pricing ? (float) $pricing->base_price : null;
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, InventoryLot>  $lots
+     * @return array<string, mixed>
+     */
+    private function serializeOperationalItem(PurchaseOrderItem $item, \Illuminate\Support\Collection $lots): array
+    {
+        $line = $item->toArray();
+        $orderedUnits = (int) $item->quantity_ordered * (int) ($item->units_per_package ?? 1);
+        $receivedUnits = (int) $item->effective_received_quantity * (int) ($item->units_per_package ?? 1);
+        $subtotal = (float) $item->subtotal;
+        $taxTotal = (float) $item->tax_amount;
+        $miscTotal = (float) ($item->misc_cost ?? 0);
+        $lineTotal = round($subtotal + $taxTotal + $miscTotal, 2);
+
+        $line['line_cost_summary'] = [
+            'ordered_units' => $orderedUnits,
+            'received_units' => $receivedUnits,
+            'unit_cost' => round((float) $item->unit_cost, 2),
+            'subtotal' => round($subtotal, 2),
+            'tax_rate' => (int) $item->tax_rate,
+            'tax_total' => round($taxTotal, 2),
+            'misc_total' => round($miscTotal, 2),
+            'line_total' => $lineTotal,
+            'landed_unit_cost' => $orderedUnits > 0 ? round($lineTotal / $orderedUnits, 4) : 0.0,
+        ];
+
+        $line['inventory_lots'] = $lots
+            ->map(fn (InventoryLot $lot): array => $this->serializeInventoryLot($lot))
+            ->values()
+            ->all();
+
+        return $line;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function serializePayments(PurchaseOrder $purchaseOrder): array
+    {
+        return $purchaseOrder->payments
+            ->map(fn ($payment): array => [
+                'id' => $payment->id,
+                'amount' => (float) $payment->amount,
+                'method' => $payment->method,
+                'method_label' => $payment->method_label,
+                'reference_number' => $payment->reference_number,
+                'notes' => $payment->notes,
+                'paid_at' => $payment->paid_at?->toISOString(),
+                'pos_session_id' => $payment->pos_session_id,
+                'cash_movement_id' => $payment->cash_movement_id,
+                'user' => $payment->user ? [
+                    'id' => $payment->user->id,
+                    'name' => $payment->user->name,
+                ] : null,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return array<string, float>
+     */
+    private function costSummary(PurchaseOrder $purchaseOrder): array
+    {
+        $miscTotal = round((float) $purchaseOrder->items->sum(fn (PurchaseOrderItem $item): float => (float) ($item->misc_cost ?? 0)), 2);
+
+        return [
+            'subtotal' => round((float) $purchaseOrder->subtotal, 2),
+            'tax_total' => round((float) $purchaseOrder->tax_amount, 2),
+            'misc_total' => $miscTotal,
+            'shipping_total' => round((float) $purchaseOrder->shipping_cost, 2),
+            'grand_total' => round((float) $purchaseOrder->total, 2),
+        ];
+    }
+
+    /**
+     * @return array<string, int|float>
+     */
+    private function receiptSummary(PurchaseOrder $purchaseOrder): array
+    {
+        $orderedPackages = (int) $purchaseOrder->items->sum('quantity_ordered');
+        $receivedPackages = (int) $purchaseOrder->items->sum(fn (PurchaseOrderItem $item): int => (int) $item->effective_received_quantity);
+        $orderedUnits = (int) $purchaseOrder->items->sum(fn (PurchaseOrderItem $item): int => (int) $item->quantity_ordered * (int) ($item->units_per_package ?? 1));
+        $receivedUnits = (int) $purchaseOrder->items->sum(fn (PurchaseOrderItem $item): int => (int) $item->effective_received_quantity * (int) ($item->units_per_package ?? 1));
+
+        return [
+            'ordered_packages' => $orderedPackages,
+            'received_packages' => $receivedPackages,
+            'pending_packages' => max(0, $orderedPackages - $receivedPackages),
+            'ordered_units' => $orderedUnits,
+            'received_units' => $receivedUnits,
+            'pending_units' => max(0, $orderedUnits - $receivedUnits),
+            'received_percent' => $orderedPackages > 0 ? round(($receivedPackages / $orderedPackages) * 100, 2) : 0.0,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function paymentSummary(PurchaseOrder $purchaseOrder): array
+    {
+        return [
+            'payment_status' => $purchaseOrder->payment_status,
+            'payment_status_label' => $purchaseOrder->payment_status_label,
+            'amount_paid' => round((float) $purchaseOrder->amount_paid, 2),
+            'amount_due' => round((float) $purchaseOrder->amount_due, 2),
+            'payments_count' => $purchaseOrder->payments->count(),
+            'real_payment_total' => round((float) $purchaseOrder->payments->whereIn('method', ['cash', 'card', 'transfer', 'other'])->sum('amount'), 2),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function supplierSummary(PurchaseOrder $purchaseOrder): array
+    {
+        if (! $purchaseOrder->supplier) {
+            return [
+                'id' => null,
+                'name' => 'OC diaria general',
+                'is_daily_order' => true,
+                'item_suppliers_count' => $purchaseOrder->items->pluck('supplier_id')->filter()->unique()->count(),
+            ];
+        }
+
+        return [
+            'id' => $purchaseOrder->supplier->id,
+            'name' => $purchaseOrder->supplier->name,
+            'email' => $purchaseOrder->supplier->email,
+            'phone' => $purchaseOrder->supplier->phone,
+            'is_daily_order' => false,
+            'invoice_number' => $purchaseOrder->supplier_invoice_number,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function accountsPayableImpact(PurchaseOrder $purchaseOrder): array
+    {
+        $amountDue = round((float) $purchaseOrder->amount_due, 2);
+
+        return [
+            'status' => match (true) {
+                $purchaseOrder->status === 'cancelled' => 'cancelled',
+                $amountDue <= 0.0 => 'settled',
+                default => 'open',
+            },
+            'supplier_id' => $purchaseOrder->supplier_id,
+            'document_type' => 'purchase_order',
+            'document_id' => $purchaseOrder->id,
+            'document_number' => $purchaseOrder->po_number,
+            'amount_total' => round((float) $purchaseOrder->total, 2),
+            'amount_paid' => round((float) $purchaseOrder->amount_paid, 2),
+            'amount_due' => $amountDue,
+            'stays_in_ap' => $amountDue > 0.0,
+        ];
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Collection<int, InventoryLot>  $lots
+     * @return array<string, mixed>
+     */
+    private function inventoryImpact(\Illuminate\Database\Eloquent\Collection $lots): array
+    {
+        return [
+            'lots_count' => $lots->count(),
+            'received_units' => (int) $lots->sum('received_quantity'),
+            'available_units' => (int) $lots->sum('quantity_available'),
+            'landed_value' => round((float) $lots->sum(fn (InventoryLot $lot): float => (int) $lot->received_quantity * (float) $lot->landed_unit_cost), 2),
+            'available_value' => round((float) $lots->sum(fn (InventoryLot $lot): float => (int) $lot->quantity_available * (float) $lot->landed_unit_cost), 2),
+            'lots' => $lots
+                ->map(fn (InventoryLot $lot): array => $this->serializeInventoryLot($lot))
+                ->values()
+                ->all(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function serializeInventoryLot(InventoryLot $lot): array
+    {
+        return [
+            'id' => $lot->id,
+            'source_item_id' => $lot->source_id,
+            'warehouse_id' => $lot->warehouse_id,
+            'warehouse_name' => $lot->warehouse?->name,
+            'batch_number' => $lot->batch_number,
+            'received_quantity' => (int) $lot->received_quantity,
+            'quantity_available' => (int) $lot->quantity_available,
+            'unit_cost_base' => round((float) $lot->unit_cost_base, 2),
+            'tax_per_unit' => round((float) $lot->tax_per_unit, 4),
+            'tax_total' => round((int) $lot->received_quantity * (float) $lot->tax_per_unit, 2),
+            'misc_per_unit' => round((float) $lot->misc_per_unit, 4),
+            'misc_total' => round((int) $lot->received_quantity * (float) $lot->misc_per_unit, 2),
+            'landed_unit_cost' => round((float) $lot->landed_unit_cost, 4),
+            'landed_total' => round((int) $lot->received_quantity * (float) $lot->landed_unit_cost, 2),
+            'remaining_value' => round((int) $lot->quantity_available * (float) $lot->landed_unit_cost, 2),
+            'received_at' => $lot->received_at?->toISOString(),
+        ];
     }
 }
