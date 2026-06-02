@@ -365,13 +365,11 @@ class ProductImport extends BaseImport
                 $vehicleMatch = $this->resolveVehicleCompatibilityFromName((string) $row['nombre']);
                 if ($vehicleMatch === null && ($candidate = $this->vehicleCreationCandidateFromName((string) $row['nombre'])) !== null) {
                     $this->rememberMissingVehicleCandidate($candidate);
-                    $errors[] = 'No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.';
                 }
             } catch (\RuntimeException $e) {
                 if (($candidate = $this->vehicleCreationCandidateFromName((string) $row['nombre'])) !== null) {
                     $this->rememberMissingVehicleCandidate($candidate);
                 }
-                $errors[] = $e->getMessage();
             }
         }
 
@@ -432,7 +430,7 @@ class ProductImport extends BaseImport
 
         $compatibility = $this->hasExplicitVehicleColumns($row)
             ? $this->resolveVehicleCompatibility($row)
-            : ($this->resolveVehicleCompatibilityFromName((string) ($row['nombre'] ?? ''))['compatibility'] ?? []);
+            : $this->optionalVehicleCompatibilityFromName((string) ($row['nombre'] ?? ''));
 
         if ($compatibility !== []) {
             $productData['vehicle_compatibility'] = $compatibility;
@@ -1799,6 +1797,15 @@ class ProductImport extends BaseImport
                 'engines' => [['engine_id' => $match['engine_id']]],
             ],
         ];
+    }
+
+    private function optionalVehicleCompatibilityFromName(string $name): array
+    {
+        try {
+            return $this->resolveVehicleCompatibilityFromName($name)['compatibility'] ?? [];
+        } catch (\RuntimeException) {
+            return [];
+        }
     }
 
     private function vehicleCreationCandidateFromName(string $name): ?array

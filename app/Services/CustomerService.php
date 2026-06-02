@@ -267,6 +267,56 @@ class CustomerService
     }
 
     /**
+     * Get customer profile summary metrics.
+     *
+     * @return array<string, mixed>
+     */
+    public function getProfileSummary(Customer $customer): array
+    {
+        $orders = $customer->salesOrders()
+            ->with([
+                'referredByCustomer:id,code,name',
+                'items.product:id,sku_base,name',
+                'items.variant:id,sku,brand_id',
+                'items.variant.brand:id,name',
+                'payments',
+                'returns',
+            ])
+            ->whereNotIn('status', ['cancelled'])
+            ->latest('date')
+            ->latest('id')
+            ->get();
+
+        $ordersCount = $orders->count();
+        $totalPurchased = round((float) $orders->sum('total'), 2);
+        $totalPaid = round((float) $orders->sum(fn (SalesOrder $order): float => (float) $order->amount_paid), 2);
+        $pendingAmount = round((float) $orders->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
+        $creditLimit = (float) $customer->credit_limit;
+        $currentBalance = max(0, (float) $customer->current_balance);
+        $creditUsedPercent = $creditLimit > 0 ? round(min(100, ($currentBalance / $creditLimit) * 100), 1) : 0.0;
+        $creditStatus = $this->customerProfileCreditStatus($customer);
+
+        return [
+            'total_purchased' => $totalPurchased,
+            'invoices_count' => $ordersCount,
+            'average_ticket' => $ordersCount > 0 ? round($totalPurchased / $ordersCount, 2) : 0.0,
+            'last_purchase_date' => $orders->first()?->date?->toDateString(),
+            'total_paid' => $totalPaid,
+            'pending_amount' => $pendingAmount,
+            'credit_used_percent' => $creditUsedPercent,
+            'credit_status' => $creditStatus,
+            'credit_status_label' => match ($creditStatus) {
+                'over_limit' => 'Sobre limite',
+                'pending' => 'Pendiente',
+                default => 'Al dia',
+            },
+            'top_items' => $this->customerProfileTopItems($orders),
+            'recent_payments' => $this->customerProfileRecentPayments($orders),
+            'mechanic' => $this->customerProfileMechanic($orders),
+        ];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function salesHistoryOrderRow(SalesOrder $order): array
@@ -348,6 +398,99 @@ class CustomerService
                 ])
                 ->values()
                 ->all(),
+        ];
+    }
+
+    private function customerProfileCreditStatus(Customer $customer): string
+    {
+        if ((float) $customer->credit_limit > 0 && (float) $customer->current_balance > (float) $customer->credit_limit) {
+            return 'over_limit';
+        }
+
+        return (float) $customer->current_balance > 0 ? 'pending' : 'current';
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, SalesOrder>  $orders
+     * @return array<int, array<string, mixed>>
+     */
+    private function customerProfileTopItems(\Illuminate\Support\Collection $orders): array
+    {
+        return $orders
+            ->flatMap(fn (SalesOrder $order) => $order->items)
+            ->groupBy(fn ($item): string => (string) ($item->variant_id ?? $item->product_id ?? $item->product_name))
+            ->map(function (\Illuminate\Support\Collection $items): array {
+                $first = $items->first();
+
+                return [
+                    'product_id' => $first->product_id,
+                    'variant_id' => $first->variant_id,
+                    'name' => $first->product_name,
+                    'sku' => $first->variant?->sku ?? $first->product_sku,
+                    'brand_name' => $first->variant?->brand?->name,
+                    'quantity' => (int) $items->sum('quantity'),
+                    'total' => round((float) $items->sum('total'), 2),
+                ];
+            })
+            ->sortByDesc('quantity')
+            ->take(5)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, SalesOrder>  $orders
+     * @return array<int, array<string, mixed>>
+     */
+    private function customerProfileRecentPayments(\Illuminate\Support\Collection $orders): array
+    {
+        return $orders
+            ->flatMap(fn (SalesOrder $order) => $order->payments
+                ->where('method', '!=', 'credit')
+                ->map(fn ($payment): array => [
+                    'id' => $payment->id,
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'method' => $payment->method,
+                    'method_label' => $payment->formatted_method,
+                    'amount' => round((float) $payment->amount, 2),
+                    'paid_at' => $payment->paid_at?->toISOString(),
+                ]))
+            ->sortByDesc('paid_at')
+            ->take(5)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, SalesOrder>  $orders
+     * @return array<string, mixed>|null
+     */
+    private function customerProfileMechanic(\Illuminate\Support\Collection $orders): ?array
+    {
+        $mechanicOrders = $orders
+            ->whereNotNull('referred_by_customer_id')
+            ->groupBy('referred_by_customer_id')
+            ->sortByDesc(fn (\Illuminate\Support\Collection $group): int => $group->count())
+            ->first();
+
+        if (! $mechanicOrders) {
+            return null;
+        }
+
+        $firstOrder = $mechanicOrders->first();
+        $mechanic = $firstOrder?->referredByCustomer;
+
+        if (! $mechanic) {
+            return null;
+        }
+
+        return [
+            'customer_id' => $mechanic->id,
+            'name' => $mechanic->name,
+            'code' => $mechanic->code,
+            'orders_count' => $mechanicOrders->count(),
+            'last_order_date' => $mechanicOrders->sortByDesc('date')->first()?->date?->toDateString(),
         ];
     }
 

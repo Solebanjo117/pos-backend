@@ -11,6 +11,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\Supplier;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -32,29 +33,24 @@ class AccountLedgerService
             $query->search($filters['search']);
         }
 
+        $summaryRows = (clone $query)
+            ->orderByDesc('current_balance')
+            ->get()
+            ->map(fn (Customer $customer): array => $this->receivableCustomerRow($customer, $filters))
+            ->filter(fn (array $customer): bool => $customer['open_documents_count'] > 0)
+            ->values();
+
         $customers = $query->orderByDesc('current_balance')
             ->paginate($filters['per_page'] ?? 50);
 
-        return [
-            'data' => $customers->getCollection()
-                ->map(function (Customer $customer) use ($filters): array {
-                    $documents = $this->openSalesOrders($customer, $filters);
-                    $openBalance = round((float) $documents->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
+        $rows = $customers->getCollection()
+            ->map(fn (Customer $customer): array => $this->receivableCustomerRow($customer, $filters))
+            ->filter(fn (array $customer): bool => $customer['open_documents_count'] > 0)
+            ->values();
 
-                    return [
-                        'id' => $customer->id,
-                        'code' => $customer->code,
-                        'name' => $customer->name,
-                        'email' => $customer->email,
-                        'phone' => $customer->phone,
-                        'current_balance' => $openBalance,
-                        'credit_limit' => (float) $customer->credit_limit,
-                        'available_credit' => $customer->getAvailableCredit(),
-                        'open_documents_count' => $documents->count(),
-                    ];
-                })
-                ->filter(fn (array $customer): bool => $customer['open_documents_count'] > 0)
-                ->values(),
+        return [
+            'data' => $rows,
+            'summary' => $this->receivablesDashboardSummary($summaryRows, $filters),
             'meta' => [
                 'current_page' => $customers->currentPage(),
                 'last_page' => $customers->lastPage(),
@@ -78,7 +74,10 @@ class AccountLedgerService
                 'total' => (float) $order->total,
                 'amount_paid' => (float) $order->amount_paid,
                 'amount_due' => (float) $order->amount_due,
+                'due_date' => $this->salesOrderDueDate($order, $customer)?->toDateString(),
+                'days_overdue' => $this->salesOrderDaysOverdue($order, $customer),
                 'payment_status' => $order->payment_status,
+                'status_label' => $this->receivableDocumentStatusLabel($order, $customer),
                 'payment_summary' => $order->payments
                     ->groupBy('method')
                     ->map(fn ($payments, string $method): array => [
@@ -101,6 +100,13 @@ class AccountLedgerService
                 'current_balance' => (float) $customer->current_balance,
                 'credit_limit' => (float) $customer->credit_limit,
                 'available_credit' => $customer->getAvailableCredit(),
+            ],
+            'summary' => [
+                'total_open_balance' => round((float) $documents->sum('amount_due'), 2),
+                'total_billed' => round((float) $documents->sum('total'), 2),
+                'total_paid' => round((float) $documents->sum('amount_paid'), 2),
+                'open_documents_count' => $documents->count(),
+                'aging_buckets' => $this->customerReceivableAgingBuckets($this->openSalesOrders($customer, $filters)),
             ],
             'documents' => $documents,
             'entries' => $this->ledgerEntries('customer', $customer->id),
@@ -596,6 +602,215 @@ class AccountLedgerService
             ->get()
             ->filter(fn (SalesOrder $order): bool => (float) $order->amount_due > 0)
             ->values();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function receivableCustomerRow(Customer $customer, array $filters): array
+    {
+        $documents = $this->openSalesOrders($customer, $filters);
+        $openBalance = round((float) $documents->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
+
+        return [
+            'id' => $customer->id,
+            'code' => $customer->code,
+            'name' => $customer->name,
+            'email' => $customer->email,
+            'phone' => $customer->phone,
+            'current_balance' => $openBalance,
+            'credit_limit' => (float) $customer->credit_limit,
+            'available_credit' => $customer->getAvailableCredit(),
+            'open_documents_count' => $documents->count(),
+            'total_billed' => round((float) $documents->sum('total'), 2),
+            'total_paid' => round((float) $documents->sum(fn (SalesOrder $order): float => (float) $order->amount_paid), 2),
+            'last_payment_days' => $this->lastCustomerPaymentDays($customer),
+            'status' => $this->receivableCustomerStatus($documents),
+            'aging_buckets' => $this->customerReceivableAgingBuckets($documents),
+        ];
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, array<string, mixed>>  $rows
+     * @return array<string, mixed>
+     */
+    private function receivablesDashboardSummary(\Illuminate\Support\Collection $rows, array $filters): array
+    {
+        $aging = $this->emptyReceivableAgingBuckets();
+
+        foreach ($rows as $row) {
+            foreach ($row['aging_buckets'] as $key => $bucket) {
+                $aging[$key]['amount'] = round($aging[$key]['amount'] + (float) $bucket['amount'], 2);
+                $aging[$key]['count'] += (int) $bucket['count'];
+            }
+        }
+
+        return [
+            'total_receivable' => round((float) $rows->sum('current_balance'), 2),
+            'active_customers' => $rows->count(),
+            'open_documents_count' => (int) $rows->sum('open_documents_count'),
+            'credits_granted' => $this->receivableCreditsGranted($filters),
+            'collections_received' => $this->receivableCollectionsReceived($filters),
+            'aging_buckets' => $aging,
+            'over_90_amount' => $aging['90_plus']['amount'],
+            'over_90_count' => $aging['90_plus']['count'],
+        ];
+    }
+
+    private function receivableCreditsGranted(array $filters): float
+    {
+        $query = SalesOrder::query()
+            ->where('payment_method', 'credit')
+            ->whereNotIn('status', ['cancelled']);
+
+        $this->applyReceivableOrderFilters($query, $filters);
+
+        return round((float) $query->sum('total'), 2);
+    }
+
+    private function receivableCollectionsReceived(array $filters): float
+    {
+        $query = AccountPaymentBatch::query()
+            ->where('account_type', 'customer')
+            ->where('direction', 'incoming');
+
+        if (! empty($filters['date_from'])) {
+            $query->whereDate('paid_at', '>=', $filters['date_from']);
+        }
+
+        if (! empty($filters['date_to'])) {
+            $query->whereDate('paid_at', '<=', $filters['date_to']);
+        }
+
+        if (! empty($filters['warehouse_id'])) {
+            $orderIds = SalesOrder::query()
+                ->whereHas('items', function ($query) use ($filters): void {
+                    $query->where('warehouse_id', $filters['warehouse_id']);
+                })
+                ->pluck('id');
+
+            $query->whereHas('applications', function ($query) use ($orderIds): void {
+                $query->where('document_type', 'sales_order')
+                    ->whereIn('document_id', $orderIds);
+            });
+        }
+
+        return round((float) $query->sum('amount'), 2);
+    }
+
+    private function applyReceivableOrderFilters($query, array $filters): void
+    {
+        if (! empty($filters['date_from'])) {
+            $query->whereDate('date', '>=', $filters['date_from']);
+        }
+
+        if (! empty($filters['date_to'])) {
+            $query->whereDate('date', '<=', $filters['date_to']);
+        }
+
+        if (! empty($filters['warehouse_id'])) {
+            $query->whereHas('items', function ($query) use ($filters): void {
+                $query->where('warehouse_id', $filters['warehouse_id']);
+            });
+        }
+    }
+
+    /**
+     * @return array<string, array{label: string, amount: float, count: int}>
+     */
+    private function customerReceivableAgingBuckets(Collection $documents): array
+    {
+        $buckets = $this->emptyReceivableAgingBuckets();
+
+        foreach ($documents as $document) {
+            $days = $this->salesOrderDaysOverdue($document, $document->customer);
+            $key = match (true) {
+                $days <= 0 => 'current',
+                $days <= 30 => '1_30',
+                $days <= 60 => '31_60',
+                $days <= 90 => '61_90',
+                default => '90_plus',
+            };
+
+            $buckets[$key]['amount'] = round($buckets[$key]['amount'] + (float) $document->amount_due, 2);
+            $buckets[$key]['count']++;
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * @return array<string, array{label: string, amount: float, count: int}>
+     */
+    private function emptyReceivableAgingBuckets(): array
+    {
+        return [
+            'current' => ['label' => 'Corriente', 'amount' => 0.0, 'count' => 0],
+            '1_30' => ['label' => '1-30 dias', 'amount' => 0.0, 'count' => 0],
+            '31_60' => ['label' => '31-60 dias', 'amount' => 0.0, 'count' => 0],
+            '61_90' => ['label' => '61-90 dias', 'amount' => 0.0, 'count' => 0],
+            '90_plus' => ['label' => '+90 dias', 'amount' => 0.0, 'count' => 0],
+        ];
+    }
+
+    private function receivableCustomerStatus(Collection $documents): string
+    {
+        $maxDays = $documents
+            ->map(fn (SalesOrder $order): int => $this->salesOrderDaysOverdue($order, $order->customer))
+            ->max() ?? 0;
+
+        return match (true) {
+            $maxDays > 30 => 'Vencido',
+            $maxDays > 0 => 'Por Vencer',
+            default => 'Corriente',
+        };
+    }
+
+    private function receivableDocumentStatusLabel(SalesOrder $order, Customer $customer): string
+    {
+        $days = $this->salesOrderDaysOverdue($order, $customer);
+
+        return match (true) {
+            $days > 30 => 'Vencido',
+            $days > 0 => 'Por vencer',
+            default => 'Corriente',
+        };
+    }
+
+    private function salesOrderDueDate(SalesOrder $order, ?Customer $customer): ?CarbonImmutable
+    {
+        if (! $order->date) {
+            return null;
+        }
+
+        return CarbonImmutable::parse($order->date)->addDays((int) ($customer?->credit_days ?? 0));
+    }
+
+    private function salesOrderDaysOverdue(SalesOrder $order, ?Customer $customer): int
+    {
+        $dueDate = $this->salesOrderDueDate($order, $customer);
+
+        if (! $dueDate) {
+            return 0;
+        }
+
+        return (int) max(0, $dueDate->diffInDays(CarbonImmutable::today(), false));
+    }
+
+    private function lastCustomerPaymentDays(Customer $customer): ?int
+    {
+        $lastPayment = AccountPaymentBatch::query()
+            ->where('account_type', 'customer')
+            ->where('account_id', $customer->id)
+            ->where('direction', 'incoming')
+            ->latest('paid_at')
+            ->value('paid_at');
+
+        if (! $lastPayment) {
+            return null;
+        }
+
+        return (int) CarbonImmutable::parse($lastPayment)->diffInDays(CarbonImmutable::today());
     }
 
     /**

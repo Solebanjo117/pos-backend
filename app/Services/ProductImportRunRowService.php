@@ -202,6 +202,26 @@ class ProductImportRunRowService
             });
     }
 
+    public function eachImportableRowChunk(ImportRun $importRun, int $chunkSize, callable $callback): void
+    {
+        $importRun->rows()
+            ->where('status', 'valid')
+            ->select(['id', 'row_number', 'data', 'source_data'])
+            ->orderBy('id')
+            ->chunkById($chunkSize, function (Collection $rows) use ($callback, $importRun): void {
+                $callback($rows
+                    ->map(fn (ImportRunRow $row): array => array_merge(
+                        $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
+                        $row->data ?? [],
+                        [
+                            '__row' => $row->row_number,
+                            '__source_data' => $row->source_data ?? [],
+                        ]
+                    ))
+                    ->all());
+            });
+    }
+
     public function applyOperationalMapping(ImportRun $importRun, array $mapping, array $visibleRowIds, int $rowsRevision): array
     {
         return DB::transaction(function () use ($importRun, $mapping, $visibleRowIds, $rowsRevision): array {
@@ -323,7 +343,7 @@ class ProductImportRunRowService
     {
         $errorsByRow = collect($import->errors)->keyBy('row');
 
-        $importRun->rows()->update([
+        $importRun->rows()->where('status', 'valid')->update([
             'status' => 'valid',
             'errors' => json_encode([], JSON_UNESCAPED_UNICODE),
             'conflicts' => json_encode([], JSON_UNESCAPED_UNICODE),

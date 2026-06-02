@@ -518,13 +518,6 @@ class ProductImportController extends Controller
             ], 422);
         }
 
-        if ((int) $validationRun->error_count > 0) {
-            return response()->json([
-                'success' => false,
-                'message' => 'La validacion seleccionada tiene errores pendientes.',
-            ], 422);
-        }
-
         $summary = $validationRun->summary ?? [];
         if (
             ($summary['rows_dirty'] ?? false) === true
@@ -537,17 +530,14 @@ class ProductImportController extends Controller
             ], 422);
         }
 
-        if ((int) ($summary['conflict_count'] ?? 0) > 0) {
-            return response()->json([
-                'success' => false,
-                'message' => 'La validacion seleccionada tiene conflictos pendientes.',
-            ], 422);
-        }
+        $validRowsCount = $validationRun->rows()->exists()
+            ? $validationRun->rows()->where('status', 'valid')->count()
+            : max(0, (int) ($summary['validation_rows_count'] ?? 0) - (int) $validationRun->error_count);
 
-        if ($this->hasMissingValidationReferences($summary)) {
+        if ($validRowsCount <= 0) {
             return response()->json([
                 'success' => false,
-                'message' => 'La validacion seleccionada tiene referencias pendientes.',
+                'message' => 'La validacion seleccionada no tiene filas validas para importar.',
             ], 422);
         }
 
@@ -1666,14 +1656,6 @@ class ProductImportController extends Controller
             'error_count' => (int) $importRun->error_count,
             'source' => $summary['force_without_preview'] ?? false ? 'force_without_preview' : 'products_import',
         ], $properties);
-    }
-
-    private function hasMissingValidationReferences(array $summary): bool
-    {
-        return ! empty($summary['missing_categories'] ?? [])
-            || ! empty($summary['missing_references']['brands'] ?? [])
-            || ! empty($summary['missingReferences']['brands'] ?? [])
-            || ! empty($summary['missing_vehicle_candidates'] ?? []);
     }
 
     private function copyValidatedImportSource(ImportRun $validationRun): ?string

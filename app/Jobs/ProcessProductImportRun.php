@@ -83,13 +83,13 @@ class ProcessProductImportRun implements ShouldQueue
             };
 
             if (($importRun->summary['use_persisted_rows_snapshot'] ?? false) === true && $importRun->rows()->exists()) {
-                $totalRows = $importRun->rows()->count();
+                $totalRows = $importRun->rows()->where('status', 'valid')->count();
                 $importRun->update([
                     'total_rows' => $totalRows,
                     'processed_rows' => 0,
                 ]);
                 $shouldContinue = true;
-                $rowService->eachExecutableRowChunk($importRun, self::IMPORT_CHUNK_SIZE, function (array $chunk) use ($import, $afterChunk, $totalRows, &$shouldContinue): void {
+                $rowService->eachImportableRowChunk($importRun, self::IMPORT_CHUNK_SIZE, function (array $chunk) use ($import, $afterChunk, $totalRows, &$shouldContinue): void {
                     if (! $shouldContinue) {
                         return;
                     }

@@ -90,6 +90,7 @@ class CustomerController extends Controller
         return response()->json([
             'customer' => $customer,
             'balance_summary' => $balanceSummary,
+            'profile_summary' => $this->customerService->getProfileSummary($customer),
         ]);
     }
 

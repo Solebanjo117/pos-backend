@@ -3,78 +3,102 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\IndexWorkOrderRequest;
 use App\Http\Requests\StoreWorkOrderRequest;
+use App\Http\Requests\TransitionWorkOrderRequest;
+use App\Http\Requests\UpdateWorkOrderRequest;
 use App\Models\ProductInventory;
 use App\Models\WorkOrder;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class WorkOrderController extends Controller
 {
-    /**
-     * GET /api/v1/work-orders
-     */
-    public function index(Request $request): JsonResponse
+    public function index(IndexWorkOrderRequest $request): JsonResponse
     {
-        $query = WorkOrder::with(['customer', 'warehouse', 'creator', 'assignee', 'items'])
-            ->orderBy('created_at', 'desc');
+        $validated = $request->validated();
+        $query = WorkOrder::with($this->workOrderRelations())->latest();
 
-        if ($request->filled('status')) {
-            $query->where('status', $request->status);
+        if (! empty($validated['status'])) {
+            $query->where('status', $validated['status']);
         }
 
-        if ($request->filled('warehouse_id')) {
-            $query->where('warehouse_id', $request->warehouse_id);
+        if (! empty($validated['warehouse_id'])) {
+            $query->where('warehouse_id', $validated['warehouse_id']);
         }
 
-        if ($request->filled('search')) {
-            $search = $request->search;
-            $query->where(function ($q) use ($search) {
-                $q->where('folio', 'like', "%{$search}%")
-                    ->orWhere('vehicle_description', 'like', "%{$search}%");
+        if (! empty($validated['customer_id'])) {
+            $query->where('customer_id', $validated['customer_id']);
+        }
+
+        if (! empty($validated['customer_vehicle_id'])) {
+            $query->where('customer_vehicle_id', $validated['customer_vehicle_id']);
+        }
+
+        if (! empty($validated['assigned_to'])) {
+            $query->where('assigned_to', $validated['assigned_to']);
+        }
+
+        if (! empty($validated['date_from'])) {
+            $query->whereDate('created_at', '>=', $validated['date_from']);
+        }
+
+        if (! empty($validated['date_to'])) {
+            $query->whereDate('created_at', '<=', $validated['date_to']);
+        }
+
+        if (! empty($validated['search'])) {
+            $search = (string) $validated['search'];
+            $operator = DB::connection()->getDriverName() === 'sqlite' ? 'like' : 'ilike';
+            $query->where(function (Builder $query) use ($operator, $search): void {
+                $query->where('folio', $operator, "%{$search}%")
+                    ->orWhere('vehicle_description', $operator, "%{$search}%")
+                    ->orWhereHas('customer', fn (Builder $customerQuery) => $customerQuery
+                        ->where('name', $operator, "%{$search}%")
+                        ->orWhere('code', $operator, "%{$search}%"))
+                    ->orWhereHas('customerVehicle', fn (Builder $vehicleQuery) => $vehicleQuery
+                        ->where('vin', $operator, "%{$search}%")
+                        ->orWhere('label', $operator, "%{$search}%"));
             });
         }
 
-        $perPage = min((int) ($request->per_page ?? 20), 100);
-        $orders = $query->paginate($perPage);
+        $summary = $this->workOrderSummary(clone $query);
+        $orders = $query->paginate((int) ($validated['per_page'] ?? 20));
+        $payload = $orders->toArray();
+        $payload['summary'] = $summary;
+        $payload['meta'] = [
+            'current_page' => $orders->currentPage(),
+            'last_page' => $orders->lastPage(),
+            'per_page' => $orders->perPage(),
+            'total' => $orders->total(),
+        ];
 
-        return response()->json($orders);
+        return response()->json($payload);
     }
 
-    /**
-     * GET /api/v1/work-orders/{id}
-     */
     public function show(int $id): JsonResponse
     {
-        $workOrder = WorkOrder::with(['customer', 'warehouse', 'creator', 'assignee', 'items.product', 'items.variant'])
-            ->findOrFail($id);
-
-        return response()->json($workOrder);
+        return response()->json(
+            WorkOrder::with($this->workOrderRelations())->findOrFail($id)
+        );
     }
 
-    /**
-     * POST /api/v1/work-orders
-     *
-     * Inventory decrement: uses ProductInventory (table: product_inventory),
-     * field quantity_available, filtered by warehouse_id + variant_id (or product_id
-     * when no variant). Matches the pattern used in SalesOrderController.
-     */
     public function store(StoreWorkOrderRequest $request): JsonResponse
     {
         $validated = $request->validated();
 
-        // Stock check (same pattern as SalesOrderController)
         if (! empty($validated['items'])) {
             $stockErrors = [];
             foreach ($validated['items'] as $item) {
-                $q = ProductInventory::where('warehouse_id', $item['warehouse_id']);
+                $query = ProductInventory::where('warehouse_id', $item['warehouse_id']);
                 if (! empty($item['variant_id'])) {
-                    $q->where('variant_id', $item['variant_id']);
+                    $query->where('variant_id', $item['variant_id']);
                 } else {
-                    $q->where('product_id', $item['product_id'])->whereNull('variant_id');
+                    $query->where('product_id', $item['product_id'])->whereNull('variant_id');
                 }
-                $available = (int) ($q->value('quantity_available') ?? 0);
+
+                $available = (int) ($query->value('quantity_available') ?? 0);
                 if ($item['quantity'] > $available) {
                     $stockErrors[] = "Producto #{$item['product_id']}: solicitado {$item['quantity']}, disponible {$available}";
                 }
@@ -88,9 +112,10 @@ class WorkOrderController extends Controller
             }
         }
 
-        $workOrder = DB::transaction(function () use ($validated, $request) {
-            $wo = WorkOrder::create([
+        $workOrder = DB::transaction(function () use ($validated, $request): WorkOrder {
+            $workOrder = WorkOrder::create([
                 'customer_id' => $validated['customer_id'] ?? null,
+                'customer_vehicle_id' => $validated['customer_vehicle_id'] ?? null,
                 'warehouse_id' => $validated['warehouse_id'],
                 'created_by' => $request->user()->id,
                 'assigned_to' => $validated['assigned_to'] ?? null,
@@ -102,7 +127,7 @@ class WorkOrderController extends Controller
             ]);
 
             foreach ($validated['items'] ?? [] as $item) {
-                $workOrderItem = $wo->items()->create([
+                $workOrderItem = $workOrder->items()->create([
                     'product_id' => $item['product_id'],
                     'variant_id' => $item['variant_id'] ?? null,
                     'warehouse_id' => $item['warehouse_id'],
@@ -117,15 +142,15 @@ class WorkOrderController extends Controller
                     'warehouse_id' => $item['warehouse_id'],
                     'quantity' => $item['quantity'],
                     'reference_type' => 'work_order',
-                    'reference_id' => $wo->id,
+                    'reference_id' => $workOrder->id,
                     'reason' => 'work_order_item',
-                    'notes' => "Orden de trabajo #{$wo->id} item #{$workOrderItem->id}",
+                    'notes' => "Orden de trabajo {$workOrder->folio} item #{$workOrderItem->id}",
                     'user_id' => $request->user()->id,
                     'strict' => true,
                 ]);
             }
 
-            return $wo->load(['items', 'customer', 'warehouse', 'creator', 'assignee']);
+            return $workOrder->load($this->workOrderRelations());
         });
 
         return response()->json([
@@ -134,44 +159,21 @@ class WorkOrderController extends Controller
         ], 201);
     }
 
-    /**
-     * PUT /api/v1/work-orders/{id}
-     * Update non-status fields (items are replaced if provided).
-     */
-    public function update(Request $request, int $id): JsonResponse
+    public function update(UpdateWorkOrderRequest $request, int $id): JsonResponse
     {
         $workOrder = WorkOrder::findOrFail($id);
-
-        $validated = $request->validate([
-            'customer_id' => 'nullable|exists:customers,id',
-            'assigned_to' => 'nullable|exists:users,id',
-            'vehicle_description' => 'nullable|string|max:255',
-            'notes' => 'nullable|string|max:5000',
-            'labour_cost' => 'nullable|numeric|min:0',
-            'estimated_delivery_at' => 'nullable|date',
-        ]);
-
-        $workOrder->update($validated);
+        $workOrder->update($request->validated());
 
         return response()->json([
             'message' => 'Orden de trabajo actualizada',
-            'data' => $workOrder->load(['items', 'customer', 'warehouse', 'creator', 'assignee']),
+            'data' => $workOrder->load($this->workOrderRelations()),
         ]);
     }
 
-    /**
-     * POST /api/v1/work-orders/{id}/transition
-     * Advance or revert the work order status following allowed transitions.
-     */
-    public function transition(Request $request, int $id): JsonResponse
+    public function transition(TransitionWorkOrderRequest $request, int $id): JsonResponse
     {
         $workOrder = WorkOrder::findOrFail($id);
-
-        $request->validate([
-            'status' => 'required|in:'.implode(',', WorkOrder::VALID_STATUSES),
-        ]);
-
-        $newStatus = $request->status;
+        $newStatus = $request->validated('status');
 
         if (! $workOrder->canTransitionTo($newStatus)) {
             return response()->json([
@@ -181,7 +183,6 @@ class WorkOrderController extends Controller
 
         $workOrder->update(['status' => $newStatus]);
 
-        // If cancelled, restore inventory for all items
         if ($newStatus === 'cancelled') {
             $movements = \App\Models\InventoryMovement::query()
                 ->where('reference_type', 'work_order')
@@ -194,7 +195,7 @@ class WorkOrderController extends Controller
                     'reference_type' => 'work_order_cancelled',
                     'reference_id' => $workOrder->id,
                     'reason' => 'work_order_cancelled',
-                    'notes' => "Cancelación de orden de trabajo #{$workOrder->id}",
+                    'notes' => "Cancelacion de orden de trabajo {$workOrder->folio}",
                     'user_id' => $request->user()?->id,
                 ]);
             }
@@ -202,25 +203,20 @@ class WorkOrderController extends Controller
 
         return response()->json([
             'message' => "Estado actualizado a '{$newStatus}'",
-            'data' => $workOrder->load(['items', 'customer', 'warehouse', 'creator', 'assignee']),
+            'data' => $workOrder->load($this->workOrderRelations()),
         ]);
     }
 
-    /**
-     * DELETE /api/v1/work-orders/{id}
-     * Only allowed when status is cancelled or pending.
-     */
     public function destroy(int $id): JsonResponse
     {
         $workOrder = WorkOrder::findOrFail($id);
 
-        if (! in_array($workOrder->status, ['cancelled', 'pending'])) {
+        if (! in_array($workOrder->status, ['cancelled', 'pending'], true)) {
             return response()->json([
-                'message' => 'Solo se pueden eliminar órdenes en estado pending o cancelled.',
+                'message' => 'Solo se pueden eliminar ordenes en estado pending o cancelled.',
             ], 422);
         }
 
-        // If pending with items, restore inventory before delete
         if ($workOrder->status === 'pending') {
             $movements = \App\Models\InventoryMovement::query()
                 ->where('reference_type', 'work_order')
@@ -233,7 +229,7 @@ class WorkOrderController extends Controller
                     'reference_type' => 'work_order_deleted',
                     'reference_id' => $workOrder->id,
                     'reason' => 'work_order_deleted',
-                    'notes' => "Eliminación de orden de trabajo #{$workOrder->id}",
+                    'notes' => "Eliminacion de orden de trabajo {$workOrder->folio}",
                 ]);
             }
         }
@@ -241,5 +237,47 @@ class WorkOrderController extends Controller
         $workOrder->delete();
 
         return response()->json(['message' => 'Orden de trabajo eliminada']);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function workOrderRelations(): array
+    {
+        return [
+            'customer:id,code,name,email,phone,current_balance',
+            'customerVehicle.model.make',
+            'customerVehicle.chassis',
+            'customerVehicle.engine',
+            'warehouse:id,name,code',
+            'creator:id,name',
+            'assignee:id,name,email,role',
+            'items.product:id,sku_base,name',
+            'items.variant:id,sku,brand_id',
+            'items.variant.brand:id,name',
+            'items.warehouse:id,name',
+        ];
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function workOrderSummary(Builder $query): array
+    {
+        $orders = $query->get(['id', 'status', 'estimated_delivery_at']);
+
+        return [
+            'total' => $orders->count(),
+            'pending' => $orders->where('status', 'pending')->count(),
+            'in_progress' => $orders->where('status', 'in_progress')->count(),
+            'done' => $orders->where('status', 'done')->count(),
+            'delivered' => $orders->where('status', 'delivered')->count(),
+            'cancelled' => $orders->where('status', 'cancelled')->count(),
+            'overdue' => $orders
+                ->filter(fn (WorkOrder $order): bool => ! in_array($order->status, ['delivered', 'cancelled'], true)
+                    && $order->estimated_delivery_at !== null
+                    && $order->estimated_delivery_at->isPast())
+                ->count(),
+        ];
     }
 }

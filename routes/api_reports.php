@@ -12,6 +12,8 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/financial-position', [ReportController::class, 'financialPosition']);
     Route::get('/ledger-trial-balance', [ReportController::class, 'ledgerTrialBalance']);
     Route::get('/customer-references', [ReportController::class, 'customerReferences']);
+    Route::get('/sales-by-client', [ReportController::class, 'salesByClient']);
+    Route::get('/sales-by-client/export/{format}', [ReportController::class, 'exportSalesByClient']);
     Route::get('/brand-profitability', [ReportController::class, 'brandProfitability']);
     Route::get('/category-profitability', [ReportController::class, 'categoryProfitability']);
     Route::get('/z-report', [ReportController::class, 'zReport']);

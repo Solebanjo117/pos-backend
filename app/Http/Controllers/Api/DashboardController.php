@@ -4,8 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Services\DashboardService;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 class DashboardController extends Controller
 {
@@ -34,7 +34,7 @@ class DashboardController extends Controller
         $limit = $request->input('limit', 5);
         $warehouseId = $request->input('warehouse_id');
         $period = $request->input('period', '30d');
-        
+
         $products = $this->dashboardService->getTopProducts($limit, $warehouseId, $period);
 
         return response()->json([
@@ -49,7 +49,7 @@ class DashboardController extends Controller
     {
         $limit = $request->input('limit', 10);
         $warehouseId = $request->input('warehouse_id');
-        
+
         $products = $this->dashboardService->getLowStockProducts($limit, $warehouseId);
 
         return response()->json([
@@ -90,7 +90,7 @@ class DashboardController extends Controller
     {
         $period = $request->input('period', '7d');
         $warehouseId = $request->input('warehouse_id');
-        
+
         $chartData = $this->dashboardService->getSalesChartData($period, $warehouseId);
 
         return response()->json([
@@ -120,7 +120,10 @@ class DashboardController extends Controller
     {
         $warehouseId = $request->input('warehouse_id');
         $period = $request->input('period', '7d');
-        
+        $dateFrom = $request->input('date_from');
+        $dateTo = $request->input('date_to');
+        $compare = filter_var($request->input('compare', false), FILTER_VALIDATE_BOOLEAN);
+
         return response()->json([
             'data' => [
                 'stats' => $this->dashboardService->getStats($warehouseId),
@@ -132,6 +135,7 @@ class DashboardController extends Controller
                 'sales_by_category' => $this->dashboardService->getSalesByCategory($warehouseId, $period),
                 'top_cashiers' => $this->dashboardService->getTopCashiers(5, $warehouseId, $period),
                 'recent_activity' => $this->dashboardService->getRecentActivity(10, $warehouseId),
+                'financial' => $this->dashboardService->getFinancialDashboard($warehouseId, $period, $dateFrom, $dateTo, $compare),
             ],
         ]);
     }

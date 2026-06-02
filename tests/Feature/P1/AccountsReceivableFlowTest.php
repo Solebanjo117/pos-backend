@@ -82,7 +82,15 @@ it('lists credit customer debt and removes it from pending list after full recei
     $this->actingAs($cashier)->getJson('/api/v1/accounts-receivable')
         ->assertOk()
         ->assertJsonPath('data.0.id', $customer->id)
-        ->assertJsonPath('data.0.current_balance', 100);
+        ->assertJsonPath('data.0.current_balance', 100)
+        ->assertJsonPath('data.0.total_billed', 100)
+        ->assertJsonPath('data.0.total_paid', 0)
+        ->assertJsonPath('data.0.status', 'Corriente')
+        ->assertJsonPath('summary.total_receivable', 100)
+        ->assertJsonPath('summary.active_customers', 1)
+        ->assertJsonPath('summary.open_documents_count', 1)
+        ->assertJsonPath('summary.credits_granted', 100)
+        ->assertJsonPath('summary.aging_buckets.current.amount', 100);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
         'amount' => 100,
@@ -132,8 +140,67 @@ it('records partial receivable receipt and keeps remaining document open', funct
     $statement->assertOk()
         ->assertJsonPath('data.documents.0.id', $order->id)
         ->assertJsonPath('data.documents.0.amount_due', 60)
+        ->assertJsonPath('data.documents.0.days_overdue', 0)
+        ->assertJsonPath('data.documents.0.status_label', 'Corriente')
+        ->assertJsonPath('data.summary.total_open_balance', 60)
         ->assertJsonPath('data.documents.0.payment_summary.0.method', 'cash')
         ->assertJsonPath('data.documents.0.payment_summary.0.amount', 40);
+});
+
+it('exposes receivable dashboard aging and collection metrics for the full filtered set', function () {
+    ['warehouse' => $warehouse, 'cashier' => $cashier, 'customer' => $currentCustomer, 'order' => $currentOrder] = accountsReceivableContext(150);
+    createArPaymentMethod('cash', 'Efectivo', 1);
+
+    $overdueCustomer = Customer::create([
+        'code' => 'AR-OLD-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente Vencido',
+        'credit_limit' => 2000,
+        'current_balance' => 240,
+        'credit_days' => 15,
+    ]);
+
+    SalesOrder::create([
+        'order_number' => 'SO-OLD-'.fake()->unique()->randomNumber(5),
+        'customer_id' => $overdueCustomer->id,
+        'user_id' => $cashier->id,
+        'date' => now()->subDays(150)->toDateString(),
+        'status' => 'confirmed',
+        'subtotal' => 240,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 240,
+        'payment_status' => 'pending',
+        'payment_method' => 'credit',
+    ]);
+
+    PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 0,
+        'expected_amount' => 0,
+        'status' => 'open',
+    ]);
+
+    $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$currentCustomer->id}/receipts", [
+        'amount' => 50,
+        'method' => 'cash',
+        'applications' => [
+            ['document_id' => $currentOrder->id, 'amount' => 50],
+        ],
+    ])->assertCreated();
+
+    $response = $this->actingAs($cashier)->getJson('/api/v1/accounts-receivable?per_page=1');
+
+    $response->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('summary.total_receivable', 340)
+        ->assertJsonPath('summary.active_customers', 2)
+        ->assertJsonPath('summary.open_documents_count', 2)
+        ->assertJsonPath('summary.collections_received', 50)
+        ->assertJsonPath('summary.aging_buckets.90_plus.amount', 240)
+        ->assertJsonPath('summary.over_90_count', 1);
 });
 
 it('rejects credit as accounts receivable receipt method', function () {

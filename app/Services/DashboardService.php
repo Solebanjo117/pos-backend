@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\ProductInventory;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\SalesOrderPayment;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -22,6 +23,46 @@ class DashboardService
             'low_stock_items' => $this->getLowStockItemsCount($warehouseId),
             'active_alerts' => $this->getActiveAlertsCount($warehouseId),
             'total_inventory_value' => $this->getTotalInventoryValue($warehouseId),
+        ];
+    }
+
+    public function getFinancialDashboard(
+        ?int $warehouseId = null,
+        string $period = '7d',
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        bool $compare = false,
+    ): array {
+        $periodData = $this->resolveFinancialPeriod($period, $dateFrom, $dateTo);
+        $metrics = $this->financialMetrics(
+            $periodData['date_from'],
+            $periodData['date_to'],
+            $warehouseId
+        );
+        $previousMetrics = $compare
+            ? $this->financialMetrics($periodData['previous_date_from'], $periodData['previous_date_to'], $warehouseId)
+            : null;
+
+        return [
+            'period' => [
+                'key' => $periodData['key'],
+                'date_from' => $periodData['date_from']->toDateString(),
+                'date_to' => $periodData['date_to']->toDateString(),
+                'previous_date_from' => $periodData['previous_date_from']->toDateString(),
+                'previous_date_to' => $periodData['previous_date_to']->toDateString(),
+            ],
+            'kpis' => $this->financialKpis($metrics, $previousMetrics),
+            'payment_methods' => $this->financialPaymentMethods($periodData['date_from'], $periodData['date_to'], $warehouseId),
+            'top_clients' => $this->financialTopClients($periodData['date_from'], $periodData['date_to'], $warehouseId),
+            'latest_transactions' => $this->financialLatestTransactions($periodData['date_from'], $periodData['date_to'], $warehouseId),
+            'alerts' => $this->financialAlerts($metrics, $warehouseId),
+            'report_links' => [
+                'income_statement' => '/reports/financial',
+                'financial_position' => '/reports/financial',
+                'sales_by_client' => '/reports/sales-by-client',
+                'accounts_receivable' => '/ar',
+                'z_report' => '/reports/z-report',
+            ],
         ];
     }
 
@@ -337,11 +378,257 @@ class DashboardService
     private function getPeriodStartDate(string $period): Carbon
     {
         return match ($period) {
+            'today' => Carbon::now()->startOfDay(),
+            'week' => Carbon::now()->startOfWeek(),
+            'month' => Carbon::now()->startOfMonth(),
+            'quarter' => Carbon::now()->startOfQuarter(),
+            'year', 'ytd' => Carbon::now()->startOfYear(),
             '7d' => Carbon::now()->subDays(7),
             '30d' => Carbon::now()->subDays(30),
             '90d' => Carbon::now()->subDays(90),
-            'ytd' => Carbon::now()->startOfYear(),
             default => Carbon::now()->subDays(7),
+        };
+    }
+
+    private function resolveFinancialPeriod(string $period, ?string $dateFrom, ?string $dateTo): array
+    {
+        $normalizedPeriod = match ($period) {
+            'today', 'week', 'month', 'quarter', 'year', 'custom', '7d', '30d', '90d', 'ytd' => $period,
+            default => '7d',
+        };
+
+        if ($normalizedPeriod === 'custom' && $dateFrom && $dateTo) {
+            $from = Carbon::parse($dateFrom)->startOfDay();
+            $to = Carbon::parse($dateTo)->endOfDay();
+        } else {
+            $from = $this->getPeriodStartDate($normalizedPeriod)->startOfDay();
+            $to = Carbon::now()->endOfDay();
+        }
+
+        if ($normalizedPeriod === 'custom' && $from->isStartOfDay() && $from->isSameDay($from->copy()->startOfMonth()) && $to->isSameDay($to->copy()->endOfMonth())) {
+            $previousFrom = $from->copy()->subMonthNoOverflow()->startOfMonth()->startOfDay();
+            $previousTo = $from->copy()->subMonthNoOverflow()->endOfMonth()->endOfDay();
+        } else {
+            $days = $from->copy()->startOfDay()->diffInDays($to->copy()->startOfDay()) + 1;
+            $previousTo = $from->copy()->subDay()->endOfDay();
+            $previousFrom = $previousTo->copy()->subDays($days - 1)->startOfDay();
+        }
+
+        return [
+            'key' => $normalizedPeriod,
+            'date_from' => $from,
+            'date_to' => $to,
+            'previous_date_from' => $previousFrom,
+            'previous_date_to' => $previousTo,
+        ];
+    }
+
+    private function financialMetrics(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId): array
+    {
+        $orders = $this->financialOrdersQuery($dateFrom, $dateTo, $warehouseId)
+            ->with(['payments', 'items'])
+            ->get();
+
+        $totalRevenue = round((float) $orders->sum('total'), 2);
+        $cashCollected = round((float) $orders
+            ->flatMap(fn (SalesOrder $order) => $order->payments)
+            ->where('method', '!=', 'credit')
+            ->sum('amount'), 2);
+        $accountsReceivable = round((float) $orders->sum(fn (SalesOrder $order): float => $order->amount_due), 2);
+        $cogs = round((float) $orders
+            ->flatMap(fn (SalesOrder $order) => $order->items)
+            ->when($warehouseId, fn ($items) => $items->where('warehouse_id', $warehouseId))
+            ->sum(fn (SalesOrderItem $item): float => (float) $item->unit_cost * (int) $item->quantity), 2);
+        $inventoryValue = round($this->getTotalInventoryValue($warehouseId), 2);
+        $pendingOrders = $this->getPendingOrders($warehouseId);
+        $lowStockItems = $this->getLowStockItemsCount($warehouseId);
+
+        return [
+            'total_revenue' => $totalRevenue,
+            'accounts_receivable' => $accountsReceivable,
+            'net_profit' => round($totalRevenue - $cogs, 2),
+            'cogs_expenses' => $cogs,
+            'cash_collected' => $cashCollected,
+            'inventory_value' => $inventoryValue,
+            'pending_orders' => $pendingOrders,
+            'low_stock_items' => $lowStockItems,
+        ];
+    }
+
+    private function financialKpis(array $metrics, ?array $previousMetrics): array
+    {
+        return collect([
+            ['key' => 'total_revenue', 'label' => 'Ingresos Totales', 'route' => '/reports/financial', 'tone' => 'blue', 'format' => 'currency'],
+            ['key' => 'accounts_receivable', 'label' => 'Cuentas por Cobrar', 'route' => '/ar', 'tone' => 'orange', 'format' => 'currency'],
+            ['key' => 'net_profit', 'label' => 'Utilidad Neta', 'route' => '/reports/financial', 'tone' => 'emerald', 'format' => 'currency'],
+            ['key' => 'cogs_expenses', 'label' => 'Gastos / COGS', 'route' => '/reports/financial', 'tone' => 'red', 'format' => 'currency'],
+            ['key' => 'cash_collected', 'label' => 'Caja Cobrada', 'route' => '/reports/z-report', 'tone' => 'green', 'format' => 'currency'],
+            ['key' => 'inventory_value', 'label' => 'Valor Inventario', 'route' => '/inventory', 'tone' => 'indigo', 'format' => 'currency'],
+            ['key' => 'pending_orders', 'label' => 'Ordenes Pendientes', 'route' => '/sales-orders', 'tone' => 'sky', 'format' => 'integer'],
+            ['key' => 'low_stock_items', 'label' => 'Stock Bajo', 'route' => '/inventory', 'tone' => 'amber', 'format' => 'integer'],
+        ])->map(function (array $definition) use ($metrics, $previousMetrics): array {
+            $value = $metrics[$definition['key']] ?? 0;
+            $previousValue = $previousMetrics[$definition['key']] ?? null;
+
+            return [
+                'key' => $definition['key'],
+                'label' => $definition['label'],
+                'value' => $value,
+                'formatted_value' => $definition['format'] === 'currency' ? $this->formatMoney($value) : number_format((float) $value, 0),
+                'route' => $definition['route'],
+                'tone' => $definition['tone'],
+                'comparison' => $previousMetrics ? [
+                    'previous_value' => $previousValue,
+                    'formatted_previous_value' => $definition['format'] === 'currency' ? $this->formatMoney($previousValue) : number_format((float) $previousValue, 0),
+                    'delta_percentage' => $this->deltaPercentage((float) $value, (float) $previousValue),
+                ] : null,
+            ];
+        })->values()->all();
+    }
+
+    private function financialPaymentMethods(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId): array
+    {
+        $payments = $this->financialPaymentsQuery($dateFrom, $dateTo, $warehouseId)->get();
+        $total = (float) $payments->sum('amount');
+
+        return $payments
+            ->groupBy('method')
+            ->map(fn ($methodPayments, string $method): array => [
+                'method' => $method,
+                'label' => $this->paymentMethodLabel($method),
+                'amount' => round((float) $methodPayments->sum('amount'), 2),
+                'percentage' => $total > 0 ? round(((float) $methodPayments->sum('amount') / $total) * 100, 2) : 0.0,
+            ])
+            ->sortByDesc('amount')
+            ->values()
+            ->all();
+    }
+
+    private function financialTopClients(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId): array
+    {
+        return $this->financialOrdersQuery($dateFrom, $dateTo, $warehouseId)
+            ->with(['customer:id,code,name', 'payments'])
+            ->get()
+            ->filter(fn (SalesOrder $order): bool => $order->customer !== null)
+            ->groupBy('customer_id')
+            ->map(function ($orders): array {
+                $firstOrder = $orders->first();
+
+                return [
+                    'customer_id' => $firstOrder->customer_id,
+                    'name' => $firstOrder->customer?->name ?? 'Cliente',
+                    'total_revenue' => round((float) $orders->sum('total'), 2),
+                    'pending_amount' => round((float) $orders->sum(fn (SalesOrder $order): float => $order->amount_due), 2),
+                    'orders_count' => $orders->count(),
+                    'route' => '/customers/'.$firstOrder->customer_id,
+                ];
+            })
+            ->sortByDesc('total_revenue')
+            ->take(5)
+            ->values()
+            ->all();
+    }
+
+    private function financialLatestTransactions(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId): array
+    {
+        return $this->financialPaymentsQuery($dateFrom, $dateTo, $warehouseId)
+            ->with(['salesOrder.customer:id,name'])
+            ->latest('paid_at')
+            ->limit(8)
+            ->get()
+            ->map(fn (SalesOrderPayment $payment): array => [
+                'id' => $payment->id,
+                'type' => 'payment',
+                'label' => $this->paymentMethodLabel($payment->method),
+                'customer_id' => $payment->salesOrder?->customer_id,
+                'customer_name' => $payment->salesOrder?->customer?->name,
+                'reference' => $payment->salesOrder?->order_number,
+                'amount' => (float) $payment->amount,
+                'method' => $payment->method,
+                'occurred_at' => $payment->paid_at?->toISOString(),
+                'route' => $payment->sales_order_id ? '/sales-orders/'.$payment->sales_order_id : null,
+            ])
+            ->all();
+    }
+
+    private function financialAlerts(array $metrics, ?int $warehouseId): array
+    {
+        $alerts = [];
+
+        if ((int) $metrics['low_stock_items'] > 0) {
+            $alerts[] = [
+                'type' => 'low_stock',
+                'severity' => 'warning',
+                'label' => 'Productos con stock bajo',
+                'value' => (int) $metrics['low_stock_items'],
+                'route' => '/inventory',
+            ];
+        }
+
+        if ((float) $metrics['accounts_receivable'] > 0) {
+            $alerts[] = [
+                'type' => 'accounts_receivable',
+                'severity' => 'attention',
+                'label' => 'Credito pendiente por cobrar',
+                'value' => (float) $metrics['accounts_receivable'],
+                'route' => '/ar',
+            ];
+        }
+
+        if ((int) $metrics['pending_orders'] > 0) {
+            $alerts[] = [
+                'type' => 'pending_orders',
+                'severity' => 'info',
+                'label' => 'Ordenes de venta pendientes',
+                'value' => (int) $metrics['pending_orders'],
+                'route' => '/sales-orders',
+            ];
+        }
+
+        return $alerts;
+    }
+
+    private function financialOrdersQuery(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId)
+    {
+        return SalesOrder::query()
+            ->whereBetween('date', [$dateFrom->toDateString(), $dateTo->toDateString()])
+            ->whereNotIn('status', ['cancelled'])
+            ->when($warehouseId, fn ($query) => $query->whereHas('items', fn ($items) => $items->where('warehouse_id', $warehouseId)));
+    }
+
+    private function financialPaymentsQuery(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId)
+    {
+        return SalesOrderPayment::query()
+            ->where('method', '!=', 'credit')
+            ->whereBetween('paid_at', [$dateFrom, $dateTo])
+            ->whereHas('salesOrder', fn ($query) => $query
+                ->whereNotIn('status', ['cancelled'])
+                ->when($warehouseId, fn ($orderQuery) => $orderQuery->whereHas('items', fn ($items) => $items->where('warehouse_id', $warehouseId))));
+    }
+
+    private function deltaPercentage(float $currentValue, float $previousValue): ?float
+    {
+        if ($previousValue == 0.0) {
+            return $currentValue == 0.0 ? 0.0 : null;
+        }
+
+        return round((($currentValue - $previousValue) / abs($previousValue)) * 100, 2);
+    }
+
+    private function formatMoney(float|int|null $value): string
+    {
+        return '$'.number_format((float) $value, 2);
+    }
+
+    private function paymentMethodLabel(string $method): string
+    {
+        return match ($method) {
+            'cash' => 'Efectivo',
+            'card' => 'Tarjeta',
+            'transfer' => 'Transferencia',
+            'yappy' => 'Yappy',
+            'credit' => 'Credito',
+            default => str($method)->replace('_', ' ')->title()->toString(),
         };
     }
 

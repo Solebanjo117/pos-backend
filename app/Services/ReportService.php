@@ -18,6 +18,7 @@ use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
 use App\Models\Warehouse;
 use Carbon\Carbon;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 
 class ReportService
@@ -99,6 +100,363 @@ class ReportService
             'referred_by_customer_name' => $order->referredByCustomer?->name,
             'total' => round((float) $order->total, 2),
         ];
+    }
+
+    /**
+     * Generate sales grouped by customer for the operational client report.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array<string, mixed>
+     */
+    public function generateSalesByClientReport(array $filters): array
+    {
+        $orders = $this->salesByClientOrders($filters);
+        $rows = $orders
+            ->groupBy('customer_id')
+            ->map(fn (Collection $customerOrders): array => $this->salesByClientRow($customerOrders))
+            ->values();
+        $rows = $this->filterSalesByClientRows($rows, $filters);
+        $rows = $this->sortSalesByClientRows($rows, $filters);
+        $paginated = $this->paginateSalesByClientRows($rows, $filters);
+
+        return [
+            'summary' => $this->salesByClientSummary($rows),
+            'data' => $paginated->items(),
+            'by_referrer' => $this->salesByClientReferrers($orders),
+            'top_clients' => $rows
+                ->sortByDesc('total_revenue')
+                ->take(10)
+                ->map(fn (array $row): array => [
+                    'customer_id' => $row['customer_id'],
+                    'customer_name' => $row['customer_name'],
+                    'total_revenue' => $row['total_revenue'],
+                    'orders_count' => $row['orders_count'],
+                    'growth' => 0,
+                ])
+                ->values()
+                ->all(),
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'per_page' => $paginated->perPage(),
+                'total' => $paginated->total(),
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $filters
+     * @return Collection<int, SalesOrder>
+     */
+    private function salesByClientOrders(array $filters): Collection
+    {
+        $query = SalesOrder::query()
+            ->with([
+                'customer.vehicles.model.make',
+                'customer.vehicles.chassis',
+                'customer.vehicles.engine',
+                'referredByCustomer:id,code,name',
+                'payments',
+                'returns',
+                'items.product:id,sku_base,name',
+                'items.variant:id,sku,brand_id',
+                'items.variant.brand:id,name',
+                'items.warehouse:id,name',
+            ])
+            ->whereNotNull('customer_id')
+            ->whereNotIn('status', ['cancelled'])
+            ->whereDate('date', '>=', $filters['date_from'])
+            ->whereDate('date', '<=', $filters['date_to']);
+
+        if (! empty($filters['warehouse_id'])) {
+            $query->whereHas('items', function ($query) use ($filters): void {
+                $query->where('warehouse_id', $filters['warehouse_id']);
+            });
+        }
+
+        if (! empty($filters['customer_id'])) {
+            $query->where('customer_id', $filters['customer_id']);
+        }
+
+        if (! empty($filters['referred_by_customer_id'])) {
+            $query->where('referred_by_customer_id', $filters['referred_by_customer_id']);
+        }
+
+        if (! empty($filters['status'])) {
+            $query->where('status', $filters['status']);
+        }
+
+        if (! empty($filters['payment_status'])) {
+            $statuses = collect(explode(',', (string) $filters['payment_status']))
+                ->map(fn (string $status): string => trim($status))
+                ->filter()
+                ->values()
+                ->all();
+
+            if (! empty($statuses)) {
+                $query->whereIn('payment_status', $statuses);
+            }
+        }
+
+        if (! empty($filters['search'])) {
+            $operator = $this->caseInsensitiveLikeOperator();
+            $search = (string) $filters['search'];
+
+            $query->where(function ($query) use ($operator, $search): void {
+                $query->where('order_number', $operator, "%{$search}%")
+                    ->orWhereHas('customer', function ($query) use ($operator, $search): void {
+                        $query->where('name', $operator, "%{$search}%")
+                            ->orWhere('code', $operator, "%{$search}%")
+                            ->orWhere('email', $operator, "%{$search}%")
+                            ->orWhere('phone', $operator, "%{$search}%");
+                    })
+                    ->orWhereHas('referredByCustomer', function ($query) use ($operator, $search): void {
+                        $query->where('name', $operator, "%{$search}%")
+                            ->orWhere('code', $operator, "%{$search}%");
+                    });
+            });
+        }
+
+        return $query->latest('date')->latest('id')->get();
+    }
+
+    private function salesByClientRow(Collection $orders): array
+    {
+        /** @var SalesOrder $firstOrder */
+        $firstOrder = $orders->first();
+        $customer = $firstOrder->customer;
+        $totalRevenue = round((float) $orders->sum('total'), 2);
+        $totalPaid = round((float) $orders->sum(fn (SalesOrder $order): float => (float) $order->amount_paid), 2);
+        $pendingAmount = round((float) $orders->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
+        $lastPayment = $orders
+            ->flatMap(fn (SalesOrder $order) => $order->payments)
+            ->where('method', '!=', 'credit')
+            ->sortByDesc('paid_at')
+            ->first();
+        $dominantPayment = $orders
+            ->flatMap(fn (SalesOrder $order) => $order->payments)
+            ->where('method', '!=', 'credit')
+            ->groupBy('method')
+            ->map(fn (Collection $payments, string $method): array => [
+                'method' => $method,
+                'method_label' => $payments->first()->formatted_method,
+                'amount' => round((float) $payments->sum('amount'), 2),
+            ])
+            ->sortByDesc('amount')
+            ->first();
+        $fallbackMethod = $orders->whereNotNull('payment_method')->groupBy('payment_method')
+            ->map(fn (Collection $group, string $method): array => [
+                'method' => $method,
+                'method_label' => $method === 'credit' ? 'Credito' : ucfirst(str_replace('_', ' ', $method)),
+                'amount' => round((float) $group->sum('total'), 2),
+            ])
+            ->sortByDesc('amount')
+            ->first();
+        $referrerOrders = $orders->whereNotNull('referred_by_customer_id');
+        $referrer = $referrerOrders->count() > 0
+            ? $referrerOrders->groupBy('referred_by_customer_id')->sortByDesc(fn (Collection $group): int => $group->count())->first()?->first()?->referredByCustomer
+            : null;
+        $status = $this->salesByClientStatus($orders, $pendingAmount);
+
+        return [
+            'customer_id' => $customer?->id,
+            'customer_code' => $customer?->code,
+            'customer_name' => $customer?->name ?? 'Cliente sin nombre',
+            'customer_email' => $customer?->email,
+            'customer_phone' => $customer?->phone,
+            'initials' => $this->customerInitials($customer?->name ?? 'CL'),
+            'referred_by_customer_id' => $referrer?->id,
+            'referred_by_customer_name' => $referrer?->name,
+            'orders_count' => $orders->count(),
+            'total_revenue' => $totalRevenue,
+            'total_paid' => $totalPaid,
+            'pending_amount' => $pendingAmount,
+            'last_payment_amount' => $lastPayment ? round((float) $lastPayment->amount, 2) : 0.0,
+            'last_payment_date' => $lastPayment?->paid_at?->toDateString(),
+            'dominant_payment_method' => $dominantPayment['method'] ?? $fallbackMethod['method'] ?? null,
+            'dominant_payment_method_label' => $dominantPayment['method_label'] ?? $fallbackMethod['method_label'] ?? 'Sin pagos',
+            'status' => $status,
+            'status_label' => match ($status) {
+                'vencido' => 'Vencido',
+                'pendiente' => 'Pendiente',
+                default => 'Al dia',
+            },
+            'details' => [
+                'invoices' => $orders->map(fn (SalesOrder $order): array => $this->salesByClientInvoiceRow($order))->values()->all(),
+                'items' => $this->salesByClientPurchasedItems($orders),
+                'vehicles' => $this->salesByClientVehicles($customer),
+            ],
+        ];
+    }
+
+    private function salesByClientInvoiceRow(SalesOrder $order): array
+    {
+        return [
+            'id' => $order->id,
+            'order_number' => $order->order_number,
+            'date' => $order->date?->toDateString(),
+            'status' => $order->status,
+            'payment_status' => $order->payment_status,
+            'total' => round((float) $order->total, 2),
+            'amount_paid' => round((float) $order->amount_paid, 2),
+            'pending_amount' => round((float) $order->amount_due, 2),
+            'method' => $order->payment_method,
+            'method_label' => $order->payment_method === 'credit'
+                ? 'Credito'
+                : ucfirst(str_replace('_', ' ', (string) $order->payment_method)),
+            'href' => "/sales-orders/{$order->id}",
+        ];
+    }
+
+    private function salesByClientPurchasedItems(Collection $orders): array
+    {
+        return $orders
+            ->flatMap(fn (SalesOrder $order) => $order->items)
+            ->groupBy(fn ($item): string => (string) ($item->variant_id ?? $item->product_id ?? $item->product_name))
+            ->map(function (Collection $items): array {
+                $first = $items->first();
+
+                return [
+                    'product_id' => $first->product_id,
+                    'variant_id' => $first->variant_id,
+                    'name' => $first->product_name,
+                    'sku' => $first->variant?->sku ?? $first->product_sku,
+                    'brand_name' => $first->variant?->brand?->name,
+                    'quantity' => (int) $items->sum('quantity'),
+                    'total' => round((float) $items->sum('total'), 2),
+                ];
+            })
+            ->sortByDesc('total')
+            ->take(8)
+            ->values()
+            ->all();
+    }
+
+    private function salesByClientVehicles(?Customer $customer): array
+    {
+        return $customer?->vehicles
+            ->map(fn ($vehicle): array => [
+                'id' => $vehicle->id,
+                'name' => $vehicle->display_name,
+                'vin' => $vehicle->vin,
+                'status' => $vehicle->status,
+            ])
+            ->values()
+            ->all() ?? [];
+    }
+
+    private function salesByClientStatus(Collection $orders, float $pendingAmount): string
+    {
+        if ($pendingAmount <= 0) {
+            return 'aldia';
+        }
+
+        $hasOverdue = $orders->contains(function (SalesOrder $order): bool {
+            if ((float) $order->amount_due <= 0 || ! $order->date) {
+                return false;
+            }
+
+            $creditDays = (int) ($order->customer?->credit_days ?? 0);
+
+            return $order->date->copy()->addDays($creditDays)->isPast();
+        });
+
+        return $hasOverdue ? 'vencido' : 'pendiente';
+    }
+
+    private function filterSalesByClientRows(Collection $rows, array $filters): Collection
+    {
+        if (empty($filters['search'])) {
+            return $rows;
+        }
+
+        $search = mb_strtolower((string) $filters['search']);
+
+        return $rows
+            ->filter(fn (array $row): bool => str_contains(mb_strtolower($row['customer_name']), $search)
+                || str_contains(mb_strtolower((string) $row['customer_code']), $search)
+                || str_contains(mb_strtolower((string) $row['referred_by_customer_name']), $search)
+                || collect($row['details']['invoices'] ?? [])->contains(
+                    fn (array $invoice): bool => str_contains(mb_strtolower((string) $invoice['order_number']), $search)
+                ))
+            ->values();
+    }
+
+    private function sortSalesByClientRows(Collection $rows, array $filters): Collection
+    {
+        $sortBy = $filters['sort_by'] ?? 'total_revenue';
+        $descending = ($filters['sort_direction'] ?? 'desc') === 'desc';
+        $sorted = $rows->sortBy(fn (array $row) => $row[$sortBy] ?? null, SORT_REGULAR, $descending);
+
+        return $sorted->values();
+    }
+
+    private function paginateSalesByClientRows(Collection $rows, array $filters): LengthAwarePaginator
+    {
+        $perPage = (int) ($filters['per_page'] ?? 25);
+        $page = max(1, (int) ($filters['page'] ?? 1));
+
+        return new LengthAwarePaginator(
+            $rows->forPage($page, $perPage)->values()->all(),
+            $rows->count(),
+            $perPage,
+            $page
+        );
+    }
+
+    private function salesByClientSummary(Collection $rows): array
+    {
+        $ordersCount = (int) $rows->sum('orders_count');
+        $totalRevenue = round((float) $rows->sum('total_revenue'), 2);
+
+        return [
+            'total_revenue' => $totalRevenue,
+            'orders_count' => $ordersCount,
+            'average_ticket' => $ordersCount > 0 ? round($totalRevenue / $ordersCount, 2) : 0.0,
+            'active_customers' => $rows->count(),
+            'total_paid' => round((float) $rows->sum('total_paid'), 2),
+            'pending_amount' => round((float) $rows->sum('pending_amount'), 2),
+            'overdue_amount' => round((float) $rows->where('status', 'vencido')->sum('pending_amount'), 2),
+        ];
+    }
+
+    private function salesByClientReferrers(Collection $orders): array
+    {
+        return $orders
+            ->whereNotNull('referred_by_customer_id')
+            ->groupBy('referred_by_customer_id')
+            ->map(function (Collection $referrerOrders): array {
+                $first = $referrerOrders->first();
+                $totalRevenue = round((float) $referrerOrders->sum('total'), 2);
+
+                return [
+                    'customer_id' => $first->referredByCustomer?->id,
+                    'customer_name' => $first->referredByCustomer?->name ?? 'Sin referido',
+                    'initials' => $this->customerInitials($first->referredByCustomer?->name ?? 'SR'),
+                    'clients_count' => $referrerOrders->pluck('customer_id')->filter()->unique()->count(),
+                    'orders_count' => $referrerOrders->count(),
+                    'total_revenue' => $totalRevenue,
+                    'commission' => round($totalRevenue * 0.05, 2),
+                    'growth' => 0,
+                ];
+            })
+            ->sortByDesc('total_revenue')
+            ->values()
+            ->all();
+    }
+
+    private function customerInitials(string $name): string
+    {
+        return collect(preg_split('/\s+/', trim($name)) ?: [])
+            ->filter()
+            ->take(2)
+            ->map(fn (string $part): string => mb_strtoupper(mb_substr($part, 0, 1)))
+            ->implode('') ?: 'CL';
+    }
+
+    private function caseInsensitiveLikeOperator(): string
+    {
+        return config('database.default') === 'sqlite' ? 'LIKE' : 'ILIKE';
     }
 
     /**

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\FinancialPositionReportRequest;
 use App\Http\Requests\IncomeStatementReportRequest;
 use App\Http\Requests\LedgerTrialBalanceReportRequest;
+use App\Http\Requests\SalesByClientReportRequest;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -193,6 +194,40 @@ class ReportController extends Controller
         $report = $this->reportService->generateCustomerReferenceReport($filters);
 
         return response()->json($report);
+    }
+
+    public function salesByClient(SalesByClientReportRequest $request): JsonResponse
+    {
+        $report = $this->reportService->generateSalesByClientReport($request->validated());
+
+        return response()->json($report);
+    }
+
+    public function exportSalesByClient(SalesByClientReportRequest $request, string $format): Response
+    {
+        if (! in_array($format, ['pdf', 'excel'], true)) {
+            return response()->json(['error' => 'Invalid format'], 400);
+        }
+
+        $report = $this->reportService->generateSalesByClientReport(array_merge(
+            $request->validated(),
+            ['page' => 1, 'per_page' => 100000]
+        ));
+
+        if ($format === 'pdf') {
+            $pdfService = app(\App\Services\PdfExportService::class);
+            $pdf = $pdfService->exportSalesByClient($report);
+
+            return response($pdf, 200, [
+                'Content-Type' => 'application/pdf',
+                'Content-Disposition' => 'attachment; filename="sales-by-client-report.pdf"',
+            ]);
+        }
+
+        return \Maatwebsite\Excel\Facades\Excel::download(
+            new \App\Exports\SalesByClientExport($report),
+            'sales-by-client-report.xlsx'
+        );
     }
 
     /**

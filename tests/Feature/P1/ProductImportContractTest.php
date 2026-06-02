@@ -833,7 +833,7 @@ it('detects complete vehicle scope from product name while keeping vehicle text 
         ]);
 });
 
-it('fails when vehicle text in product name does not resolve to a complete existing scope', function () {
+it('imports without compatibility when vehicle text in product name does not resolve to a complete existing scope', function () {
     $category = Category::create([
         'name' => 'Terminales',
         'slug' => 'terminales-missing-vehicle',
@@ -852,9 +852,12 @@ it('fails when vehicle text in product name does not resolve to a complete exist
         ],
     ]);
 
-    expect($import->successCount)->toBe(0)
-        ->and($import->errorCount)->toBe(1)
-        ->and($import->errors[0]['error'])->toContain('No se pudo resolver el vehiculo completo');
+    expect($import->successCount)->toBe(1)
+        ->and($import->errorCount)->toBe(0);
+
+    $product = Product::query()->where('sku_base', 'TIE-VEHICLE-NAME-MISSING')->firstOrFail();
+
+    expect($product->vehicleCompatibility()->count())->toBe(0);
 });
 
 it('reports unresolved name-derived vehicle candidates in preview metadata', function () {
@@ -888,7 +891,7 @@ it('reports unresolved name-derived vehicle candidates in preview metadata', fun
     ]);
 
     $response->assertOk()
-        ->assertJsonPath('data.rows.0.is_valid', false)
+        ->assertJsonPath('data.rows.0.is_valid', true)
         ->assertJsonPath('data.rows.0.data.nombre', 'Terminal CREM TOYOTA YARIS P90 1NZFE')
         ->assertJsonPath('data.rows.0.data.__vehicle_creation_candidate.make', 'TOYOTA')
         ->assertJsonPath('data.rows.0.data.__vehicle_creation_candidate.model', 'YARIS')
@@ -897,7 +900,7 @@ it('reports unresolved name-derived vehicle candidates in preview metadata', fun
         ->assertJsonPath('data.summary.missing_vehicle_candidates.0.make', 'TOYOTA')
         ->assertJsonPath('data.summary.missing_vehicle_candidates.0.model', 'YARIS');
 
-    expect($response->json('data.rows.0.errors.0'))->toContain('No se pudo resolver el vehiculo completo');
+    expect($response->json('data.rows.0.errors'))->toBe([]);
 });
 
 it('reports name-derived vehicle creation candidates when the vehicle catalog is empty', function () {
@@ -922,7 +925,7 @@ it('reports name-derived vehicle creation candidates when the vehicle catalog is
     ]);
 
     $response->assertOk()
-        ->assertJsonPath('data.rows.0.is_valid', false)
+        ->assertJsonPath('data.rows.0.is_valid', true)
         ->assertJsonPath('data.rows.0.data.__vehicle_creation_candidate.make', 'TOYOTA')
         ->assertJsonPath('data.rows.0.data.__vehicle_creation_candidate.model', 'YARIS')
         ->assertJsonPath('data.rows.0.data.__vehicle_creation_candidate.chassis', 'P90')
@@ -962,7 +965,7 @@ it('does not duplicate name-derived vehicle compatibility when explicit vehicle 
         ->and($product->vehicleCompatibility()->where('chassis_id', $chassis->id)->count())->toBe(1);
 });
 
-it('fails when product name contains more than one complete vehicle candidate', function () {
+it('imports without compatibility when product name contains more than one complete vehicle candidate', function () {
     $category = Category::create([
         'name' => 'Terminales',
         'slug' => 'terminales-ambiguous-vehicle',
@@ -982,9 +985,12 @@ it('fails when product name contains more than one complete vehicle candidate', 
         ],
     ]);
 
-    expect($import->successCount)->toBe(0)
-        ->and($import->errorCount)->toBe(1)
-        ->and($import->errors[0]['error'])->toContain('mas de un vehiculo completo');
+    expect($import->successCount)->toBe(1)
+        ->and($import->errorCount)->toBe(0);
+
+    $product = Product::query()->where('sku_base', 'TIE-VEHICLE-NAME-AMBIGUOUS')->firstOrFail();
+
+    expect($product->vehicleCompatibility()->count())->toBe(0);
 });
 
 it('extracts technical attributes from extra categories cleans name and keeps their source category', function () {
@@ -1961,6 +1967,77 @@ it('imports corrected persisted snapshot rows instead of rereading the original 
         ->and(Product::query()->where('name', 'Aceite desde snapshot')->exists())->toBeTrue();
 });
 
+it('imports only valid persisted snapshot rows from a validation run with errors', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+    Storage::disk('local')->put('imports/partial-validation.xlsx', 'source');
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'original_filename' => 'partial-validation.xlsx', 'stored_path' => 'imports/partial-validation.xlsx',
+        'processed_rows' => 2, 'success_count' => 1, 'error_count' => 1,
+        'summary' => ['validation_rows_count' => 2, 'rows_revision' => 0, 'validated_rows_revision' => 0, 'rows_dirty' => false, 'full_revalidation_status' => 'completed'],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 2, 'status' => 'valid', 'action_type' => 'create',
+        'data' => ['nombre' => 'Aceite valido', 'categoria' => 'Aceites', 'brand' => 'Shell'],
+        'errors' => [], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 3, 'status' => 'error', 'action_type' => 'invalid',
+        'data' => ['nombre' => 'Aceite excluido', 'categoria' => 'Fantasma', 'brand' => 'Shell'],
+        'errors' => ["La categoria 'Fantasma' no existe."], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'validated_import_run_id' => $validationRun->id,
+    ])->assertOk();
+
+    $importRun = ImportRun::query()->where('parent_import_run_id', $validationRun->id)->firstOrFail();
+    expect($importRun->rows()->count())->toBe(2)
+        ->and($importRun->summary['source_validation_error_count'])->toBe(1);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->success_count)->toBe(1)
+        ->and($importRun->error_count)->toBe(0)
+        ->and(Product::query()->where('name', 'Aceite valido')->exists())->toBeTrue()
+        ->and(Product::query()->where('name', 'Aceite excluido')->exists())->toBeFalse()
+        ->and($importRun->rows()->where('row_number', 3)->firstOrFail()->status)->toBe('error');
+});
+
+it('rejects partial validated imports without valid persisted rows', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Storage::disk('local')->put('imports/invalid-validation.xlsx', 'source');
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'original_filename' => 'invalid-validation.xlsx', 'stored_path' => 'imports/invalid-validation.xlsx',
+        'processed_rows' => 1, 'success_count' => 0, 'error_count' => 1,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 0, 'validated_rows_revision' => 0, 'rows_dirty' => false, 'full_revalidation_status' => 'completed'],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 2, 'status' => 'error', 'action_type' => 'invalid',
+        'data' => ['nombre' => 'Aceite excluido', 'categoria' => 'Fantasma'],
+        'errors' => ["La categoria 'Fantasma' no existe."], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'validated_import_run_id' => $validationRun->id,
+    ])->assertStatus(422)
+        ->assertJsonPath('message', 'La validacion seleccionada no tiene filas validas para importar.');
+
+    expect(ImportRun::query()->where('run_type', ImportRun::TYPE_IMPORT)->exists())->toBeFalse();
+    Queue::assertNothingPushed();
+});
+
 it('does not delete shared product import source files while another run still references them', function () {
     Storage::fake('local');
 
@@ -2077,7 +2154,7 @@ it('rejects importing from a completed validation run when its source file is mi
     Queue::assertNothingPushed();
 });
 
-it('rejects importing from completed validation runs with errors conflicts or missing references', function (array $overrides, string $message) {
+it('allows importing valid rows from completed validation runs with excluded issues', function (array $overrides) {
     Queue::fake();
     Storage::fake('local');
 
@@ -2102,21 +2179,30 @@ it('rejects importing from completed validation runs with errors conflicts or mi
         'errors' => [],
         'summary' => $summary,
     ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 2, 'status' => 'valid', 'action_type' => 'create',
+        'data' => ['nombre' => 'Aceite valido', 'categoria' => 'Aceites'],
+        'errors' => [], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 3, 'status' => 'error', 'action_type' => 'invalid',
+        'data' => ['nombre' => 'Aceite excluido', 'categoria' => 'Fantasma'],
+        'errors' => ['Fila excluida.'], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
 
     $this->actingAs($admin)->postJson('/api/v1/products/import', [
         'validated_import_run_id' => $validationRun->id,
-    ])->assertStatus(422)
-        ->assertJsonPath('success', false)
-        ->assertJsonPath('message', $message);
+    ])->assertOk()
+        ->assertJsonPath('success', true);
 
-    expect(ImportRun::query()->where('run_type', ImportRun::TYPE_IMPORT)->exists())->toBeFalse();
-    Queue::assertNothingPushed();
+    expect(ImportRun::query()->where('run_type', ImportRun::TYPE_IMPORT)->exists())->toBeTrue();
+    Queue::assertPushed(ProcessProductImportRun::class);
 })->with([
-    'errors' => [['error_count' => 1], 'La validacion seleccionada tiene errores pendientes.'],
-    'conflicts' => [['summary' => ['conflict_count' => 1]], 'La validacion seleccionada tiene conflictos pendientes.'],
-    'categories' => [['summary' => ['missing_categories' => ['Fantasma']]], 'La validacion seleccionada tiene referencias pendientes.'],
-    'brands' => [['summary' => ['missing_references' => ['brands' => ['Fantasma']]]], 'La validacion seleccionada tiene referencias pendientes.'],
-    'vehicles' => [['summary' => ['missing_vehicle_candidates' => [['label' => 'Toyota Yaris']]]], 'La validacion seleccionada tiene referencias pendientes.'],
+    'errors' => [['error_count' => 1]],
+    'conflicts' => [['summary' => ['conflict_count' => 1]]],
+    'categories' => [['summary' => ['missing_categories' => ['Fantasma']]]],
+    'brands' => [['summary' => ['missing_references' => ['brands' => ['Fantasma']]]]],
+    'vehicles' => [['summary' => ['missing_vehicle_candidates' => [['label' => 'Toyota Yaris']]]]],
 ]);
 
 it('allows advanced direct full imports only with the exact confirmation', function () {
