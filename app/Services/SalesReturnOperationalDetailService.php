@@ -42,6 +42,7 @@ class SalesReturnOperationalDetailService
             'sales_order' => $this->salesOrderRow($return),
             'items' => $return->items->map(fn (SalesReturnItem $item): array => $this->itemRow($item))->values()->all(),
             'refund_context' => $this->refundContext($return, $refundPayment, $customerTransactions->first()),
+            'documents' => $this->documents($return),
             'inventory_context' => [
                 'movements' => $inventoryMovements->map(fn (InventoryMovement $movement): array => $this->inventoryMovementRow($movement))->values()->all(),
             ],
@@ -281,6 +282,13 @@ class SalesReturnOperationalDetailService
     private function workflow(SalesReturn $return): array
     {
         $isPending = $return->status === 'pending';
+        $actions = [
+            'can_approve' => $isPending,
+            'can_reject' => $isPending,
+            'can_open_order' => $return->sales_order_id !== null,
+            'can_open_customer' => $return->customer_id !== null,
+            'can_open_pos_session' => in_array($return->refund_method, ['cash', 'card', 'transfer'], true),
+        ];
 
         return [
             'can_approve' => $isPending,
@@ -288,8 +296,50 @@ class SalesReturnOperationalDetailService
             'can_open_order' => $return->sales_order_id !== null,
             'can_open_customer' => $return->customer_id !== null,
             'can_open_pos_session' => in_array($return->refund_method, ['cash', 'card', 'transfer'], true),
+            'status' => $return->status,
+            'status_label' => $return->status_label,
+            'actions' => $actions,
+            'links' => [
+                'return' => "/returns/{$return->id}",
+                'sales_order' => $return->sales_order_id ? "/sales-orders/{$return->sales_order_id}" : null,
+                'customer' => $return->customer_id ? "/customers/{$return->customer_id}" : null,
+            ],
             'blocked_reason' => $isPending ? null : 'Esta devolución ya fue procesada.',
         ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function documents(SalesReturn $return): array
+    {
+        $documents = [
+            [
+                'type' => 'sales_return',
+                'label' => 'Devolucion',
+                'id' => $return->id,
+                'number' => $return->return_number,
+                'status' => $return->status,
+                'status_label' => $return->status_label,
+                'amount' => (float) $return->total_amount,
+                'href' => "/returns/{$return->id}",
+            ],
+        ];
+
+        if ($return->salesOrder) {
+            $documents[] = [
+                'type' => 'sales_order',
+                'label' => 'Orden de venta',
+                'id' => $return->salesOrder->id,
+                'number' => $return->salesOrder->order_number,
+                'status' => $return->salesOrder->status,
+                'status_label' => $return->salesOrder->status_label,
+                'amount' => (float) $return->salesOrder->total,
+                'href' => "/sales-orders/{$return->salesOrder->id}",
+            ];
+        }
+
+        return $documents;
     }
 
     private function refundPayment(SalesReturn $return): ?SalesOrderPayment
@@ -365,6 +415,9 @@ class SalesReturnOperationalDetailService
                 'type' => 'created',
                 'label' => 'Devolución creada',
                 'occurred_at' => $return->created_at?->toISOString(),
+                'source' => 'sales_return',
+                'href' => "/returns/{$return->id}",
+                'actor_name' => $return->user?->name,
                 'amount' => (float) $return->total_amount,
             ],
         ]);
@@ -374,6 +427,9 @@ class SalesReturnOperationalDetailService
                 'type' => $return->status,
                 'label' => $return->status === 'approved' ? 'Devolución aprobada' : 'Devolución rechazada',
                 'occurred_at' => $return->updated_at?->toISOString(),
+                'source' => 'sales_return',
+                'href' => "/returns/{$return->id}",
+                'actor_name' => $return->user?->name,
                 'amount' => (float) $return->total_amount,
             ]);
         }
@@ -383,6 +439,9 @@ class SalesReturnOperationalDetailService
                 'type' => 'refund_payment',
                 'label' => 'Reembolso registrado',
                 'occurred_at' => $payment->paid_at?->toISOString(),
+                'source' => 'sales_order_payment',
+                'href' => $return->sales_order_id ? "/sales-orders/{$return->sales_order_id}" : null,
+                'actor_name' => $payment->creator?->name,
                 'amount' => (float) $payment->amount,
             ]);
         }
@@ -392,6 +451,9 @@ class SalesReturnOperationalDetailService
                 'type' => 'customer_transaction',
                 'label' => $transaction->formatted_type,
                 'occurred_at' => $transaction->transaction_date?->toISOString(),
+                'source' => 'customer_transaction',
+                'href' => $return->customer_id ? "/customers/{$return->customer_id}" : null,
+                'actor_name' => $transaction->creator?->name,
                 'amount' => (float) $transaction->amount,
             ]);
         }
@@ -401,11 +463,15 @@ class SalesReturnOperationalDetailService
                 'type' => 'inventory_movement',
                 'label' => 'Entrada de inventario',
                 'occurred_at' => $movement->created_at?->toISOString(),
+                'source' => 'inventory_movement',
+                'href' => "/returns/{$return->id}",
+                'actor_name' => $movement->user?->name,
                 'amount' => null,
             ]);
         }
 
         return $events
+            ->filter(fn (array $event): bool => filled($event['occurred_at'] ?? null))
             ->sortBy(fn (array $event): string => $event['occurred_at'] ?? '')
             ->values();
     }

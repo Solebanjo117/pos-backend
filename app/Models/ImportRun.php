@@ -111,6 +111,11 @@ class ImportRun extends Model
         return $this->hasMany(ImportRunRecord::class);
     }
 
+    public function rows(): HasMany
+    {
+        return $this->hasMany(ImportRunRow::class);
+    }
+
     public function scopeVisibleTo(Builder $query, User $user): Builder
     {
         if ($user->isAdmin()) {
@@ -133,6 +138,20 @@ class ImportRun extends Model
     public function canCancel(): bool
     {
         return in_array($this->status, self::CANCELLABLE_STATUSES, true);
+    }
+
+    public function canDeleteFromHistory(): bool
+    {
+        return $this->isTerminal();
+    }
+
+    public function deleteBlockReason(): ?string
+    {
+        if ($this->canDeleteFromHistory()) {
+            return null;
+        }
+
+        return 'No se puede eliminar una importacion en proceso.';
     }
 
     public function shouldProcessFailedRows(): bool

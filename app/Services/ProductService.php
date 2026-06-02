@@ -661,6 +661,7 @@ class ProductService
                 'category_id' => $primaryCategoryId,
                 'name' => $name,
                 'description' => $data['description'] ?? null,
+                'image_url' => $data['image_url'] ?? null,
                 'status' => $data['status'] ?? 'active',
                 'is_universal' => $data['is_universal'] ?? false,
             ]);

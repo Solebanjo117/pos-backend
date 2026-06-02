@@ -50,12 +50,16 @@ class SalesOrderOperationalDetailService
             'items' => $items->all(),
             'payments' => $this->payments($order)->all(),
             'payment_summary' => $this->paymentSummary($order)->all(),
+            'payment_context' => $this->paymentContext($order),
+            'documents' => $this->documents($order),
             'ar_context' => $this->arContext($order, $customerTransactions, $ledgerEntries),
             'returns' => $this->returns($order)->all(),
             'inventory_context' => [
                 'movements' => $inventoryMovements->map(fn (InventoryMovement $movement): array => $this->inventoryMovementRow($movement))->values()->all(),
             ],
             'profit_summary' => $this->profitSummary($items),
+            'workflow' => $this->workflow($order),
+            'timeline' => $this->timeline($order, $customerTransactions, $ledgerEntries, $inventoryMovements)->all(),
             'audit' => collect($order->audit_logs ?? [])->values()->all(),
         ];
     }
@@ -199,6 +203,101 @@ class SalesOrderOperationalDetailService
                 'count' => $payments->count(),
             ])
             ->values();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function paymentContext(SalesOrder $order): array
+    {
+        $realPaidAmount = round((float) $order->payments
+            ->where('method', '!=', 'credit')
+            ->sum('amount'), 2);
+        $creditAmount = round((float) $order->payments
+            ->where('method', 'credit')
+            ->sum('amount'), 2);
+        $refundedAmount = round((float) $order->payments
+            ->filter(fn ($payment): bool => (float) $payment->amount < 0)
+            ->sum(fn ($payment): float => abs((float) $payment->amount)), 2);
+        $approvedReturnsAmount = round((float) $order->returns
+            ->where('status', 'approved')
+            ->sum('total_amount'), 2);
+        $amountDue = round(max(0, (float) $order->total - $approvedReturnsAmount - $realPaidAmount), 2);
+
+        return [
+            'payment_status' => $order->payment_status,
+            'total' => (float) $order->total,
+            'real_paid_amount' => $realPaidAmount,
+            'credit_amount' => $creditAmount,
+            'refunded_amount' => $refundedAmount,
+            'total_returned' => $approvedReturnsAmount,
+            'amount_due' => $amountDue,
+            'summary_by_method' => $this->paymentSummary($order)->all(),
+        ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function documents(SalesOrder $order): array
+    {
+        return [
+            [
+                'type' => 'ticket',
+                'label' => 'Ticket',
+                'mode' => 'internal',
+                'href' => "/api/v1/sales-orders/{$order->id}/ticket?type=internal",
+            ],
+            [
+                'type' => 'note',
+                'label' => 'Nota',
+                'mode' => 'standard',
+                'href' => "/api/v1/sales-orders/{$order->id}/note",
+            ],
+            [
+                'type' => 'proforma',
+                'label' => 'Proforma',
+                'mode' => 'internal',
+                'href' => "/api/v1/sales-orders/{$order->id}/proforma?type=internal",
+            ],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function workflow(SalesOrder $order): array
+    {
+        $canSendToWarehouse = $order->sent_to_warehouse_at === null
+            && ! in_array($order->status, ['cancelled'], true);
+        $canMarkPrepared = $order->sent_to_warehouse_at !== null
+            && $order->prepared_at === null
+            && ! in_array($order->status, ['cancelled'], true);
+
+        return [
+            'status' => $order->status,
+            'status_label' => $order->status_label,
+            'payment_status' => $order->payment_status,
+            'actions' => [
+                'can_edit' => $order->canBeEdited(),
+                'can_confirm' => $order->canBeConfirmed(),
+                'can_cancel' => $order->canBeCancelled(),
+                'can_send_to_warehouse' => $canSendToWarehouse,
+                'can_mark_prepared' => $canMarkPrepared,
+                'can_add_items' => in_array($order->status, ['confirmed', 'processing', 'completed'], true),
+                'can_add_payment' => $order->payment_status !== 'paid' && $order->status !== 'cancelled',
+                'can_create_return' => $order->status !== 'cancelled' && $order->items->isNotEmpty(),
+                'can_open_customer' => $order->customer_id !== null,
+                'can_open_pos_session' => $order->pos_session_id !== null,
+            ],
+            'links' => [
+                'order' => "/sales-orders/{$order->id}",
+                'edit' => $order->canBeEdited() ? "/sales-orders/{$order->id}/edit" : null,
+                'customer' => $order->customer_id ? "/customers/{$order->customer_id}" : null,
+                'pos_session' => $order->pos_session_id ? "/pos-sessions?session={$order->pos_session_id}" : null,
+            ],
+            'blocked_reason' => $order->status === 'cancelled' ? 'Esta orden fue cancelada.' : null,
+        ];
     }
 
     /**
@@ -410,6 +509,133 @@ class SalesOrderOperationalDetailService
             })
             ->orderByDesc('occurred_at')
             ->get();
+    }
+
+    /**
+     * @param  Collection<int, CustomerTransaction>  $customerTransactions
+     * @param  Collection<int, AccountLedgerEntry>  $ledgerEntries
+     * @param  Collection<int, InventoryMovement>  $inventoryMovements
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function timeline(
+        SalesOrder $order,
+        Collection $customerTransactions,
+        Collection $ledgerEntries,
+        Collection $inventoryMovements
+    ): Collection {
+        $events = collect([
+            [
+                'type' => 'created',
+                'label' => 'Orden creada',
+                'occurred_at' => $order->created_at?->toISOString(),
+                'source' => 'sales_order',
+                'href' => "/sales-orders/{$order->id}",
+                'actor_name' => $order->user?->name,
+                'amount' => (float) $order->total,
+            ],
+        ]);
+
+        if ($order->sent_to_warehouse_at) {
+            $events->push([
+                'type' => 'sent_to_warehouse',
+                'label' => 'Enviada a bodega',
+                'occurred_at' => $order->sent_to_warehouse_at?->toISOString(),
+                'source' => 'sales_order',
+                'href' => "/sales-orders/{$order->id}",
+                'actor_name' => $order->user?->name,
+                'amount' => null,
+            ]);
+        }
+
+        if ($order->prepared_at) {
+            $events->push([
+                'type' => 'prepared',
+                'label' => 'Orden preparada',
+                'occurred_at' => $order->prepared_at?->toISOString(),
+                'source' => 'sales_order',
+                'href' => "/sales-orders/{$order->id}",
+                'actor_name' => $order->preparedBy?->name,
+                'amount' => null,
+            ]);
+        }
+
+        foreach ($order->payments as $payment) {
+            $amount = (float) $payment->amount;
+            $events->push([
+                'type' => $amount < 0 ? 'refund_payment' : 'payment',
+                'label' => $amount < 0 ? 'Reembolso registrado' : 'Pago registrado',
+                'occurred_at' => $payment->paid_at?->toISOString(),
+                'source' => 'sales_order_payment',
+                'href' => "/sales-orders/{$order->id}",
+                'actor_name' => $payment->creator?->name,
+                'amount' => $amount,
+            ]);
+        }
+
+        foreach ($order->returns as $return) {
+            $events->push([
+                'type' => 'sales_return',
+                'label' => $return->status === 'approved' ? 'Devolucion aprobada' : 'Devolucion registrada',
+                'occurred_at' => $return->created_at?->toISOString(),
+                'source' => 'sales_return',
+                'href' => "/returns/{$return->id}",
+                'actor_name' => $return->user?->name,
+                'amount' => (float) $return->total_amount,
+            ]);
+        }
+
+        foreach ($inventoryMovements as $movement) {
+            $events->push([
+                'type' => 'inventory_movement',
+                'label' => $movement->movement_type === 'in' ? 'Entrada de inventario' : 'Salida de inventario',
+                'occurred_at' => $movement->created_at?->toISOString(),
+                'source' => 'inventory_movement',
+                'href' => "/sales-orders/{$order->id}",
+                'actor_name' => $movement->user?->name,
+                'amount' => null,
+            ]);
+        }
+
+        foreach ($customerTransactions as $transaction) {
+            $events->push([
+                'type' => 'customer_transaction',
+                'label' => $transaction->formatted_type,
+                'occurred_at' => $transaction->transaction_date?->toISOString(),
+                'source' => 'customer_transaction',
+                'href' => $order->customer_id ? "/customers/{$order->customer_id}" : null,
+                'actor_name' => $transaction->creator?->name,
+                'amount' => (float) $transaction->amount,
+            ]);
+        }
+
+        foreach ($ledgerEntries as $entry) {
+            $events->push([
+                'type' => 'ledger_entry',
+                'label' => $entry->movement_type,
+                'occurred_at' => $entry->occurred_at?->toISOString(),
+                'source' => 'account_ledger_entry',
+                'href' => $order->customer_id ? "/customers/{$order->customer_id}" : null,
+                'actor_name' => $entry->creator?->name,
+                'amount' => round((float) $entry->debit - (float) $entry->credit, 2),
+            ]);
+        }
+
+        foreach (collect($order->audit_logs ?? [])->values() as $auditLog) {
+            $events->push([
+                'type' => 'audit',
+                'label' => (string) ($auditLog['action'] ?? 'Auditoria'),
+                'occurred_at' => $auditLog['timestamp'] ?? null,
+                'source' => 'sales_order_audit',
+                'href' => "/sales-orders/{$order->id}",
+                'actor_name' => $auditLog['metadata']['user_name'] ?? null,
+                'amount' => isset($auditLog['metadata']['total']) ? (float) $auditLog['metadata']['total'] : null,
+            ]);
+        }
+
+        return $events
+            ->filter(fn (array $event): bool => filled($event['occurred_at'] ?? null))
+            ->sortBy(fn (array $event): string => $event['occurred_at'])
+            ->values();
     }
 
     /**

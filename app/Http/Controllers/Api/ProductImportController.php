@@ -4,19 +4,31 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\ProductImportTemplate;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\BatchProductImportReferencesRequest;
+use App\Http\Requests\BatchProductImportVehicleCandidatesRequest;
 use App\Http\Requests\ExecuteImportRequest;
+use App\Http\Requests\ExportProductImportPreviewRequest;
 use App\Http\Requests\PreviewImportRequest;
 use App\Http\Requests\StoreImportProfileRequest;
+use App\Http\Requests\StoreProductImportRequest;
+use App\Http\Requests\UpdateProductImportRunMappingRequest;
+use App\Http\Requests\UpdateProductImportRunRowsRequest;
+use App\Http\Requests\ValidateProductImportRowsRequest;
 use App\Imports\ProductImport;
 use App\Jobs\ProcessProductImportRun;
+use App\Jobs\RevalidateProductImportRunRows;
 use App\Models\ImportProfile;
 use App\Models\ImportRun;
+use App\Models\ImportRunRow;
 use App\Models\User;
+use App\Services\ProductImportReferenceBatchService;
+use App\Services\ProductImportRunRowService;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Maatwebsite\Excel\Facades\Excel;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -26,7 +38,24 @@ class ProductImportController extends Controller
 {
     private const ASYNC_PREVIEW_ROW_THRESHOLD = 200;
 
-    public function __construct(private readonly ProductService $productService) {}
+    private const ORPHANED_PENDING_MINUTES = 360;
+
+    private const ORPHANED_RUNNING_MINUTES = 60;
+
+    private const STALE_CANCEL_REQUESTED_MINUTES = 60;
+
+    private const MAX_ACTIVE_RUNS_PER_USER = 2;
+
+    private const ACTIVE_RUN_STATUSES = [
+        ImportRun::STATUS_PENDING,
+        ImportRun::STATUS_RUNNING,
+        ImportRun::STATUS_CANCEL_REQUESTED,
+    ];
+
+    public function __construct(
+        private readonly ProductService $productService,
+        private readonly ProductImportRunRowService $rowService
+    ) {}
 
     public function template(): BinaryFileResponse
     {
@@ -35,6 +64,17 @@ class ProductImportController extends Controller
 
     public function preview(PreviewImportRequest $request): JsonResponse
     {
+        if ($request->filled('import_run_id')) {
+            $importRun = ImportRun::query()
+                ->where('entity', 'products')
+                ->visibleTo($request->user())
+                ->findOrFail($request->integer('import_run_id'));
+
+            if ($response = $this->validateRestartableValidationRun($importRun)) {
+                return $response;
+            }
+        }
+
         $import = new ProductImport($this->productService);
         try {
             $metadata = $import->previewMetadata(
@@ -69,12 +109,14 @@ class ProductImportController extends Controller
             ], 422);
         }
 
+        $rows = $this->visibleValidationRows($preview['rows']);
+
         return response()->json([
             'success' => true,
             'data' => [
-                'rows' => $preview['rows'],
-                'count' => count($preview['rows']),
-                'shown_count' => count($preview['rows']),
+                'rows' => $rows,
+                'count' => count($rows),
+                'shown_count' => count($rows),
                 'total_rows' => $preview['total_rows'],
                 'max_rows' => $preview['max_rows'],
                 'preview_limited' => $preview['preview_limited'],
@@ -92,7 +134,8 @@ class ProductImportController extends Controller
 
     public function execute(ExecuteImportRequest $request): JsonResponse
     {
-        $import = new ProductImport($this->productService);
+        $import = (new ProductImport($this->productService))
+            ->forMode($request->input('mode', ImportRun::MODE_CREATE_UPDATE));
         $import->execute($request->input('rows', []));
 
         return response()->json([
@@ -107,9 +150,154 @@ class ProductImportController extends Controller
         ]);
     }
 
-    public function import(PreviewImportRequest $request): JsonResponse
+    public function validateRows(ValidateProductImportRowsRequest $request): JsonResponse
     {
-        return $this->startFileRun($request, ImportRun::TYPE_IMPORT, $request->input('mode', ImportRun::MODE_CREATE_UPDATE));
+        $import = (new ProductImport($this->productService))
+            ->forMode($request->input('mode', ImportRun::MODE_VALIDATE_ONLY));
+
+        $import->validateRows($request->input('rows', []));
+        $summary = $import->referenceSummary();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'rows' => $this->visibleValidationRows($import->validationRows),
+                'count' => count($import->validationRows),
+                'success_count' => $import->successCount,
+                'error_count' => $import->errorCount,
+                'summary' => $summary,
+            ],
+        ]);
+    }
+
+    public function exportPreview(ExportProductImportPreviewRequest $request): \Symfony\Component\HttpFoundation\StreamedResponse
+    {
+        $spreadsheet = new Spreadsheet;
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Preview editado');
+
+        $columns = collect((new ProductImport($this->productService))->getColumns())
+            ->pluck('key')
+            ->values()
+            ->all();
+        $headers = array_merge(['Fila', 'Estado', 'Accion prevista', 'Errores'], $columns);
+
+        foreach ($headers as $index => $header) {
+            $sheet->setCellValue([$index + 1, 1], $header);
+        }
+
+        foreach ($request->validated('rows') as $rowIndex => $row) {
+            $sheetRow = $rowIndex + 2;
+            $errors = $row['__errors'] ?? [];
+
+            $sheet->setCellValue([1, $sheetRow], $row['__row'] ?? '');
+            $sheet->setCellValue([2, $sheetRow], ($row['__valid'] ?? false) ? 'Valida' : 'Con errores');
+            $sheet->setCellValue([3, $sheetRow], $row['__action_type'] ?? '');
+            $sheet->setCellValue([4, $sheetRow], is_array($errors) ? implode(' | ', $errors) : (string) $errors);
+
+            foreach ($columns as $columnIndex => $column) {
+                $value = $row[$column] ?? '';
+                $sheet->setCellValue([$columnIndex + 5, $sheetRow], is_array($value) ? json_encode($value, JSON_UNESCAPED_UNICODE) : $value);
+            }
+        }
+
+        foreach (range(1, count($headers)) as $columnIndex) {
+            $sheet->getColumnDimensionByColumn($columnIndex)->setAutoSize(true);
+        }
+
+        return response()->streamDownload(function () use ($spreadsheet): void {
+            (new Xlsx($spreadsheet))->save('php://output');
+        }, 'preview-productos-editado.xlsx', [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ]);
+    }
+
+    public function batchReferences(BatchProductImportReferencesRequest $request, ProductImportReferenceBatchService $batchService): JsonResponse
+    {
+        $data = $batchService->createReferences(
+            $request->validated('categories') ?? [],
+            $request->validated('brands') ?? []
+        );
+
+        activity('product_import')
+            ->causedBy($request->user())
+            ->event('references_batch_created')
+            ->withProperties([
+                'entity' => 'products',
+                'source' => 'references_batch',
+                'categories_count' => count($request->validated('categories') ?? []),
+                'brands_count' => count($request->validated('brands') ?? []),
+                'created_count' => (int) ($data['summary']['created_count'] ?? 0),
+                'error_count' => (int) ($data['summary']['error_count'] ?? 0),
+            ])
+            ->log('Referencias de importacion creadas en lote.');
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+        ], $data['summary']['error_count'] > 0 ? 207 : 201);
+    }
+
+    public function batchVehicleCandidates(BatchProductImportVehicleCandidatesRequest $request, ProductImportReferenceBatchService $batchService): JsonResponse
+    {
+        $data = $batchService->createVehicleCandidates($request->validated('candidates'));
+
+        activity('product_import')
+            ->causedBy($request->user())
+            ->event('vehicle_candidates_batch_created')
+            ->withProperties([
+                'entity' => 'products',
+                'source' => 'vehicle_candidates_batch',
+                'candidates_count' => count($request->validated('candidates')),
+                'created_count' => (int) ($data['summary']['created_count'] ?? 0),
+                'error_count' => (int) ($data['summary']['error_count'] ?? 0),
+            ])
+            ->log('Candidatos vehiculares de importacion creados en lote.');
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+        ], $data['summary']['error_count'] > 0 ? 207 : ($data['summary']['created_count'] > 0 ? 201 : 200));
+    }
+
+    public function import(StoreProductImportRequest $request): JsonResponse
+    {
+        if ($request->filled('validated_import_run_id')) {
+            return $this->startImportFromValidatedRun($request);
+        }
+
+        if (! $request->boolean('force_without_preview')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Primero valide el archivo completo antes de importarlo.',
+            ], 422);
+        }
+
+        if ($request->input('force_confirmation') !== 'IMPORTAR SIN PREVIEW') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Debe confirmar con IMPORTAR SIN PREVIEW para importar sin validacion previa.',
+            ], 422);
+        }
+
+        if (! $request->hasFile('file')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Debe seleccionar un archivo para importar sin preview.',
+            ], 422);
+        }
+
+        return $this->startFileRun(
+            $request,
+            ImportRun::TYPE_IMPORT,
+            $request->input('mode', ImportRun::MODE_CREATE_UPDATE),
+            null,
+            false,
+            [
+                'force_without_preview' => true,
+                'force_reason' => $request->input('force_reason'),
+            ]
+        );
     }
 
     public function validateFile(PreviewImportRequest $request): JsonResponse
@@ -117,8 +305,22 @@ class ProductImportController extends Controller
         return $this->startFileRun($request, ImportRun::TYPE_VALIDATION, ImportRun::MODE_VALIDATE_ONLY);
     }
 
-    private function startFileRun(PreviewImportRequest $request, string $runType, string $mode, ?array $metadata = null, bool $asyncPreview = false): JsonResponse
-    {
+    private function startFileRun(
+        PreviewImportRequest|StoreProductImportRequest $request,
+        string $runType,
+        string $mode,
+        ?array $metadata = null,
+        bool $asyncPreview = false,
+        array $summaryOverrides = []
+    ): JsonResponse {
+        $restartImportRunId = $runType === ImportRun::TYPE_VALIDATION && $request->filled('import_run_id')
+            ? $request->integer('import_run_id')
+            : null;
+
+        if ($response = $this->activeRunLimitResponse($request, $restartImportRunId)) {
+            return $response;
+        }
+
         $file = $request->file('file');
         $sheetIndex = $request->has('sheet_index') ? $request->integer('sheet_index') : null;
         $sheetName = $request->input('sheet_name');
@@ -146,9 +348,26 @@ class ProductImportController extends Controller
             $mode = $request->input('mode', $profile->mode ?? $mode);
         }
 
+        if ($metadata === null) {
+            try {
+                $metadata = (new ProductImport($this->productService))->previewMetadata(
+                    $file,
+                    $sheetIndex,
+                    $sheetName,
+                    $mapping
+                );
+            } catch (\RuntimeException $e) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                ], 422);
+            }
+        }
+
         if ($sheetName === null || trim((string) $sheetName) === '') {
             try {
-                $selectedSheet = $metadata['selected_sheet'] ?? (new ProductImport($this->productService))->resolveSelectedSheet($file, $sheetIndex, null, $mapping);
+                $selectedSheet = $metadata['selected_sheet']
+                    ?? (new ProductImport($this->productService))->resolveSelectedSheet($file, $sheetIndex, null, $mapping);
                 $sheetIndex = $selectedSheet['index'];
                 $sheetName = $selectedSheet['name'];
             } catch (\RuntimeException $e) {
@@ -159,6 +378,17 @@ class ProductImportController extends Controller
             }
         }
 
+        if ($runType === ImportRun::TYPE_VALIDATION && $request->filled('import_run_id')) {
+            return $this->restartValidationRun(
+                $request,
+                $mapping,
+                $sheetIndex,
+                $sheetName,
+                $metadata ?? [],
+                $asyncPreview
+            );
+        }
+
         $storedPath = $file->store('imports');
 
         if (! is_string($storedPath)) {
@@ -167,6 +397,16 @@ class ProductImportController extends Controller
                 'message' => 'No se pudo guardar el archivo para importarlo.',
             ], 500);
         }
+
+        $metadataSummary = [
+            'sheets' => $metadata['sheets'] ?? [],
+            'selected_sheet' => $metadata['selected_sheet'] ?? null,
+            'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
+            'detected_columns' => $metadata['detected_columns'] ?? [],
+            'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
+            'required_fields' => $metadata['required_fields'] ?? [],
+            'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+        ];
 
         $importRun = ImportRun::query()->create([
             'user_id' => $request->user()?->id,
@@ -183,17 +423,28 @@ class ProductImportController extends Controller
             'status' => ImportRun::STATUS_PENDING,
             'results' => [],
             'errors' => [],
-            'summary' => $asyncPreview ? [
+            'summary' => array_merge($metadataSummary, $asyncPreview ? [
                 'preview_async' => true,
-                'sheets' => $metadata['sheets'] ?? [],
-                'selected_sheet' => $metadata['selected_sheet'] ?? null,
-                'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
-                'detected_columns' => $metadata['detected_columns'] ?? [],
-                'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
-                'required_fields' => $metadata['required_fields'] ?? [],
-                'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
-            ] : [],
+            ] : [], $summaryOverrides),
         ]);
+
+        if (($summaryOverrides['force_without_preview'] ?? false) === true) {
+            $this->recordImportRunActivity(
+                $importRun,
+                $request,
+                'force_without_preview',
+                'Importacion iniciada sin preview validado.'
+            );
+        }
+
+        $this->recordImportRunActivity(
+            $importRun,
+            $request,
+            $runType === ImportRun::TYPE_VALIDATION ? 'validation_started' : 'import_started',
+            $runType === ImportRun::TYPE_VALIDATION
+                ? 'Validacion de importacion iniciada.'
+                : 'Importacion de productos iniciada.'
+        );
 
         ProcessProductImportRun::dispatch($importRun->id);
 
@@ -215,14 +466,301 @@ class ProductImportController extends Controller
                 'required_fields' => $metadata['required_fields'] ?? [],
                 'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
             ],
-            'message' => $asyncPreview
-                ? 'Previsualizacion en cola. Puede consultar el avance desde esta pantalla.'
-                : 'Importacion en proceso. Puede consultar el avance desde esta pantalla.',
+            'message' => $this->startFileRunMessage($runType, $asyncPreview),
         ]);
+    }
+
+    private function startFileRunMessage(string $runType, bool $asyncPreview): string
+    {
+        if ($asyncPreview) {
+            return 'Previsualizacion en cola. Puede consultar el avance desde esta pantalla.';
+        }
+
+        if ($runType === ImportRun::TYPE_VALIDATION) {
+            return 'Validacion en proceso. Puede consultar el avance desde esta pantalla.';
+        }
+
+        return 'Importacion en proceso. Puede consultar el avance desde esta pantalla.';
+    }
+
+    private function startImportFromValidatedRun(StoreProductImportRequest $request): JsonResponse
+    {
+        if ($response = $this->activeRunLimitResponse($request)) {
+            return $response;
+        }
+
+        $validationRun = ImportRun::query()
+            ->where('entity', 'products')
+            ->visibleTo($request->user())
+            ->findOrFail($request->integer('validated_import_run_id'));
+
+        if (
+            $validationRun->run_type !== ImportRun::TYPE_VALIDATION
+            || $validationRun->mode !== ImportRun::MODE_VALIDATE_ONLY
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El proceso seleccionado no es una validacion de productos.',
+            ], 422);
+        }
+
+        if ($validationRun->status !== ImportRun::STATUS_COMPLETED) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada aun no esta completada.',
+            ], 409);
+        }
+
+        if ((int) ($validationRun->summary['validation_rows_count'] ?? 0) <= 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada no tiene filas validadas.',
+            ], 422);
+        }
+
+        if ((int) $validationRun->error_count > 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada tiene errores pendientes.',
+            ], 422);
+        }
+
+        $summary = $validationRun->summary ?? [];
+        if (
+            ($summary['rows_dirty'] ?? false) === true
+            || (int) ($summary['rows_revision'] ?? 0) !== (int) ($summary['validated_rows_revision'] ?? 0)
+            || (($summary['full_revalidation_status'] ?? 'completed') !== 'completed')
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada tiene cambios pendientes de revalidacion completa.',
+            ], 422);
+        }
+
+        if ((int) ($summary['conflict_count'] ?? 0) > 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada tiene conflictos pendientes.',
+            ], 422);
+        }
+
+        if ($this->hasMissingValidationReferences($summary)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada tiene referencias pendientes.',
+            ], 422);
+        }
+
+        if (! $this->sourceFileExists($validationRun)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se encontro el archivo validado para importar.',
+            ], 422);
+        }
+
+        $storedPath = $this->copyValidatedImportSource($validationRun);
+        if ($storedPath === null) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudo preparar una copia del archivo validado para importar.',
+            ], 500);
+        }
+
+        $importRun = DB::transaction(function () use ($request, $validationRun, $storedPath, $summary): ImportRun {
+            $importRun = ImportRun::query()->create([
+                'user_id' => $request->user()?->id,
+                'entity' => 'products',
+                'import_profile_id' => $validationRun->import_profile_id,
+                'parent_import_run_id' => $validationRun->id,
+                'original_filename' => $validationRun->original_filename,
+                'stored_path' => $storedPath,
+                'sheet_index' => $validationRun->sheet_index,
+                'sheet_name' => $validationRun->sheet_name,
+                'run_type' => ImportRun::TYPE_IMPORT,
+                'mode' => $request->input('mode', ImportRun::MODE_CREATE_UPDATE),
+                'total_rows' => $validationRun->total_rows,
+                'mapping' => $validationRun->mapping ?? [],
+                'status' => ImportRun::STATUS_PENDING,
+                'results' => [],
+                'errors' => [],
+                'summary' => [
+                    'validated_import_run_id' => $validationRun->id,
+                    'source_validation_completed_at' => $validationRun->finished_at,
+                    'source_validation_rows_count' => (int) ($validationRun->summary['validation_rows_count'] ?? 0),
+                    'source_validation_error_count' => $validationRun->error_count,
+                    'source_validation_conflict_count' => (int) ($summary['conflict_count'] ?? 0),
+                    'source_rows_revision' => (int) ($summary['rows_revision'] ?? 0),
+                    'use_persisted_rows_snapshot' => $validationRun->rows()->exists(),
+                ],
+            ]);
+
+            if ($validationRun->rows()->exists()) {
+                $this->rowService->createSnapshot($validationRun, $importRun);
+            }
+
+            activity('product_import')
+                ->causedBy($request->user())
+                ->performedOn($importRun)
+                ->event('import_snapshot_created')
+                ->withProperties($this->importRunActivityProperties($importRun, [
+                    'validated_import_run_id' => $validationRun->id,
+                    'source_rows_revision' => (int) ($summary['rows_revision'] ?? 0),
+                ]))
+                ->log('Snapshot de filas persistidas preparado para importacion.');
+
+            return $importRun;
+        });
+
+        ProcessProductImportRun::dispatch($importRun->id);
+
+        activity('product_import')
+            ->causedBy($request->user())
+            ->performedOn($importRun)
+            ->event('validated_import_started')
+            ->withProperties($this->importRunActivityProperties($importRun, [
+                'validated_import_run_id' => $validationRun->id,
+            ]))
+            ->log('Importacion iniciada desde validacion completada.');
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'import_run_id' => $importRun->id,
+                'status' => $importRun->status,
+                'mode' => $importRun->mode,
+                'run_type' => $importRun->run_type,
+                'async' => false,
+                'total_rows' => $importRun->total_rows,
+                'preview_limited' => false,
+            ],
+            'message' => 'Importacion iniciada desde una validacion completada.',
+        ]);
+    }
+
+    private function restartValidationRun(PreviewImportRequest $request, array $mapping, ?int $sheetIndex, ?string $sheetName, array $metadata, bool $asyncPreview): JsonResponse
+    {
+        if ($response = $this->activeRunLimitResponse($request, $request->integer('import_run_id'))) {
+            return $response;
+        }
+
+        $importRun = ImportRun::query()
+            ->where('entity', 'products')
+            ->visibleTo($request->user())
+            ->findOrFail($request->integer('import_run_id'));
+
+        if ($response = $this->validateRestartableValidationRun($importRun)) {
+            return $response;
+        }
+
+        $file = $request->file('file');
+        $storedPath = $file->store('imports');
+
+        if (! is_string($storedPath)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudo guardar el archivo para importarlo.',
+            ], 500);
+        }
+
+        $previousStoredPath = $importRun->stored_path;
+
+        DB::transaction(function () use ($importRun, $request, $mapping, $sheetIndex, $sheetName, $metadata, $storedPath, $file, $asyncPreview): void {
+            $importRun->records()->delete();
+            $importRun->rows()->delete();
+            $importRun->update([
+                'user_id' => $request->user()?->id,
+                'import_profile_id' => $request->filled('profile_id') ? $request->integer('profile_id') : null,
+                'parent_import_run_id' => null,
+                'original_filename' => $file->getClientOriginalName(),
+                'stored_path' => $storedPath,
+                'sheet_index' => $sheetIndex,
+                'sheet_name' => $sheetName,
+                'run_type' => ImportRun::TYPE_VALIDATION,
+                'mode' => ImportRun::MODE_VALIDATE_ONLY,
+                'total_rows' => (int) ($metadata['selected_sheet']['row_count'] ?? 0),
+                'processed_rows' => 0,
+                'success_count' => 0,
+                'error_count' => 0,
+                'mapping' => $mapping,
+                'failed_rows' => [],
+                'status' => ImportRun::STATUS_PENDING,
+                'results' => [],
+                'errors' => [],
+                'summary' => array_merge($asyncPreview ? [
+                    'preview_async' => true,
+                ] : [], [
+                    'sheets' => $metadata['sheets'] ?? [],
+                    'selected_sheet' => $metadata['selected_sheet'] ?? null,
+                    'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
+                    'detected_columns' => $metadata['detected_columns'] ?? [],
+                    'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
+                    'required_fields' => $metadata['required_fields'] ?? [],
+                    'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+                ]),
+                'started_at' => null,
+                'finished_at' => null,
+            ]);
+        });
+
+        if (
+            is_string($previousStoredPath)
+            && $previousStoredPath !== ''
+            && $previousStoredPath !== $storedPath
+            && ! $this->storedPathIsReferenced($previousStoredPath)
+        ) {
+            Storage::disk('local')->delete($previousStoredPath);
+        }
+
+        ProcessProductImportRun::dispatch($importRun->id);
+        $this->recordImportRunActivity($importRun, $request, 'validation_restarted', 'Validacion persistida reiniciada.');
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'import_run_id' => $importRun->id,
+                'status' => $importRun->status,
+                'mode' => $importRun->mode,
+                'run_type' => $importRun->run_type,
+                'async' => $asyncPreview,
+                'total_rows' => $importRun->total_rows,
+                'preview_limited' => false,
+                'sheets' => $metadata['sheets'] ?? [],
+                'selected_sheet' => $metadata['selected_sheet'] ?? null,
+                'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
+                'detected_columns' => $metadata['detected_columns'] ?? [],
+                'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
+                'required_fields' => $metadata['required_fields'] ?? [],
+                'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+            ],
+            'message' => $asyncPreview
+                ? 'Previsualizacion actualizada en cola. Puede consultar el avance desde esta pantalla.'
+                : 'Validacion actualizada en cola. Puede consultar el avance desde esta pantalla.',
+        ]);
+    }
+
+    private function validateRestartableValidationRun(ImportRun $importRun): ?JsonResponse
+    {
+        if ($importRun->run_type !== ImportRun::TYPE_VALIDATION || $importRun->mode !== ImportRun::MODE_VALIDATE_ONLY) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Solo se puede actualizar una validacion de productos.',
+            ], 422);
+        }
+
+        if (! $importRun->isTerminal()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion anterior sigue en proceso. Espere a que termine antes de volver a validarla.',
+            ], 409);
+        }
+
+        return null;
     }
 
     public function runs(Request $request): JsonResponse
     {
+        $this->reconcileOrphanedImportRuns($request->user());
+
         $query = ImportRun::query()
             ->with('user:id,name')
             ->where('entity', 'products')
@@ -265,20 +803,28 @@ class ProductImportController extends Controller
 
         if ($request->has('can_retry_failed')) {
             $shouldRetry = $request->boolean('can_retry_failed');
-            $runs = $query->get()
-                ->filter(fn (ImportRun $run): bool => ($run->isTerminal() && $this->failedRowsForRetry($run) !== []) === $shouldRetry)
-                ->values();
 
-            $paginator = new LengthAwarePaginator(
-                $runs->forPage($page, $perPage)->values(),
-                $runs->count(),
-                $perPage,
-                $page,
-                ['path' => $request->url(), 'query' => $request->query()]
-            );
-        } else {
-            $paginator = $query->paginate($perPage);
+            $query->where(function ($query) use ($shouldRetry): void {
+                if ($shouldRetry) {
+                    $query->whereIn('status', ImportRun::TERMINAL_STATUSES)
+                        ->where(function ($query): void {
+                            $query->where('error_count', '>', 0)
+                                ->orWhereNotNull('failed_rows');
+                        });
+
+                    return;
+                }
+
+                $query->whereNotIn('status', ImportRun::TERMINAL_STATUSES)
+                    ->orWhere(function ($query): void {
+                        $query->whereIn('status', ImportRun::TERMINAL_STATUSES)
+                            ->where('error_count', 0)
+                            ->whereNull('failed_rows');
+                    });
+            });
         }
+
+        $paginator = $query->paginate($perPage);
 
         return response()->json([
             'success' => true,
@@ -299,6 +845,7 @@ class ProductImportController extends Controller
     public function run(Request $request, ImportRun $importRun): JsonResponse
     {
         $this->abortUnlessVisibleImportRun($importRun, $request->user());
+        $this->reconcileImportRun($importRun);
 
         return response()->json([
             'success' => true,
@@ -336,6 +883,10 @@ class ProductImportController extends Controller
             ], 409);
         }
 
+        if ($response = $this->activeRunLimitResponse($request, $importRun->id)) {
+            return $response;
+        }
+
         if ($importRun->mode === ImportRun::MODE_RETRY_FAILED && empty($importRun->failed_rows)) {
             return response()->json([
                 'success' => false,
@@ -365,23 +916,26 @@ class ProductImportController extends Controller
 
         $spreadsheet = new Spreadsheet;
         $sheet = $spreadsheet->getActiveSheet();
-        $headers = ['Fila', 'Hoja', 'Producto', 'SKU', 'System ID', 'Columna', 'Error', 'Valor', 'Sugerencia'];
+        $headers = ['Fila', 'Hoja', 'Producto', 'SKU', 'System ID', 'Accion prevista', 'Columna', 'Error', 'Valor actual', 'Valor importado', 'Sugerencia'];
 
         foreach ($headers as $index => $header) {
             $sheet->setCellValue([$index + 1, 1], $header);
         }
 
-        foreach (($importRun->errors ?? []) as $rowIndex => $error) {
+        foreach ($this->exportableErrors($importRun) as $rowIndex => $error) {
             $data = $error['data'] ?? [];
             $sheet->setCellValue([1, $rowIndex + 2], $error['row'] ?? '');
-            $sheet->setCellValue([2, $rowIndex + 2], $importRun->sheet_name ?? '');
+            $sheet->setCellValue([2, $rowIndex + 2], $error['sheet_name'] ?? $importRun->sheet_name ?? '');
             $sheet->setCellValue([3, $rowIndex + 2], $error['label'] ?? ($data['nombre'] ?? ''));
             $sheet->setCellValue([4, $rowIndex + 2], $data['sku'] ?? '');
             $sheet->setCellValue([5, $rowIndex + 2], $data['system_id'] ?? '');
-            $sheet->setCellValue([6, $rowIndex + 2], $error['column'] ?? '');
-            $sheet->setCellValue([7, $rowIndex + 2], $error['error'] ?? '');
-            $sheet->setCellValue([8, $rowIndex + 2], $error['value'] ?? '');
-            $sheet->setCellValue([9, $rowIndex + 2], $error['suggestion'] ?? '');
+            $change = collect($error['change_preview'] ?? [])->first();
+            $sheet->setCellValue([6, $rowIndex + 2], $error['action_type'] ?? ($data['action_type'] ?? $data['__action_type'] ?? ''));
+            $sheet->setCellValue([7, $rowIndex + 2], $error['column'] ?? ($change['label'] ?? $change['field'] ?? ''));
+            $sheet->setCellValue([8, $rowIndex + 2], $error['error'] ?? '');
+            $sheet->setCellValue([9, $rowIndex + 2], $change['current'] ?? '');
+            $sheet->setCellValue([10, $rowIndex + 2], $change['imported'] ?? ($error['value'] ?? ''));
+            $sheet->setCellValue([11, $rowIndex + 2], $error['suggestion'] ?? collect($error['conflicts'] ?? [])->pluck('message')->implode(' '));
         }
 
         return response()->streamDownload(function () use ($spreadsheet): void {
@@ -389,6 +943,183 @@ class ProductImportController extends Controller
         }, "errores-importacion-{$importRun->id}.xlsx", [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ]);
+    }
+
+    public function rows(Request $request, ImportRun $importRun): JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        $paginator = $this->importRunRowsQuery($request, $importRun)
+            ->orderBy('row_number')
+            ->paginate($this->rowsPerPage($request));
+
+        $counts = $this->rowService->summaryCounts($importRun);
+        $summary = $importRun->summary ?? [];
+        $serverScopeActions = [
+            'selected' => true,
+            'page' => true,
+            'filtered' => $paginator->total() <= 200,
+            'all' => $paginator->total() <= 200,
+        ];
+
+        return response()->json([
+            'success' => true,
+            'data' => $paginator->getCollection()
+                ->map(fn (ImportRunRow $row): array => $this->importRunRowPayload($row))
+                ->values(),
+            'meta' => [
+                'current_page' => $paginator->currentPage(),
+                'from' => $paginator->firstItem(),
+                'last_page' => $paginator->lastPage(),
+                'per_page' => $paginator->perPage(),
+                'to' => $paginator->lastItem(),
+                'total' => $paginator->total(),
+                'rows_revision' => (int) ($summary['rows_revision'] ?? 0),
+                'validated_rows_revision' => (int) ($summary['validated_rows_revision'] ?? 0),
+                'rows_dirty' => (bool) ($summary['rows_dirty'] ?? false),
+                'full_revalidation_status' => $summary['full_revalidation_status'] ?? 'completed',
+                'valid_count' => (int) ($counts['row_status_counts']['valid'] ?? 0),
+                'error_count' => (int) ($counts['row_status_counts']['error'] ?? 0),
+                'warning_count' => (int) ($counts['warning_count'] ?? 0),
+                'conflict_count' => (int) ($counts['conflict_count'] ?? 0),
+                'action_counts' => $counts['action_counts'] ?? [],
+                'retryable_failed_rows_count' => (int) ($counts['retryable_failed_rows_count'] ?? 0),
+                'server_scope_actions' => $serverScopeActions,
+                'revalidation_progress' => [
+                    'status' => $summary['full_revalidation_status'] ?? 'completed',
+                    'processed_rows' => (int) $importRun->processed_rows,
+                    'total_rows' => (int) $importRun->total_rows,
+                    'rows_revision' => (int) ($summary['rows_revision'] ?? 0),
+                    'validated_rows_revision' => (int) ($summary['validated_rows_revision'] ?? 0),
+                ],
+                'counts' => $counts,
+            ],
+        ]);
+    }
+
+    public function updateRows(UpdateProductImportRunRowsRequest $request, ImportRun $importRun): JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+        $data = $this->rowService->updateRows($importRun, $request->validated());
+
+        activity('product_import')
+            ->causedBy($request->user())
+            ->performedOn($importRun)
+            ->event('rows_edited')
+            ->withProperties($this->importRunActivityProperties($importRun, [
+                'rows_count' => count($data['rows']),
+                'rows_revision' => $data['rows_revision'],
+                'source' => 'rows_patch',
+            ]))
+            ->log('Filas de validacion corregidas.');
+
+        return response()->json([
+            'success' => true,
+            'data' => array_merge($data, [
+                'rows' => collect($data['rows'])->map(fn (ImportRunRow $row): array => $this->importRunRowPayload($row))->values(),
+            ]),
+        ]);
+    }
+
+    public function updateMapping(UpdateProductImportRunMappingRequest $request, ImportRun $importRun): JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        $data = $this->rowService->applyOperationalMapping(
+            $importRun,
+            $request->validated('mapping'),
+            $request->validated('visible_row_ids') ?? [],
+            (int) $request->validated('rows_revision')
+        );
+
+        if (($data['requires_full_restart'] ?? false) === true) {
+            return response()->json([
+                'success' => false,
+                'message' => $data['message'] ?? 'El cambio de mapping requiere reiniciar la validacion completa.',
+                'data' => [
+                    'requires_full_restart' => true,
+                ],
+            ], 409);
+        }
+
+        RevalidateProductImportRunRows::dispatch($importRun->id, $request->user()?->id);
+        $importRun->refresh();
+
+        activity('product_import')
+            ->causedBy($request->user())
+            ->performedOn($importRun)
+            ->event('mapping_operational_updated')
+            ->withProperties($this->importRunActivityProperties($importRun, [
+                'rows_revision' => (int) $data['rows_revision'],
+                'visible_rows_count' => collect($data['rows'])->count(),
+                'source' => 'operational_mapping',
+            ]))
+            ->log('Mapping operativo de importacion actualizado.');
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'import_run_id' => $importRun->id,
+                'mapping' => $importRun->mapping ?? [],
+                'rows_revision' => $data['rows_revision'],
+                'rows_dirty' => $data['rows_dirty'],
+                'full_revalidation_status' => $data['full_revalidation_status'],
+                'rows' => collect($data['rows'])->map(fn (ImportRunRow $row): array => $this->importRunRowPayload($row))->values(),
+            ],
+            'message' => 'Mapping operativo aplicado. Revalidacion completa en cola.',
+        ]);
+    }
+
+    public function revalidateRows(Request $request, ImportRun $importRun): JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        if (
+            $importRun->run_type !== ImportRun::TYPE_VALIDATION
+            || $importRun->mode !== ImportRun::MODE_VALIDATE_ONLY
+            || $importRun->status !== ImportRun::STATUS_COMPLETED
+        ) {
+            return response()->json(['success' => false, 'message' => 'La validacion seleccionada no admite revalidacion.'], 409);
+        }
+
+        if (! $importRun->rows()->exists()) {
+            return response()->json(['success' => false, 'message' => 'La validacion seleccionada no tiene filas persistidas para revalidar.'], 409);
+        }
+
+        $summary = $importRun->summary ?? [];
+        $currentStatus = (string) ($summary['full_revalidation_status'] ?? 'completed');
+
+        if (in_array($currentStatus, ['pending', 'running'], true)) {
+            return response()->json([
+                'success' => true,
+                'data' => ['full_revalidation_status' => $currentStatus],
+            ]);
+        }
+
+        if ($response = $this->activeRunLimitResponse($request)) {
+            return $response;
+        }
+
+        $importRun->update(['summary' => array_merge($summary, [
+            'full_revalidation_status' => 'pending',
+            'revalidation_requested_by_user_id' => $request->user()?->id,
+        ])]);
+        RevalidateProductImportRunRows::dispatch($importRun->id, $request->user()?->id);
+        $this->recordImportRunActivity($importRun, $request, 'rows_revalidation_requested', 'Revalidacion completa de filas solicitada.');
+
+        return response()->json([
+            'success' => true,
+            'data' => ['full_revalidation_status' => 'pending'],
+        ]);
+    }
+
+    public function errorRows(Request $request, ImportRun $importRun): JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        $request->merge(['has_errors' => true]);
+
+        return $this->rows($request, $importRun);
     }
 
     public function source(Request $request, ImportRun $importRun): BinaryFileResponse|JsonResponse
@@ -411,6 +1142,10 @@ class ProductImportController extends Controller
     public function retryFailed(Request $request, ImportRun $importRun): JsonResponse
     {
         $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        if ($response = $this->activeRunLimitResponse($request)) {
+            return $response;
+        }
 
         if (in_array($importRun->status, [ImportRun::STATUS_PENDING, ImportRun::STATUS_RUNNING, ImportRun::STATUS_CANCEL_REQUESTED], true)) {
             return response()->json([
@@ -459,6 +1194,8 @@ class ProductImportController extends Controller
 
         ProcessProductImportRun::dispatch($retryRun->id);
 
+        $this->recordImportRunActivity($retryRun, $request, 'retry_created', 'Reintento de filas fallidas creado.');
+
         return response()->json([
             'success' => true,
             'data' => [
@@ -473,13 +1210,82 @@ class ProductImportController extends Controller
         $this->abortUnlessVisibleImportRun($importRun, $request->user());
 
         if ($importRun->canCancel()) {
+            if ($importRun->status === ImportRun::STATUS_PENDING) {
+                $importRun->update([
+                    'status' => ImportRun::STATUS_CANCELLED,
+                    'finished_at' => now(),
+                    'summary' => array_merge($importRun->summary ?? [], [
+                        'cancelled_before_start' => true,
+                        'source_file_deleted' => false,
+                    ]),
+                ]);
+
+                $this->recordImportRunActivity(
+                    $importRun,
+                    $request,
+                    'cancelled',
+                    'Importacion cancelada antes de iniciar.'
+                );
+
+                return response()->json([
+                    'success' => true,
+                    'data' => ['status' => $importRun->refresh()->status],
+                    'message' => 'Importacion cancelada antes de ser tomada por la cola.',
+                ]);
+            }
+
             $importRun->update(['status' => ImportRun::STATUS_CANCEL_REQUESTED]);
+            $this->recordImportRunActivity(
+                $importRun,
+                $request,
+                'cancel_requested',
+                'Cancelacion de importacion solicitada.'
+            );
         }
 
         return response()->json([
             'success' => true,
             'data' => ['status' => $importRun->refresh()->status],
             'message' => 'Cancelacion solicitada. El proceso se detendra al terminar el bloque actual.',
+        ]);
+    }
+
+    public function destroy(Request $request, ImportRun $importRun): JsonResponse
+    {
+        $this->abortUnlessVisibleImportRun($importRun, $request->user());
+
+        if (! $importRun->canDeleteFromHistory()) {
+            return response()->json([
+                'success' => false,
+                'message' => $importRun->deleteBlockReason(),
+            ], 409);
+        }
+
+        $storedPath = $importRun->stored_path;
+
+        DB::transaction(function () use ($importRun): void {
+            $importRun->records()->delete();
+            $importRun->delete();
+        });
+
+        activity('product_import')
+            ->causedBy($request->user())
+            ->performedOn($importRun)
+            ->event('deleted')
+            ->withProperties($this->importRunActivityProperties($importRun, [
+                'import_run_id' => $importRun->id,
+                'status' => $importRun->status,
+                'source' => 'history_delete',
+            ]))
+            ->log('Importacion eliminada del historial.');
+
+        if (is_string($storedPath) && $storedPath !== '' && ! $this->storedPathIsReferenced($storedPath)) {
+            Storage::disk('local')->delete($storedPath);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Importacion eliminada del historial.',
         ]);
     }
 
@@ -512,6 +1318,13 @@ class ProductImportController extends Controller
             'defaults' => $data['defaults'] ?? [],
         ]);
 
+        activity('product_import')
+            ->causedBy($request->user())
+            ->performedOn($profile)
+            ->event('saved')
+            ->withProperties(['entity' => 'products'])
+            ->log('Perfil de importacion guardado.');
+
         return response()->json([
             'success' => true,
             'data' => $profile,
@@ -520,10 +1333,132 @@ class ProductImportController extends Controller
 
     private function failedRowsForRetry(ImportRun $importRun): array
     {
-        $rows = $importRun->failed_rows ?: $importRun->errors ?: [];
+        $rows = $importRun->rows()->where('status', 'error')->get()
+            ->map(fn (ImportRunRow $row): array => $this->importRunRowPayload($row))
+            ->filter(fn (array $row): bool => ! empty($row['data']))
+            ->values()
+            ->all();
+
+        if ($rows === []) {
+            $rows = $importRun->failed_rows ?: $importRun->errors ?: [];
+        }
 
         return collect($rows)
-            ->filter(fn ($row): bool => is_array($row) && ! empty($row['data']) && is_array($row['data']))
+            ->filter(fn ($row): bool => is_array($row)
+                && ! empty($row['data'])
+                && is_array($row['data']))
+            ->values()
+            ->all();
+    }
+
+    private function exportableErrors(ImportRun $importRun): array
+    {
+        $persistedRows = $importRun->rows()
+            ->where('status', 'error')
+            ->orderBy('row_number')
+            ->get()
+            ->map(fn (ImportRunRow $row): array => $this->importRunRowPayload($row))
+            ->all();
+
+        if ($persistedRows !== []) {
+            return $persistedRows;
+        }
+
+        $errors = $importRun->errors ?? [];
+        $failedRows = $this->failedRowsForRetry($importRun);
+
+        if (count($failedRows) > count($errors)) {
+            return $failedRows;
+        }
+
+        return $errors;
+    }
+
+    private function importRunRowsQuery(Request $request, ImportRun $importRun): \Illuminate\Database\Eloquent\Builder
+    {
+        $query = $importRun->rows()->getQuery();
+
+        if ($request->filled('status')) {
+            $query->where('status', $request->string('status')->toString());
+        }
+
+        if ($request->filled('action_type')) {
+            $query->where('action_type', $request->string('action_type')->toString());
+        }
+
+        if ($request->boolean('has_errors')) {
+            $query->where('status', 'error');
+        }
+
+        if ($request->boolean('has_conflicts')) {
+            $query->whereNotNull('conflicts')
+                ->whereRaw("CAST(conflicts AS TEXT) != '[]'");
+        }
+
+        if ($request->boolean('has_warnings')) {
+            $query->whereNotNull('warnings')
+                ->whereRaw("CAST(warnings AS TEXT) != '[]'");
+        }
+
+        if ($request->filled('search')) {
+            $search = mb_strtolower($request->string('search')->toString());
+            $query->where(function ($query) use ($search): void {
+                $query->where('search_text', 'LIKE', "%{$search}%")
+                    ->orWhere(function ($query) use ($search): void {
+                        $query->whereNull('search_text')
+                            ->where(function ($query) use ($search): void {
+                                $query->where('label', 'LIKE', "%{$search}%")
+                                    ->orWhereRaw('CAST(data AS TEXT) LIKE ?', ["%{$search}%"]);
+                            });
+                    });
+            });
+        }
+
+        return $query;
+    }
+
+    private function rowsPerPage(Request $request): int
+    {
+        return min(max($request->integer('per_page', 50), 1), 200);
+    }
+
+    private function importRunRowPayload(ImportRunRow $row): array
+    {
+        $errors = $row->errors ?? [];
+        $data = $row->data ?? [];
+        unset($data['imagen_url']);
+
+        return [
+            'id' => $row->id,
+            'row' => $row->row_number,
+            'sheet_name' => $row->sheet_name,
+            'status' => $row->status,
+            'is_valid' => $row->status !== 'error',
+            'action_type' => $row->action_type,
+            'label' => $row->label,
+            'data' => $data,
+            'errors' => $errors,
+            'warnings' => $row->warnings ?? [],
+            'conflicts' => $row->conflicts ?? [],
+            'change_preview' => $row->change_preview ?? [],
+            'error' => collect($errors)->implode(' | '),
+            'updated_at' => $row->updated_at,
+            'is_edited' => (bool) $row->is_edited,
+        ];
+    }
+
+    private function visibleValidationRows(array $rows): array
+    {
+        return collect($rows)
+            ->map(function (array $row): array {
+                unset($row['source_data']);
+
+                if (isset($row['data']) && is_array($row['data'])) {
+                    unset($row['data']['imagen_url']);
+                }
+
+                return $row;
+            })
             ->values()
             ->all();
     }
@@ -532,6 +1467,9 @@ class ProductImportController extends Controller
     {
         $hasSourceFile = $this->sourceFileExists($importRun);
         $summary = $importRun->summary ?? [];
+        $retryableFailedRowsCount = array_key_exists('retryable_failed_rows_count', $summary)
+            ? (int) $summary['retryable_failed_rows_count']
+            : $this->rowService->retryableFailedRowsCount($importRun);
 
         return [
             'id' => $importRun->id,
@@ -552,11 +1490,17 @@ class ProductImportController extends Controller
             'source_download_url' => $hasSourceFile ? "/api/v1/products/import/runs/{$importRun->id}/source" : null,
             'errors_download_url' => "/api/v1/products/import/runs/{$importRun->id}/errors.xlsx",
             'preview_async' => (bool) ($summary['preview_async'] ?? false),
+            'action_counts' => $summary['action_counts'] ?? [],
+            'conflict_count' => (int) ($summary['conflict_count'] ?? 0),
+            'unchanged_count' => (int) ($summary['unchanged_count'] ?? 0),
+            'can_delete' => $importRun->canDeleteFromHistory(),
+            'delete_block_reason' => $importRun->deleteBlockReason(),
             'user' => $importRun->user ? [
                 'id' => $importRun->user->id,
                 'name' => $importRun->user->name,
             ] : null,
-            'can_retry_failed' => $importRun->isTerminal() && $this->failedRowsForRetry($importRun) !== [],
+            'can_retry_failed' => $importRun->isTerminal() && $retryableFailedRowsCount > 0,
+            'retryable_failed_rows_count' => $retryableFailedRowsCount,
             'can_cancel' => $importRun->canCancel(),
             'started_at' => $importRun->started_at,
             'finished_at' => $importRun->finished_at,
@@ -574,9 +1518,9 @@ class ProductImportController extends Controller
             'results' => $importRun->results ?? [],
             'errors' => $importRun->errors ?? [],
             'summary' => $summary,
-            'validation_rows' => $summary['validation_rows'] ?? [],
+            'validation_rows' => [],
             'validation_rows_count' => $summary['validation_rows_count'] ?? 0,
-            'validation_rows_limited' => $summary['validation_rows_limited'] ?? false,
+            'validation_rows_limited' => (bool) ($summary['validation_rows_limited'] ?? ($summary['validation_rows_count'] ?? 0) > 0),
         ]);
     }
 
@@ -586,12 +1530,171 @@ class ProductImportController extends Controller
             return $importRun->isTerminal() ? 100 : 0;
         }
 
-        return (int) min(100, max(0, round(($importRun->processed_rows / $importRun->total_rows) * 100)));
+        return (int) min(
+            100,
+            max(0, round(($importRun->processed_rows / $importRun->total_rows) * 100))
+        );
     }
 
     private function abortUnlessVisibleImportRun(ImportRun $importRun, User $user): void
     {
         abort_unless($user->isAdmin() || $importRun->user_id === $user->id, 404);
+    }
+
+    private function reconcileOrphanedImportRuns(User $user): void
+    {
+        ImportRun::query()
+            ->where('entity', 'products')
+            ->visibleTo($user)
+            ->whereIn('status', [
+                ImportRun::STATUS_PENDING,
+                ImportRun::STATUS_RUNNING,
+                ImportRun::STATUS_CANCEL_REQUESTED,
+            ])
+            ->where(function ($query): void {
+                $query->where(function ($query): void {
+                    $query->where('status', ImportRun::STATUS_CANCEL_REQUESTED)
+                        ->where('updated_at', '<', now()->subMinutes(self::STALE_CANCEL_REQUESTED_MINUTES));
+                })
+                    ->orWhere(function ($query): void {
+                        $query->where('status', ImportRun::STATUS_PENDING)
+                            ->where('updated_at', '<', now()->subMinutes(self::ORPHANED_PENDING_MINUTES));
+                    })
+                    ->orWhere(function ($query): void {
+                        $query->where('status', ImportRun::STATUS_RUNNING)
+                            ->where('updated_at', '<', now()->subMinutes(self::ORPHANED_RUNNING_MINUTES));
+                    });
+            })
+            ->get()
+            ->each(fn (ImportRun $importRun): bool => $this->reconcileImportRun(
+                $importRun
+            ));
+    }
+
+    private function reconcileImportRun(ImportRun $importRun): bool
+    {
+        if ($importRun->status === ImportRun::STATUS_CANCEL_REQUESTED) {
+            if (! $importRun->updated_at?->lt(now()->subMinutes(self::STALE_CANCEL_REQUESTED_MINUTES))) {
+                return false;
+            }
+
+            return $importRun->update([
+                'status' => ImportRun::STATUS_CANCELLED,
+                'finished_at' => $importRun->finished_at ?? now(),
+                'summary' => array_merge($importRun->summary ?? [], [
+                    'cancel_reconciled' => true,
+                    'source_file_deleted' => false,
+                ]),
+            ]);
+        }
+
+        $isOrphanedPending = $importRun->status === ImportRun::STATUS_PENDING
+            && $importRun->updated_at?->lt(now()->subMinutes(self::ORPHANED_PENDING_MINUTES));
+        $isOrphanedRunning = $importRun->status === ImportRun::STATUS_RUNNING
+            && $importRun->updated_at?->lt(now()->subMinutes(self::ORPHANED_RUNNING_MINUTES));
+
+        if (! $isOrphanedPending && ! $isOrphanedRunning) {
+            return false;
+        }
+
+        return $importRun->update([
+            'status' => ImportRun::STATUS_FAILED,
+            'finished_at' => $importRun->finished_at ?? now(),
+            'errors' => $importRun->errors ?: [[
+                'error' => 'El proceso quedo huerfano y fue marcado como fallido para permitir recuperacion.',
+            ]],
+            'error_count' => max(1, (int) $importRun->error_count),
+            'summary' => array_merge($importRun->summary ?? [], [
+                'orphaned_recovered' => true,
+                'source_file_deleted' => false,
+            ]),
+        ]);
+    }
+
+    private function activeRunLimitResponse(Request $request, ?int $exceptImportRunId = null): ?JsonResponse
+    {
+        $user = $request->user();
+        if (! $user) {
+            return null;
+        }
+
+        $activeRuns = ImportRun::query()
+            ->where('entity', 'products')
+            ->where('user_id', $user->id)
+            ->whereIn('status', self::ACTIVE_RUN_STATUSES)
+            ->when($exceptImportRunId !== null, fn ($query) => $query->whereKeyNot($exceptImportRunId))
+            ->count();
+
+        if ($activeRuns < self::MAX_ACTIVE_RUNS_PER_USER) {
+            return null;
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Ya tienes procesos de importacion activos. Espera a que terminen o cancela uno antes de iniciar otro.',
+            'data' => [
+                'active_runs_count' => $activeRuns,
+                'active_runs_limit' => self::MAX_ACTIVE_RUNS_PER_USER,
+            ],
+        ], 409);
+    }
+
+    private function recordImportRunActivity(ImportRun $importRun, Request $request, string $event, string $description, array $properties = []): void
+    {
+        activity('product_import')
+            ->causedBy($request->user())
+            ->performedOn($importRun)
+            ->event($event)
+            ->withProperties($this->importRunActivityProperties($importRun, $properties))
+            ->log($description);
+    }
+
+    private function importRunActivityProperties(ImportRun $importRun, array $properties = []): array
+    {
+        $summary = $importRun->summary ?? [];
+
+        return array_merge([
+            'import_run_id' => $importRun->id,
+            'parent_import_run_id' => $importRun->parent_import_run_id,
+            'user_id' => $importRun->user_id,
+            'entity' => $importRun->entity,
+            'run_type' => $importRun->run_type,
+            'mode' => $importRun->mode,
+            'status' => $importRun->status,
+            'rows_revision' => (int) ($summary['rows_revision'] ?? $summary['source_rows_revision'] ?? 0),
+            'rows_count' => (int) ($summary['validation_rows_count'] ?? $importRun->total_rows),
+            'error_count' => (int) $importRun->error_count,
+            'source' => $summary['force_without_preview'] ?? false ? 'force_without_preview' : 'products_import',
+        ], $properties);
+    }
+
+    private function hasMissingValidationReferences(array $summary): bool
+    {
+        return ! empty($summary['missing_categories'] ?? [])
+            || ! empty($summary['missing_references']['brands'] ?? [])
+            || ! empty($summary['missingReferences']['brands'] ?? [])
+            || ! empty($summary['missing_vehicle_candidates'] ?? []);
+    }
+
+    private function copyValidatedImportSource(ImportRun $validationRun): ?string
+    {
+        if (! is_string($validationRun->stored_path) || $validationRun->stored_path === '') {
+            return null;
+        }
+
+        $extension = pathinfo($validationRun->stored_path, PATHINFO_EXTENSION);
+        $targetPath = 'imports/'.Str::uuid().($extension !== '' ? ".{$extension}" : '');
+
+        return Storage::disk('local')->copy($validationRun->stored_path, $targetPath)
+            ? $targetPath
+            : null;
+    }
+
+    private function storedPathIsReferenced(string $storedPath): bool
+    {
+        return ImportRun::query()
+            ->where('stored_path', $storedPath)
+            ->exists();
     }
 
     private function sourceFileExists(ImportRun $importRun): bool

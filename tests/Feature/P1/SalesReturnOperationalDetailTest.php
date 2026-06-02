@@ -202,13 +202,36 @@ it('returns operational detail for a sales return without mixing other returns',
         ->assertJsonPath('data.refund_context.method', 'cash')
         ->assertJsonPath('data.refund_context.refund_payment.id', $refundPayment->id)
         ->assertJsonPath('data.refund_context.customer_transaction.id', $customerTransaction->id)
+        ->assertJsonPath('data.documents.0.type', 'sales_return')
+        ->assertJsonPath('data.documents.0.id', $return->id)
+        ->assertJsonPath('data.documents.1.type', 'sales_order')
+        ->assertJsonPath('data.documents.1.id', $order->id)
         ->assertJsonPath('data.inventory_context.movements.0.id', $movement->id)
         ->assertJsonPath('data.ar_context.customer_transactions.0.id', $customerTransaction->id)
         ->assertJsonPath('data.workflow.can_approve', false)
-        ->assertJsonPath('data.workflow.can_reject', false);
+        ->assertJsonPath('data.workflow.can_reject', false)
+        ->assertJsonPath('data.workflow.actions.can_approve', false)
+        ->assertJsonPath('data.workflow.actions.can_open_order', true)
+        ->assertJsonPath('data.workflow.links.sales_order', "/sales-orders/{$order->id}");
 
     expect(collect($response->json('data.inventory_context.movements'))->pluck('reference_id')->unique()->all())
         ->toBe([$return->id]);
+
+    expect(collect($response->json('data.timeline'))->pluck('type')->all())
+        ->toContain('created', 'approved', 'refund_payment', 'customer_transaction', 'inventory_movement');
+
+    $refundEvent = collect($response->json('data.timeline'))->firstWhere('type', 'refund_payment');
+    expect($refundEvent['source'])->toBe('sales_order_payment')
+        ->and($refundEvent['actor_name'])->toBe($user->name)
+        ->and($refundEvent['href'])->toBe("/sales-orders/{$order->id}");
+
+    $timelineDates = collect($response->json('data.timeline'))
+        ->pluck('occurred_at')
+        ->filter()
+        ->values()
+        ->all();
+
+    expect($timelineDates)->toBe(collect($timelineDates)->sort()->values()->all());
 });
 
 it('approves balance returns without an open cash session and records customer credit context', function () {

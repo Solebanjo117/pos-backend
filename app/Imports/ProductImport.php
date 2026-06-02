@@ -8,6 +8,7 @@ use App\Models\Category;
 use App\Models\ImportRun;
 use App\Models\ImportRunRecord;
 use App\Models\Product;
+use App\Models\ProductAttribute;
 use App\Models\ProductVariant;
 use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
@@ -15,8 +16,10 @@ use App\Models\VehicleMake;
 use App\Models\VehicleModel;
 use App\Models\Warehouse;
 use App\Services\ProductService;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class ProductImport extends BaseImport
@@ -25,7 +28,18 @@ class ProductImport extends BaseImport
 
     public const REQUIRED_FIELDS = ['nombre', 'categoria'];
 
+    private const ACTION_CREATE = 'create';
+
+    private const ACTION_UPDATE = 'update';
+
+    private const ACTION_UNCHANGED = 'unchanged';
+
+    private const ACTION_CONFLICT = 'conflict';
+
+    private const ACTION_INVALID = 'invalid';
+
     private const LEGACY_HIDDEN_FIELDS = [
+        'imagen_url',
         'warehouse',
         'categorias_extra',
         'atributos',
@@ -43,9 +57,25 @@ class ProductImport extends BaseImport
 
     private array $missingBrands = [];
 
+    private array $missingCategories = [];
+
     private array $brandSuggestions = [];
 
+    private array $missingVehicleCandidates = [];
+
     private array $productIdsByImportKey = [];
+
+    private array $productsByImportKey = [];
+
+    private array $variantsBySystemId = [];
+
+    private array $variantsByBrandSku = [];
+
+    private array $variantSystemKeysByProduct = [];
+
+    private array $variantBrandSkuKeysByProduct = [];
+
+    private array $productMatchesByCategoryName = [];
 
     private ?Collection $cachedCategories = null;
 
@@ -60,6 +90,10 @@ class ProductImport extends BaseImport
     private array $vehicleNameResolutionCache = [];
 
     private array $vehicleCandidateCache = [];
+
+    private array $actionCounts = [];
+
+    private array $conflictCounts = [];
 
     public function __construct(private readonly ProductService $productService) {}
 
@@ -122,28 +156,14 @@ class ProductImport extends BaseImport
         $rowsForPreview = $this->extractRows($file, $sheetIndex, $sheetName, $mapping, $maxRows);
         $shownCount = $rowsForPreview->count();
         $totalRows = (int) ($selectedSheet['row_count'] ?? $shownCount);
-        $previewRows = $rowsForPreview
-            ->map(function (array $row): array {
-                $rowErrors = $this->validateRow($row);
-                $rowWarnings = $this->getWarningsForRow($row);
-
-                return [
-                    'row' => $row['__row'],
-                    'data' => $this->mapRowToPreview($row, $rowErrors, $rowWarnings),
-                    'is_valid' => empty($rowErrors),
-                    'errors' => $rowErrors,
-                    'warnings' => $rowWarnings,
-                ];
-            })
-            ->values()
-            ->all();
+        $previewRows = $this->buildPreviewRows($rowsForPreview);
 
         return [
             'rows' => $previewRows,
             'total_rows' => $totalRows,
             'max_rows' => $maxRows ?? $shownCount,
             'preview_limited' => $totalRows > $shownCount,
-            'summary' => $this->buildPreviewSummary($rowsForPreview),
+            'summary' => $this->buildPreviewSummary($rowsForPreview, $previewRows),
             'sheets' => $metadata['sheets'],
             'selected_sheet' => $selectedSheet,
             'recommended_sheet' => $metadata['recommended_sheet'],
@@ -190,10 +210,12 @@ class ProductImport extends BaseImport
 
     private function detectedColumns(array $sheet): array
     {
+        $labels = $sheet['source_header_labels'] ?? [];
+
         return collect($sheet['source_headers'] ?? [])
             ->map(fn (string $header): array => [
                 'key' => $header,
-                'label' => $header,
+                'label' => $labels[$header] ?? $header,
                 'suggested_field' => $this->suggestedFieldForHeader($header),
             ])
             ->values()
@@ -294,9 +316,10 @@ class ProductImport extends BaseImport
             'brand', 'marca_producto', 'marca_variante', 'variant', 'variante', 'manufacturer', 'fabricante' => 'brand',
             'descripcion', 'product_description', 'detalle' => 'descripcion',
             'categoria', 'category' => 'categoria',
-            'costo', 'cost', 'unit_cost', 'avg_cost' => 'costo',
+            'costo', 'cost', 'unit_cost', 'default_cost', 'avg_cost' => 'costo',
             'precio', 'price', 'retail_price', 'sale_price', 'unit_price' => 'precio',
             'cantidad', 'quantity', 'qty', 'stock', 'on_hand' => 'cantidad',
+            'imagen_url', 'url_imagen', 'image_url', 'image', 'imagen', 'foto', 'photo' => 'imagen_url',
             'warehouse', 'almacen', 'bodega' => 'warehouse',
             'categorias_extra', 'extra_categories', 'extra_category_ids' => 'categorias_extra',
             'atributos', 'attributes' => 'atributos',
@@ -321,6 +344,7 @@ class ProductImport extends BaseImport
         if (trim((string) ($row['categoria'] ?? '')) === '') {
             $errors[] = 'El campo categoria es obligatorio.';
         } elseif ($this->findCategoryByNameOrCode($row['categoria']) === null) {
+            $this->rememberMissingCategory((string) $row['categoria']);
             $errors[] = "La categoria '{$row['categoria']}' no existe. Creala primero para evitar duplicados.";
         }
 
@@ -339,10 +363,14 @@ class ProductImport extends BaseImport
         if (! $this->hasExplicitVehicleColumns($row) && trim((string) ($row['nombre'] ?? '')) !== '') {
             try {
                 $vehicleMatch = $this->resolveVehicleCompatibilityFromName((string) $row['nombre']);
-                if ($vehicleMatch === null && $this->vehicleCreationCandidateFromName((string) $row['nombre']) !== null) {
+                if ($vehicleMatch === null && ($candidate = $this->vehicleCreationCandidateFromName((string) $row['nombre'])) !== null) {
+                    $this->rememberMissingVehicleCandidate($candidate);
                     $errors[] = 'No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.';
                 }
             } catch (\RuntimeException $e) {
+                if (($candidate = $this->vehicleCreationCandidateFromName((string) $row['nombre'])) !== null) {
+                    $this->rememberMissingVehicleCandidate($candidate);
+                }
                 $errors[] = $e->getMessage();
             }
         }
@@ -361,6 +389,10 @@ class ProductImport extends BaseImport
 
         if (($row['cantidad'] ?? null) !== null && trim((string) $row['cantidad']) !== '' && $this->parseInteger($row['cantidad']) === null) {
             $errors[] = 'El campo cantidad debe ser numerico.';
+        }
+
+        if (($row['imagen_url'] ?? null) !== null && trim((string) $row['imagen_url']) !== '' && $this->imageUrlForRow($row) === null) {
+            $errors[] = 'La URL de imagen debe ser una URL valida.';
         }
 
         return $errors;
@@ -387,6 +419,7 @@ class ProductImport extends BaseImport
             'name' => $technicalName['clean_name'],
             'sku_base' => $this->nullIfEmpty($row['sku'] ?? null),
             'description' => $this->nullIfEmpty($row['descripcion'] ?? null),
+            'image_url' => $this->imageUrlForRow($row),
             'category_id' => $categoryId,
             'status' => 'active',
             'attributes' => $attributes,
@@ -448,6 +481,102 @@ class ProductImport extends BaseImport
         return $product;
     }
 
+    public function execute(array $rows): void
+    {
+        $this->prepareLookupContext(collect($rows));
+        $rowCollection = collect($rows);
+        $duplicateKeys = $this->duplicateRowKeys($rowCollection);
+
+        foreach ($rows as $row) {
+            $this->processedCount++;
+            $rowNum = (int) ($row['__row'] ?? 0);
+            $rowErrors = $this->validateRow($row);
+            $rowWarnings = $this->getWarningsForRow($row);
+            $previewData = $this->mapRowToPreview($row, $rowErrors, $rowWarnings);
+            $operation = $this->rowOperationPreview($row, $previewData, $rowErrors, $duplicateKeys);
+            $this->rememberOperationSummary($operation);
+
+            try {
+                $result = DB::transaction(function () use ($row, $rowErrors, $operation) {
+                    if (! empty($operation['conflicts'])) {
+                        throw new \RuntimeException(collect($operation['conflicts'])->pluck('message')->implode(' '));
+                    }
+
+                    if (! empty($rowErrors)) {
+                        throw new \RuntimeException(implode(' ', $rowErrors));
+                    }
+
+                    return $this->processRow($row);
+                });
+
+                $this->successCount++;
+                $this->results[] = [
+                    'row' => $rowNum,
+                    'status' => 'ok',
+                    'label' => $row[$this->getLabelColumn()] ?? '',
+                    'id' => $result instanceof Model ? $result->id : ($result['id'] ?? null),
+                    'action_type' => $operation['action_type'],
+                    'change_preview' => $operation['change_preview'],
+                ];
+            } catch (\Throwable $e) {
+                $this->errorCount++;
+                $this->errors[] = [
+                    'row' => $rowNum,
+                    'label' => $row[$this->getLabelColumn()] ?? '',
+                    'data' => $row,
+                    'error' => $e->getMessage(),
+                    'action_type' => $operation['action_type'],
+                    'change_preview' => $operation['change_preview'],
+                    'conflicts' => $operation['conflicts'],
+                ];
+            }
+        }
+    }
+
+    public function validateRows(array $rows): void
+    {
+        $this->validateRowsWithDuplicateKeys($rows, null);
+    }
+
+    public function validateRowsWithDuplicateKeys(array $rows, ?array $duplicateKeys): void
+    {
+        $previewRows = $this->buildPreviewRows(collect($rows), $duplicateKeys);
+
+        foreach ($previewRows as $previewRow) {
+            $this->processedCount++;
+            $this->validationRows[] = $previewRow;
+            $this->rememberOperationSummary($previewRow);
+
+            if ($previewRow['is_valid']) {
+                $this->successCount++;
+                $this->results[] = [
+                    'row' => $previewRow['row'],
+                    'status' => 'ok',
+                    'label' => $previewRow['data'][$this->getLabelColumn()] ?? '',
+                    'id' => null,
+                    'action_type' => $previewRow['action_type'],
+                    'change_preview' => $previewRow['change_preview'],
+                ];
+
+                continue;
+            }
+
+            $this->errorCount++;
+            $errorMessages = $previewRow['errors'] !== []
+                ? $previewRow['errors']
+                : collect($previewRow['conflicts'])->pluck('message')->all();
+            $this->errors[] = [
+                'row' => $previewRow['row'],
+                'label' => $previewRow['data'][$this->getLabelColumn()] ?? '',
+                'data' => $previewRow['data'],
+                'error' => implode(' ', $errorMessages),
+                'action_type' => $previewRow['action_type'],
+                'change_preview' => $previewRow['change_preview'],
+                'conflicts' => $previewRow['conflicts'],
+            ];
+        }
+    }
+
     public function validateFileInChunks(UploadedFile|string $file, int $chunkSize = 500, ?callable $afterChunk = null, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): void
     {
         $this->forMode(ImportRun::MODE_VALIDATE_ONLY);
@@ -458,6 +587,11 @@ class ProductImport extends BaseImport
     {
         $systemId = $this->nullIfEmpty($row['system_id'] ?? null);
         if ($systemId !== null) {
+            $key = $this->productSystemKey((int) $product->id, $systemId);
+            if (array_key_exists($key, $this->variantSystemKeysByProduct)) {
+                return $this->variantSystemKeysByProduct[$key];
+            }
+
             return ProductVariant::query()
                 ->where('product_id', $product->id)
                 ->where('system_id', $systemId)
@@ -471,13 +605,328 @@ class ProductImport extends BaseImport
             return false;
         }
 
+        $sku = $this->nullIfEmpty($row['sku'] ?? null) ?? ($product->sku_base ?? '');
+        $brandSkuKey = $this->productBrandSkuKey((int) $product->id, (int) $brand->id, $sku);
+        if (array_key_exists($brandSkuKey, $this->variantBrandSkuKeysByProduct)) {
+            return $this->variantBrandSkuKeysByProduct[$brandSkuKey];
+        }
+
         return $product->variants()
             ->where('brand_id', $brand->id)
-            ->where('sku', $this->nullIfEmpty($row['sku'] ?? null) ?? ($product->sku_base ?? ''))
+            ->where('sku', $sku)
             ->exists();
     }
 
-    private function buildPreviewSummary(Collection $rows): array
+    private function buildPreviewRows(Collection $rows, ?array $duplicateKeys = null): array
+    {
+        $this->prepareLookupContext($rows);
+        $duplicateKeys ??= $this->duplicateRowKeys($rows);
+
+        return $rows
+            ->map(function (array $row) use ($duplicateKeys): array {
+                $rowErrors = $this->validateRow($row);
+                $rowWarnings = $this->getWarningsForRow($row);
+                $previewData = $this->mapRowToPreview($row, $rowErrors, $rowWarnings);
+                $operation = $this->rowOperationPreview($row, $previewData, $rowErrors, $duplicateKeys);
+                $visibleData = array_merge($previewData, $operation);
+                unset($visibleData['imagen_url']);
+
+                return [
+                    'row' => $row['__row'],
+                    'data' => $visibleData,
+                    'is_valid' => empty($rowErrors) && $operation['action_type'] !== self::ACTION_CONFLICT,
+                    'errors' => $rowErrors,
+                    'warnings' => $rowWarnings,
+                    'action_type' => $operation['action_type'],
+                    'change_preview' => $operation['change_preview'],
+                    'conflicts' => $operation['conflicts'],
+                    'source_data' => $row['__source_data'] ?? null,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function duplicateRowKeys(Collection $rows): array
+    {
+        return $rows
+            ->map(fn (array $row): string => $this->rowConflictKey($row))
+            ->filter()
+            ->countBy()
+            ->all();
+    }
+
+    public function duplicateRowKeysForRows(array $rows): array
+    {
+        return $this->duplicateRowKeys(collect($rows));
+    }
+
+    private function rowConflictKey(array $row): string
+    {
+        $productKey = $this->productGroupingKey($row);
+        if ($productKey === '') {
+            return '';
+        }
+
+        return $productKey.'|'.$this->variantGroupingKey($row);
+    }
+
+    private function rowOperationPreview(array $row, array $previewData, array $errors, array $duplicateKeys): array
+    {
+        $conflicts = [];
+        $duplicateKey = $this->rowConflictKey($row);
+
+        if ($duplicateKey !== '' && (int) ($duplicateKeys[$duplicateKey] ?? 0) > 1) {
+            $conflicts[] = [
+                'field' => 'fila',
+                'type' => 'duplicate_in_file',
+                'message' => 'Hay otra fila con la misma identidad de producto y variante en este archivo.',
+            ];
+        }
+
+        $match = ['product' => null, 'variant' => null, 'conflicts' => []];
+        try {
+            $match = $this->previewExistingMatch($row);
+        } catch (\RuntimeException $e) {
+            $conflicts[] = [
+                'field' => 'producto',
+                'type' => 'database_conflict',
+                'message' => $e->getMessage(),
+            ];
+        }
+
+        $conflicts = array_merge($conflicts, $match['conflicts'] ?? []);
+        $changePreview = $this->buildChangePreview($row, $previewData, $match['product'] ?? null, $match['variant'] ?? null);
+
+        if ($conflicts !== []) {
+            $actionType = self::ACTION_CONFLICT;
+        } elseif ($errors !== []) {
+            $actionType = self::ACTION_INVALID;
+        } elseif (($match['product'] ?? null) === null) {
+            $actionType = self::ACTION_CREATE;
+        } elseif ($changePreview === []) {
+            $actionType = self::ACTION_UNCHANGED;
+        } else {
+            $actionType = self::ACTION_UPDATE;
+        }
+
+        return [
+            'action_type' => $actionType,
+            'change_preview' => $changePreview,
+            'conflicts' => $conflicts,
+        ];
+    }
+
+    /**
+     * @return array{product: ?Product, variant: ?ProductVariant, conflicts: array<int, array<string, string>>}
+     */
+    private function previewExistingMatch(array $row): array
+    {
+        $conflicts = [];
+        $variant = null;
+        $systemId = $this->nullIfEmpty($row['system_id'] ?? null);
+        $brandName = $this->brandNameForRow($row);
+        $brand = $brandName !== null ? $this->brandByName($brandName) : null;
+        $sku = $this->nullIfEmpty($row['sku'] ?? null);
+
+        if ($systemId !== null) {
+            $variant = array_key_exists($systemId, $this->variantsBySystemId)
+                ? $this->variantsBySystemId[$systemId]
+                : ProductVariant::query()
+                    ->with(['product.category', 'product.attributes', 'product.vehicleCompatibility', 'brand', 'pricing', 'inventory'])
+                    ->where('system_id', $systemId)
+                    ->first();
+        }
+
+        if ($variant === null && $brand !== null && $sku !== null) {
+            $brandSkuKey = $this->brandSkuKey((int) $brand->id, $sku);
+            $variant = array_key_exists($brandSkuKey, $this->variantsByBrandSku)
+                ? $this->variantsByBrandSku[$brandSkuKey]
+                : ProductVariant::query()
+                    ->with(['product.category', 'product.attributes', 'product.vehicleCompatibility', 'brand', 'pricing', 'inventory'])
+                    ->where('brand_id', $brand->id)
+                    ->where('sku', $sku)
+                    ->first();
+        }
+
+        $product = $variant?->product;
+        $previewProductData = $this->previewProductData($row);
+        $productByName = $previewProductData !== null ? $this->findExistingProduct($previewProductData) : null;
+
+        if ($product !== null && $productByName !== null && (int) $product->id !== (int) $productByName->id) {
+            $conflicts[] = [
+                'field' => 'system_id',
+                'type' => 'identity_mismatch',
+                'message' => 'El SKU/System ID apunta a un producto distinto al nombre y categoria detectados.',
+            ];
+        }
+
+        $product ??= $productByName;
+
+        return [
+            'product' => $product,
+            'variant' => $variant,
+            'conflicts' => $conflicts,
+        ];
+    }
+
+    private function previewProductData(array $row): ?array
+    {
+        $category = $this->findCategoryByNameOrCode($row['categoria'] ?? null);
+        if ($category === null) {
+            return null;
+        }
+
+        $categoryId = (int) $category->id;
+        $extraCategoryIds = $this->safeResolveExtraCategoryIds($row['categorias_extra'] ?? null, $categoryId);
+        $technicalName = $this->analyzeTechnicalName(
+            (string) ($row['nombre'] ?? ''),
+            $this->categoriesForTechnicalExtraction($category, $extraCategoryIds),
+        );
+
+        return [
+            'name' => $technicalName['clean_name'],
+            'sku_base' => $this->nullIfEmpty($row['sku'] ?? null),
+            'category_id' => $categoryId,
+            'image_url' => $this->imageUrlForRow($row),
+            'attributes' => $this->previewAttributes($row, $technicalName),
+            '__import_product_key' => $this->productImportKey($categoryId, (string) ($row['nombre'] ?? '')),
+        ];
+    }
+
+    private function buildChangePreview(array $row, array $previewData, ?Product $product, ?ProductVariant $variant): array
+    {
+        $changes = [];
+        $fields = [
+            'nombre' => ['label' => 'Nombre', 'current' => $product?->name, 'imported' => $previewData['nombre'] ?? null],
+            'sku' => ['label' => 'SKU', 'current' => $variant?->sku ?? $product?->sku_base, 'imported' => $row['sku'] ?? null],
+            'system_id' => ['label' => 'System ID', 'current' => $variant?->system_id, 'imported' => $row['system_id'] ?? null],
+            'brand' => ['label' => 'Marca / Variante', 'current' => $variant?->brand?->name, 'imported' => $this->brandNameForRow($row)],
+            'categoria' => ['label' => 'Categoria', 'current' => $product?->category?->name, 'imported' => $row['categoria'] ?? null],
+            'costo' => ['label' => 'Costo', 'current' => $this->formatPreviewMoney($variant?->pricing?->cost_base), 'imported' => $this->formatPreviewMoney($row['costo'] ?? null)],
+            'precio' => ['label' => 'Precio', 'current' => $this->formatPreviewMoney($variant?->pricing?->base_price), 'imported' => $this->formatPreviewMoney($row['precio'] ?? null)],
+            'cantidad' => ['label' => 'Cantidad', 'current' => $variant?->inventory?->sum('quantity_available'), 'imported' => $this->parseInteger($row['cantidad'] ?? null)],
+            'descripcion' => ['label' => 'Descripcion', 'current' => $product?->description, 'imported' => $row['descripcion'] ?? null],
+            'compatibilidad' => ['label' => 'Compatibilidad', 'current' => $product?->vehicleCompatibility?->count(), 'imported' => $this->previewCompatibilityCount($previewData)],
+            'variante' => ['label' => 'Variante detectada', 'current' => $this->previewVariantKeyForExistingVariant($variant), 'imported' => $previewData['__variant_preview']['variant_key'] ?? null],
+        ];
+
+        foreach ($fields as $field => $definition) {
+            $imported = $this->normalizePreviewValue($definition['imported'] ?? null);
+            if ($imported === null && $field !== 'compatibilidad') {
+                continue;
+            }
+
+            $current = $this->normalizePreviewValue($definition['current'] ?? null);
+            if ($current === $imported) {
+                continue;
+            }
+
+            $changes[] = [
+                'field' => $field,
+                'label' => $definition['label'],
+                'current' => $current,
+                'imported' => $imported,
+            ];
+        }
+
+        return $changes;
+    }
+
+    private function imageUrlForRow(array $row): ?string
+    {
+        $imageUrl = $this->nullIfEmpty($row['imagen_url'] ?? $row['image_url'] ?? null);
+
+        if ($imageUrl === null) {
+            return null;
+        }
+
+        if (! filter_var($imageUrl, FILTER_VALIDATE_URL) || ! Str::startsWith($imageUrl, ['http://', 'https://'])) {
+            return null;
+        }
+
+        return $imageUrl;
+    }
+
+    private function previewCompatibilityCount(array $previewData): int
+    {
+        $compatibility = $previewData['__compatibility'] ?? $previewData['__vehicle_compatibility'] ?? [];
+        if (! is_array($compatibility)) {
+            return 0;
+        }
+
+        if (array_is_list($compatibility)) {
+            return count($compatibility);
+        }
+
+        return collect($compatibility)
+            ->filter(fn (mixed $scope): bool => is_array($scope))
+            ->sum(fn (array $scope): int => count($scope));
+    }
+
+    private function normalizePreviewValue(mixed $value): string|int|float|null
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return $value;
+        }
+
+        $string = trim((string) $value);
+
+        if (is_numeric($string)) {
+            return (float) $string;
+        }
+
+        return $string === '' ? null : $string;
+    }
+
+    private function previewVariantKeyForExistingVariant(?ProductVariant $variant): ?string
+    {
+        if ($variant === null) {
+            return null;
+        }
+
+        if ($this->nullIfEmpty($variant->system_id) !== null) {
+            return 'system:'.$variant->system_id;
+        }
+
+        if ($this->nullIfEmpty($variant->sku) !== null) {
+            return 'sku:'.$variant->sku;
+        }
+
+        return null;
+    }
+
+    private function rememberOperationSummary(array $operation): void
+    {
+        $actionType = (string) ($operation['action_type'] ?? self::ACTION_INVALID);
+        $this->actionCounts[$actionType] = (int) ($this->actionCounts[$actionType] ?? 0) + 1;
+
+        foreach (($operation['conflicts'] ?? []) as $conflict) {
+            $type = (string) ($conflict['type'] ?? 'conflict');
+            $this->conflictCounts[$type] = (int) ($this->conflictCounts[$type] ?? 0) + 1;
+        }
+    }
+
+    private function actionCountsFromPreviewRows(array $previewRows): array
+    {
+        return collect($previewRows)
+            ->countBy(fn (array $row): string => (string) ($row['action_type'] ?? self::ACTION_INVALID))
+            ->all();
+    }
+
+    private function conflictCountsFromPreviewRows(array $previewRows): array
+    {
+        return collect($previewRows)
+            ->flatMap(fn (array $row): array => $row['conflicts'] ?? [])
+            ->countBy(fn (array $conflict): string => (string) ($conflict['type'] ?? 'conflict'))
+            ->all();
+    }
+
+    private function buildPreviewSummary(Collection $rows, array $previewRows = []): array
     {
         $groups = [];
         $missingCategories = [];
@@ -575,6 +1024,9 @@ class ProductImport extends BaseImport
             }
         }
 
+        $actionCounts = $this->actionCountsFromPreviewRows($previewRows);
+        $conflictCounts = $this->conflictCountsFromPreviewRows($previewRows);
+
         return [
             'groups' => collect($groups)
                 ->map(function (array $group): array {
@@ -616,6 +1068,10 @@ class ProductImport extends BaseImport
                 'categories' => collect($categorySuggestions)->unique('value')->values()->all(),
                 'brands' => collect($brandSuggestions)->unique('value')->values()->all(),
             ],
+            'action_counts' => $actionCounts,
+            'conflict_counts' => $conflictCounts,
+            'unchanged_count' => (int) ($actionCounts[self::ACTION_UNCHANGED] ?? 0),
+            'conflict_count' => collect($conflictCounts)->sum(),
         ];
     }
 
@@ -647,13 +1103,35 @@ class ProductImport extends BaseImport
     public function referenceSummary(): array
     {
         return [
+            'missing_categories' => array_values(array_unique($this->missingCategories)),
             'missing_references' => [
                 'brands' => array_values(array_unique($this->missingBrands)),
             ],
+            'missing_vehicle_candidates' => collect($this->missingVehicleCandidates)
+                ->unique(fn (array $candidate): string => $this->vehicleCandidateKey($candidate))
+                ->values()
+                ->all(),
             'suggestions' => [
                 'brands' => collect($this->brandSuggestions)->unique('value')->values()->all(),
             ],
+            'action_counts' => $this->actionCounts,
+            'conflict_counts' => $this->conflictCounts,
+            'unchanged_count' => (int) ($this->actionCounts[self::ACTION_UNCHANGED] ?? 0),
+            'conflict_count' => collect($this->conflictCounts)->sum(),
         ];
+    }
+
+    private function rememberMissingCategory(string $categoryName): void
+    {
+        $categoryName = trim($categoryName);
+        if ($categoryName !== '') {
+            $this->missingCategories[] = $categoryName;
+        }
+    }
+
+    private function rememberMissingVehicleCandidate(array $candidate): void
+    {
+        $this->missingVehicleCandidates[] = $candidate;
     }
 
     private function brandNameForRow(array $row): ?string
@@ -828,6 +1306,131 @@ class ProductImport extends BaseImport
         return mb_strtolower(trim(Str::ascii($value)));
     }
 
+    private function prepareLookupContext(Collection $rows): void
+    {
+        $systemIds = $rows
+            ->map(fn (array $row): ?string => $this->nullIfEmpty($row['system_id'] ?? null))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($systemIds->isNotEmpty()) {
+            $systemIds->each(function (string $systemId): void {
+                $this->variantsBySystemId[$systemId] ??= null;
+            });
+
+            ProductVariant::query()
+                ->with(['product.category', 'product.attributes', 'product.vehicleCompatibility', 'brand', 'pricing', 'inventory'])
+                ->whereIn('system_id', $systemIds)
+                ->get()
+                ->each(function (ProductVariant $variant): void {
+                    if ($variant->system_id !== null) {
+                        $this->variantsBySystemId[$variant->system_id] = $variant;
+                        $this->variantSystemKeysByProduct[$this->productSystemKey((int) $variant->product_id, $variant->system_id)] = true;
+                    }
+                });
+        }
+
+        $brandSkuPairs = $rows
+            ->map(function (array $row): ?array {
+                $sku = $this->nullIfEmpty($row['sku'] ?? null);
+                $brandName = $this->brandNameForRow($row);
+                $brand = $brandName !== null ? $this->brandByName($brandName) : null;
+
+                if ($brand === null || $sku === null) {
+                    return null;
+                }
+
+                return ['brand_id' => (int) $brand->id, 'sku' => $sku];
+            })
+            ->filter()
+            ->unique(fn (array $pair): string => $this->brandSkuKey($pair['brand_id'], $pair['sku']))
+            ->values();
+
+        if ($brandSkuPairs->isNotEmpty()) {
+            $brandSkuPairs->each(function (array $pair): void {
+                $this->variantsByBrandSku[$this->brandSkuKey($pair['brand_id'], $pair['sku'])] ??= null;
+            });
+
+            ProductVariant::query()
+                ->with(['product.category', 'product.attributes', 'product.vehicleCompatibility', 'brand', 'pricing', 'inventory'])
+                ->whereIn('brand_id', $brandSkuPairs->pluck('brand_id')->unique()->values())
+                ->whereIn('sku', $brandSkuPairs->pluck('sku')->unique()->values())
+                ->get()
+                ->each(function (ProductVariant $variant): void {
+                    if ($variant->sku !== null && $variant->brand_id !== null) {
+                        $this->variantsByBrandSku[$this->brandSkuKey((int) $variant->brand_id, $variant->sku)] = $variant;
+                        $this->variantBrandSkuKeysByProduct[$this->productBrandSkuKey((int) $variant->product_id, (int) $variant->brand_id, $variant->sku)] = true;
+                    }
+                });
+        }
+
+        $productLookupKeys = collect();
+        $categoryIds = collect();
+        $productNames = collect();
+
+        $rows->each(function (array $row) use ($productLookupKeys, $categoryIds, $productNames): void {
+            $productData = $this->previewProductData($row);
+            if ($productData === null) {
+                return;
+            }
+
+            $categoryId = (int) ($productData['category_id'] ?? 0);
+            $name = mb_strtolower(trim((string) ($productData['name'] ?? '')));
+
+            if ($categoryId <= 0 || $name === '') {
+                return;
+            }
+
+            $categoryIds->push($categoryId);
+            $productNames->push($name);
+            $productLookupKeys->push($this->productLookupKey($categoryId, $name));
+        });
+
+        if ($categoryIds->isEmpty()) {
+            return;
+        }
+
+        $productLookupKeys->each(function (string $key): void {
+            $this->productMatchesByCategoryName[$key] ??= collect();
+        });
+
+        Product::query()
+            ->with('attributes')
+            ->whereIn('category_id', $categoryIds->unique()->values())
+            ->whereIn(DB::raw('LOWER(name)'), $productNames->unique()->values())
+            ->get()
+            ->each(function (Product $product) use ($productLookupKeys): void {
+                $key = $this->productLookupKey((int) $product->category_id, mb_strtolower(trim((string) $product->name)));
+                if (! $productLookupKeys->contains($key)) {
+                    return;
+                }
+
+                $this->productMatchesByCategoryName[$key] ??= collect();
+                $this->productMatchesByCategoryName[$key]->push($product);
+            });
+    }
+
+    private function brandSkuKey(int $brandId, string $sku): string
+    {
+        return $brandId.'|'.$sku;
+    }
+
+    private function productSystemKey(int $productId, string $systemId): string
+    {
+        return $productId.'|'.$systemId;
+    }
+
+    private function productBrandSkuKey(int $productId, int $brandId, string $sku): string
+    {
+        return $productId.'|'.$brandId.'|'.$sku;
+    }
+
+    private function productLookupKey(int $categoryId, string $name): string
+    {
+        return $categoryId.'|'.mb_strtolower(trim($name));
+    }
+
     private function findExistingProduct(array $productData): ?Product
     {
         $name = mb_strtolower(trim((string) $productData['name']));
@@ -835,17 +1438,20 @@ class ProductImport extends BaseImport
         $importKey = $this->nullIfEmpty($productData['__import_product_key'] ?? null);
 
         if ($importKey !== null && isset($this->productIdsByImportKey[$importKey])) {
-            $product = Product::query()->find($this->productIdsByImportKey[$importKey]);
+            $product = $this->productsByImportKey[$importKey] ?? Product::query()->find($this->productIdsByImportKey[$importKey]);
             if ($product !== null) {
+                $this->productsByImportKey[$importKey] = $product;
+
                 return $product;
             }
         }
 
-        $matches = Product::query()
-            ->with('attributes')
-            ->where('category_id', $productData['category_id'] ?? null)
-            ->whereRaw('LOWER(name) = ?', [$name])
-            ->get();
+        $matches = $this->productMatchesByCategoryName[$this->productLookupKey((int) ($productData['category_id'] ?? 0), $name)]
+            ?? Product::query()
+                ->with('attributes')
+                ->where('category_id', $productData['category_id'] ?? null)
+                ->whereRaw('LOWER(name) = ?', [$name])
+                ->get();
 
         if ($matches->isEmpty()) {
             return null;
@@ -1124,15 +1730,12 @@ class ProductImport extends BaseImport
 
                 $modelSignalFound = true;
 
-                $chassisRecords = $entry['chassis'];
-                $engineRecords = $entry['engines'];
-
-                foreach ($chassisRecords as $chassis) {
+                foreach ($entry['chassis'] as $chassis) {
                     if (! $chassis instanceof VehicleChassis) {
                         continue;
                     }
 
-                    foreach ($engineRecords as $engine) {
+                    foreach ($entry['engines'] as $engine) {
                         if (! $engine instanceof VehicleEngine) {
                             continue;
                         }
@@ -1504,9 +2107,21 @@ class ProductImport extends BaseImport
     protected function mapRowToPreview(array $row, ?array $errors = null, ?array $warnings = null): array
     {
         $mapped = parent::mapRowToPreview($row, $errors, $warnings);
+
+        foreach (['costo', 'precio'] as $moneyField) {
+            $formatted = $this->formatPreviewMoney($row[$moneyField] ?? null);
+
+            if ($formatted !== null) {
+                $mapped[$moneyField] = $formatted;
+            }
+        }
+
         $category = $this->findCategoryByNameOrCode($row['categoria'] ?? null);
 
         if ($category !== null) {
+            $mapped['categoria'] = (int) $category->id;
+            $mapped['__category_label'] = $category->name;
+
             $extraCategoryIds = $this->safeResolveExtraCategoryIds($row['categorias_extra'] ?? null, (int) $category->id);
             $technicalName = $this->analyzeTechnicalName(
                 (string) ($row['nombre'] ?? ''),
@@ -1563,11 +2178,22 @@ class ProductImport extends BaseImport
             'system_id' => $this->nullIfEmpty($row['system_id'] ?? null),
             'sku' => $this->nullIfEmpty($row['sku'] ?? null),
             'brand' => $this->nullIfEmpty($row['brand'] ?? null) ?? 'Generica',
-            'costo' => $this->parseMoney($row['costo'] ?? null),
-            'precio' => $this->parseMoney($row['precio'] ?? null),
+            'costo' => $this->formatPreviewMoney($row['costo'] ?? null),
+            'precio' => $this->formatPreviewMoney($row['precio'] ?? null),
             'cantidad' => $this->parseInteger($row['cantidad'] ?? null),
             'warehouse' => $this->nullIfEmpty($row['warehouse'] ?? null),
         ];
+    }
+
+    private function formatPreviewMoney(mixed $value): ?string
+    {
+        $parsed = $this->parseMoney($value);
+
+        if ($parsed === null) {
+            return null;
+        }
+
+        return number_format($parsed, 2, '.', '');
     }
 
     /**
@@ -1744,6 +2370,8 @@ class ProductImport extends BaseImport
             $variant->update(['system_id' => $importSystemId]);
         }
 
+        $this->rememberVariantLookup($variant->refresh());
+
         if (! empty($variantData['pricing']) && $variant) {
             $pricing = $variant->pricing()->updateOrCreate([], $this->buildVariantPricingPayload(
                 $product->id,
@@ -1782,6 +2410,19 @@ class ProductImport extends BaseImport
         }
     }
 
+    private function rememberVariantLookup(ProductVariant $variant): void
+    {
+        if ($variant->system_id !== null) {
+            $this->variantsBySystemId[$variant->system_id] = $variant;
+            $this->variantSystemKeysByProduct[$this->productSystemKey((int) $variant->product_id, $variant->system_id)] = true;
+        }
+
+        if ($variant->sku !== null && $variant->brand_id !== null) {
+            $this->variantsByBrandSku[$this->brandSkuKey((int) $variant->brand_id, $variant->sku)] = $variant;
+            $this->variantBrandSkuKeysByProduct[$this->productBrandSkuKey((int) $variant->product_id, (int) $variant->brand_id, $variant->sku)] = true;
+        }
+    }
+
     private function recordImportModel(string $modelType, ?int $modelId, string $action, array $summary = []): void
     {
         if ($this->importRunId === null) {
@@ -1801,12 +2442,22 @@ class ProductImport extends BaseImport
     private function findExistingVariant(Product $product, int $brandId, string $sku, ?string $systemId): ?ProductVariant
     {
         if ($systemId !== null) {
-            $variant = ProductVariant::query()->where('system_id', $systemId)->first();
+            $variant = array_key_exists($systemId, $this->variantsBySystemId)
+                ? $this->variantsBySystemId[$systemId]
+                : ProductVariant::query()->where('system_id', $systemId)->first();
             if ($variant && (int) $variant->product_id !== (int) $product->id) {
                 throw new \RuntimeException("El System ID '{$systemId}' ya pertenece a otro producto.");
             }
 
             if ($variant) {
+                return $variant;
+            }
+        }
+
+        $brandSkuKey = $this->brandSkuKey($brandId, $sku);
+        if (array_key_exists($brandSkuKey, $this->variantsByBrandSku)) {
+            $variant = $this->variantsByBrandSku[$brandSkuKey];
+            if ($variant && (int) $variant->product_id === (int) $product->id) {
                 return $variant;
             }
         }

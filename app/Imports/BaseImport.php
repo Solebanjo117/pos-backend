@@ -260,10 +260,22 @@ abstract class BaseImport
 
         foreach ($sheetInfo as $index => $info) {
             $rawHeaders = $this->sheetHeader($file, $info['worksheetName'] ?? null);
-            $sourceHeaders = collect($rawHeaders)
-                ->map(fn ($header) => $this->normalizeRawHeader((string) $header))
-                ->filter(fn (string $header) => $header !== '')
-                ->values()
+            $sourceColumns = collect($rawHeaders)
+                ->map(function ($header): array {
+                    $label = trim((string) $header);
+
+                    return [
+                        'key' => $this->normalizeRawHeader($label),
+                        'label' => $label,
+                    ];
+                })
+                ->filter(fn (array $column): bool => $column['key'] !== '')
+                ->values();
+            $sourceHeaders = $sourceColumns
+                ->pluck('key')
+                ->all();
+            $sourceHeaderLabels = $sourceColumns
+                ->mapWithKeys(fn (array $column): array => [$column['key'] => $column['label']])
                 ->all();
             $headers = collect($sourceHeaders)
                 ->map(fn (string $header) => $this->applyHeaderMapping($this->mapHeader($header), $header, $mapping))
@@ -279,6 +291,7 @@ abstract class BaseImport
                 'row_count' => $rowCount,
                 'headers' => $headers,
                 'source_headers' => $sourceHeaders,
+                'source_header_labels' => $sourceHeaderLabels,
                 'matched_headers' => $analysis['matched_headers'],
                 'missing_required_headers' => $analysis['missing_required_headers'],
                 'score' => $analysis['score'],
@@ -317,13 +330,17 @@ abstract class BaseImport
         $resolvedIndex = $this->resolveSheetIndex($sheets, $sheetIndex, $sheetName);
         $resolvedSheetName = (string) ($sheets[$resolvedIndex]['name'] ?? '');
         $headers = null;
+        $sourceHeaders = null;
         $yielded = 0;
 
         foreach ($this->sheetRows($file, $resolvedSheetName, $maxRows) as $physicalRow => $values) {
             if ($headers === null) {
-                $headers = collect($values ?? [])
+                $sourceHeaders = collect($values ?? [])
+                    ->map(fn ($header): string => $this->normalizeRawHeader((string) $header))
+                    ->all();
+                $headers = collect($sourceHeaders)
                     ->map(function ($header) use ($mapping): string {
-                        $sourceHeader = $this->normalizeRawHeader((string) $header);
+                        $sourceHeader = (string) $header;
 
                         return $this->applyHeaderMapping($this->mapHeader($sourceHeader), $sourceHeader, $mapping);
                     })
@@ -333,8 +350,14 @@ abstract class BaseImport
             }
 
             $assoc = [];
+            $sourceData = [];
 
             foreach ($headers as $position => $header) {
+                $sourceHeader = $sourceHeaders[$position] ?? null;
+                if (is_string($sourceHeader) && $sourceHeader !== '') {
+                    $sourceData[$sourceHeader] = $this->cleanCell($values[$position] ?? null);
+                }
+
                 if ($header === '') {
                     continue;
                 }
@@ -342,6 +365,7 @@ abstract class BaseImport
             }
 
             $assoc['__row'] = $physicalRow;
+            $assoc['__source_data'] = $sourceData;
 
             if ($this->isEmptyDataRow($assoc)) {
                 continue;
@@ -384,6 +408,10 @@ abstract class BaseImport
                 }
             }
 
+            if ($this->hasSingleUnnamedSheet($sheets)) {
+                return (int) $sheets[0]['index'];
+            }
+
             throw new \RuntimeException("La hoja '{$sheetName}' no existe en el archivo.");
         }
 
@@ -398,6 +426,16 @@ abstract class BaseImport
         }
 
         return $this->recommendedSheetIndex($sheets);
+    }
+
+    /**
+     * CSV/TXT readers expose one unnamed sheet because the format has no sheet metadata.
+     *
+     * @param  array<int, array<string, mixed>>  $sheets
+     */
+    private function hasSingleUnnamedSheet(array $sheets): bool
+    {
+        return count($sheets) === 1 && trim((string) ($sheets[0]['name'] ?? '')) === '';
     }
 
     /**
@@ -699,6 +737,9 @@ abstract class BaseImport
     {
         foreach ($row as $key => $value) {
             if ($key === '__row') {
+                continue;
+            }
+            if ($key === '__source_data') {
                 continue;
             }
             if ($value !== null && $value !== '') {

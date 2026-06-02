@@ -3,11 +3,13 @@
 use App\Http\Requests\PreviewImportRequest;
 use App\Imports\ProductImport;
 use App\Jobs\ProcessProductImportRun;
+use App\Jobs\RevalidateProductImportRunRows;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\ImportProfile;
 use App\Models\ImportRun;
 use App\Models\ImportRunRecord;
+use App\Models\ImportRunRow;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductPricing;
@@ -24,6 +26,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -51,6 +54,26 @@ function productImportUploadedSpreadsheet(array $rows): UploadedFile
         $path,
         'lightspeed.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        null,
+        true
+    );
+}
+
+function productImportUploadedCsv(array $rows, string $filename = 'item_listings_local_matches.csv'): UploadedFile
+{
+    $path = tempnam(sys_get_temp_dir(), 'product-import-csv-').'.csv';
+    $handle = fopen($path, 'wb');
+
+    foreach ($rows as $row) {
+        fputcsv($handle, $row);
+    }
+
+    fclose($handle);
+
+    return new UploadedFile(
+        $path,
+        $filename,
+        'text/csv',
         null,
         true
     );
@@ -493,6 +516,86 @@ it('reports missing product brands in preview without creating them', function (
         ->assertJsonPath('data.summary.suggestions.brands.0.can_create', true);
 
     expect(Brand::query()->where('name', 'Shibumi')->exists())->toBeFalse();
+});
+
+it('classifies product preview rows as create update unchanged or conflict with change metadata', function () {
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $import = new ProductImport(app(ProductService::class));
+    $import->execute([
+        [
+            '__row' => 2,
+            'nombre' => 'Aceite existente',
+            'sku' => 'OIL-EXIST',
+            'system_id' => 'LS-EXIST',
+            'brand' => 'Shell',
+            'categoria' => 'Aceite Motor',
+            'costo' => '5.00',
+            'precio' => '7.00',
+            'descripcion' => 'Descripcion vigente',
+        ],
+        [
+            '__row' => 3,
+            'nombre' => 'Aceite sin cambios',
+            'sku' => 'OIL-SAME',
+            'system_id' => 'LS-SAME',
+            'brand' => 'Shell',
+            'categoria' => 'Aceite Motor',
+            'costo' => '6.00',
+            'precio' => '9.00',
+            'descripcion' => 'Descripcion estable',
+        ],
+    ]);
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Custom SKU', 'System ID', 'Brand', 'Category', 'Cost', 'Price', 'Detalle'],
+        ['Aceite nuevo', 'OIL-NEW', 'LS-NEW', 'Shell', 'Aceite Motor', '3.00', '4.00', 'Nuevo'],
+        ['Aceite existente', 'OIL-EXIST', 'LS-EXIST', 'Shell', 'Aceite Motor', '4.480000000', '$8.00', ''],
+        ['Aceite sin cambios', 'OIL-SAME', 'LS-SAME', 'Shell', 'Aceite Motor', '6.00', '9.00', ''],
+        ['Aceite duplicado', 'OIL-DUP', 'LS-DUP', 'Shell', 'Aceite Motor', '1.00', '2.00', 'Duplicado'],
+        ['Aceite duplicado', 'OIL-DUP', 'LS-DUP', 'Shell', 'Aceite Motor', '1.00', '2.00', 'Duplicado'],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $file,
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.rows.0.action_type', 'create')
+        ->assertJsonPath('data.rows.1.action_type', 'update')
+        ->assertJsonPath('data.rows.2.action_type', 'unchanged')
+        ->assertJsonPath('data.rows.3.action_type', 'conflict')
+        ->assertJsonPath('data.rows.4.action_type', 'conflict')
+        ->assertJsonPath('data.summary.action_counts.create', 1)
+        ->assertJsonPath('data.summary.action_counts.update', 1)
+        ->assertJsonPath('data.summary.action_counts.unchanged', 1)
+        ->assertJsonPath('data.summary.action_counts.conflict', 2)
+        ->assertJsonPath('data.summary.unchanged_count', 1);
+
+    $updateChanges = collect($response->json('data.rows.1.change_preview'));
+    expect($updateChanges->pluck('field')->all())->toContain('precio')
+        ->toContain('costo')
+        ->not->toContain('descripcion');
+
+    expect($updateChanges->firstWhere('field', 'costo'))
+        ->toMatchArray([
+            'current' => '5.00',
+            'imported' => '4.48',
+        ])
+        ->and($updateChanges->firstWhere('field', 'precio'))
+        ->toMatchArray([
+            'current' => '7.00',
+            'imported' => '8.00',
+        ]);
 });
 
 it('allows quick creation of a missing product brand as active', function () {
@@ -1268,26 +1371,87 @@ it('uses an explicitly selected sheet even when another sheet has a stronger imp
         ->assertJsonPath('data.rows.0.data.nombre', 'Producto manual');
 });
 
+it('ignores stale sheet names when processing csv product imports', function () {
+    Storage::fake('local');
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $file = productImportUploadedCsv([
+        ['Description', 'Custom SKU', 'System ID', 'Brand', 'Category', 'Cost', 'Price', 'Quantity'],
+        ['10W30 cuarto mineral', 'OIL-CSV', 'LS-CSV', 'Shell', 'Aceite Motor', '5.35', '6.42', '10'],
+    ]);
+
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'item_listings_local_matches.csv');
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'item_listings_local_matches.csv',
+        'stored_path' => $storedPath,
+        'sheet_index' => 0,
+        'sheet_name' => 'Worksheet',
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+
+    expect($importRun->refresh()->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->success_count)->toBe(1)
+        ->and(ProductVariant::query()->where('system_id', 'LS-CSV')->exists())->toBeTrue()
+        ->and($importRun->errors)->toBe([]);
+});
+
 it('allows import files larger than 25mb and rejects files larger than 100mb', function () {
     $rules = (new PreviewImportRequest)->rules();
 
-    $validLargeFile = UploadedFile::fake()->create(
-        'lightspeed.xlsx',
-        26000,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
+    $validLargePath = tempnam(sys_get_temp_dir(), 'product-import-large-').'.csv';
+    file_put_contents($validLargePath, "Description,Category,System ID\nAceite grande,Aceites,LS-LARGE\n".str_repeat(' ', 26 * 1024 * 1024));
+    $validLargeFile = new UploadedFile($validLargePath, 'lightspeed.csv', 'text/csv', null, true);
 
     $tooLargeFile = UploadedFile::fake()->create(
-        'lightspeed.xlsx',
+        'lightspeed.csv',
         102401,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        'text/csv'
     );
 
     expect(Validator::make(['file' => $validLargeFile], $rules)->passes())->toBeTrue()
         ->and(Validator::make(['file' => $tooLargeFile], $rules)->passes())->toBeFalse();
 });
 
-it('starts a queued full product import run from the uploaded file', function () {
+it('rejects product import files when the detected content does not match the format', function () {
+    $rules = (new PreviewImportRequest)->rules();
+
+    $validCsv = productImportUploadedCsv([
+        ['Description', 'Category', 'System ID'],
+        ['Aceite valido', 'Aceites', 'LS-MIME-OK'],
+    ]);
+
+    $fakeSpreadsheet = UploadedFile::fake()->create(
+        'lightspeed.xlsx',
+        12,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+
+    $wrongMime = UploadedFile::fake()->create(
+        'lightspeed.xlsx',
+        12,
+        'text/plain'
+    );
+
+    expect(Validator::make(['file' => $validCsv], $rules)->passes())->toBeTrue()
+        ->and(Validator::make(['file' => $fakeSpreadsheet], $rules)->passes())->toBeFalse()
+        ->and(Validator::make(['file' => $wrongMime], $rules)->passes())->toBeFalse();
+});
+
+it('rejects direct full product imports without a validated run or advanced confirmation', function () {
     Queue::fake();
     Storage::fake('local');
 
@@ -1296,11 +1460,10 @@ it('starts a queued full product import run from the uploaded file', function ()
         'is_active' => true,
     ]);
 
-    $file = UploadedFile::fake()->create(
-        'lightspeed.xlsx',
-        26000,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
+    $file = productImportUploadedCsv([
+        ['Description', 'Category', 'System ID'],
+        ['Aceite directo', 'Aceites', 'LS-DIRECT-BLOCKED'],
+    ]);
 
     $response = $this->actingAs($admin)->postJson('/api/v1/products/import', [
         'file' => $file,
@@ -1308,20 +1471,698 @@ it('starts a queued full product import run from the uploaded file', function ()
         'sheet_name' => 'SAMPLE UPLOAD LIGHTSPEED',
     ]);
 
+    $response->assertStatus(422)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('message', 'Primero valide el archivo completo antes de importarlo.');
+
+    expect(ImportRun::query()->count())->toBe(0);
+    Queue::assertNothingPushed();
+});
+
+it('starts a queued full product import run from a completed validation run', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Category', 'System ID'],
+        ['Aceite validado', 'Aceite Motor', 'LS-VALIDATED-IMPORT'],
+    ]);
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'validated-import.xlsx');
+
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'validated-import.xlsx',
+        'stored_path' => $storedPath,
+        'sheet_index' => 1,
+        'sheet_name' => 'SAMPLE UPLOAD LIGHTSPEED',
+        'mapping' => ['Description' => 'nombre', 'Category' => 'categoria'],
+        'status' => ImportRun::STATUS_COMPLETED,
+        'processed_rows' => 1,
+        'success_count' => 1,
+        'error_count' => 0,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['validation_rows_count' => 1],
+        'finished_at' => now(),
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'validated_import_run_id' => $validationRun->id,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+    ]);
+
     $response->assertOk()
         ->assertJsonPath('success', true)
         ->assertJsonPath('data.status', ImportRun::STATUS_PENDING)
         ->assertJsonStructure(['data' => ['import_run_id']]);
 
-    $importRun = ImportRun::query()->firstOrFail();
+    $importRun = ImportRun::query()
+        ->where('run_type', ImportRun::TYPE_IMPORT)
+        ->firstOrFail();
 
     expect($importRun->entity)->toBe('products')
-        ->and($importRun->original_filename)->toBe('lightspeed.xlsx')
+        ->and($importRun->parent_import_run_id)->toBe($validationRun->id)
+        ->and($importRun->stored_path)->not->toBe($storedPath)
+        ->and($importRun->original_filename)->toBe('validated-import.xlsx')
         ->and($importRun->sheet_index)->toBe(1)
         ->and($importRun->sheet_name)->toBe('SAMPLE UPLOAD LIGHTSPEED')
-        ->and($importRun->status)->toBe(ImportRun::STATUS_PENDING);
+        ->and($importRun->mapping)->toBe(['Description' => 'nombre', 'Category' => 'categoria'])
+        ->and($importRun->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($importRun->summary['source_validation_error_count'])->toBe(0)
+        ->and($importRun->summary['source_validation_conflict_count'])->toBe(0);
 
+    Storage::disk('local')->assertExists($validationRun->stored_path);
     Storage::disk('local')->assertExists($importRun->stored_path);
+    Queue::assertPushed(ProcessProductImportRun::class);
+});
+
+it('persists selective validation row edits and marks the validation run dirty', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'original_filename' => 'editable.xlsx',
+        'stored_path' => 'imports/editable.xlsx', 'status' => ImportRun::STATUS_COMPLETED,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 0, 'validated_rows_revision' => 0, 'rows_dirty' => false, 'full_revalidation_status' => 'completed'],
+    ]);
+    $row = ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id, 'row_number' => 2, 'status' => 'error',
+        'action_type' => 'invalid', 'label' => 'Aceite anterior',
+        'data' => ['nombre' => 'Aceite anterior', 'categoria' => 'Fantasma', 'brand' => 'Shell'],
+        'errors' => ['La categoria no existe.'], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    $response = $this->actingAs($admin)->patchJson("/api/v1/products/import/runs/{$importRun->id}/rows", [
+        'rows_revision' => 0,
+        'rows' => [['id' => $row->id, 'updated_at' => $row->updated_at?->toISOString(), 'data' => ['nombre' => 'Aceite corregido', 'sku' => '', 'categoria' => 'Aceites', 'brand' => 'Shell']]],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.rows_revision', 1)
+        ->assertJsonPath('data.rows_dirty', true)
+        ->assertJsonPath('data.full_revalidation_status', 'required')
+        ->assertJsonPath('data.rows.0.data.nombre', 'Aceite corregido')
+        ->assertJsonPath('data.rows.0.data.sku', '')
+        ->assertJsonPath('data.rows.0.is_valid', true);
+
+    $importRun->refresh();
+    $row->refresh();
+    expect($importRun->summary['rows_revision'])->toBe(1)
+        ->and($importRun->summary['groups'][0]['product_key'])->toBe('aceites|aceite corregido')
+        ->and($row->data['sku'])->toBe('')
+        ->and($row->is_edited)->toBeTrue()
+        ->and($row->validated_at)->not->toBeNull();
+});
+
+it('rejects stale selective validation row edits', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'summary' => ['rows_revision' => 2, 'validation_rows_count' => 1],
+    ]);
+    $row = ImportRunRow::query()->create(['import_run_id' => $importRun->id, 'row_number' => 2, 'status' => 'valid', 'data' => ['nombre' => 'Aceite']]);
+
+    $this->actingAs($admin)->patchJson("/api/v1/products/import/runs/{$importRun->id}/rows", [
+        'rows_revision' => 1,
+        'rows' => [['id' => $row->id, 'updated_at' => $row->updated_at?->toISOString(), 'data' => ['nombre' => 'Aceite editado']]],
+    ])->assertStatus(409);
+});
+
+it('queues full persisted row revalidation and blocks importing dirty validation runs', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Storage::disk('local')->put('imports/dirty.xlsx', 'source');
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'original_filename' => 'dirty.xlsx',
+        'stored_path' => 'imports/dirty.xlsx', 'status' => ImportRun::STATUS_COMPLETED, 'error_count' => 0,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 1, 'validated_rows_revision' => 0, 'rows_dirty' => true, 'full_revalidation_status' => 'required'],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id,
+        'row_number' => 2,
+        'status' => 'valid',
+        'data' => ['nombre' => 'Aceite', 'categoria' => 'Aceites'],
+        'errors' => [],
+        'warnings' => [],
+        'conflicts' => [],
+        'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', ['validated_import_run_id' => $importRun->id])
+        ->assertStatus(422)
+        ->assertJsonPath('message', 'La validacion seleccionada tiene cambios pendientes de revalidacion completa.');
+
+    $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRun->id}/revalidate")
+        ->assertOk()
+        ->assertJsonPath('data.full_revalidation_status', 'pending');
+
+    $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRun->id}/revalidate")
+        ->assertOk()
+        ->assertJsonPath('data.full_revalidation_status', 'pending');
+
+    Queue::assertPushed(RevalidateProductImportRunRows::class, 1);
+});
+
+it('creates an immutable persisted row snapshot when importing a validated run', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Storage::disk('local')->put('imports/validated-snapshot.xlsx', 'source');
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'original_filename' => 'validated-snapshot.xlsx',
+        'stored_path' => 'imports/validated-snapshot.xlsx', 'status' => ImportRun::STATUS_COMPLETED,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 3, 'validated_rows_revision' => 3, 'rows_dirty' => false, 'full_revalidation_status' => 'completed'],
+    ]);
+    $sourceRow = ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 2, 'status' => 'valid',
+        'action_type' => 'create', 'label' => 'Aceite corregido',
+        'data' => ['nombre' => 'Aceite corregido', 'categoria' => 'Aceites'],
+        'errors' => [], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', ['validated_import_run_id' => $validationRun->id])->assertOk();
+    $importRun = ImportRun::query()->where('parent_import_run_id', $validationRun->id)->firstOrFail();
+    $snapshot = $importRun->rows()->firstOrFail();
+    $sourceRow->update(['data' => ['nombre' => 'Cambio posterior']]);
+
+    expect($snapshot->data['nombre'])->toBe('Aceite corregido')
+        ->and($importRun->summary['source_rows_revision'])->toBe(3)
+        ->and($importRun->summary['use_persisted_rows_snapshot'])->toBeTrue();
+});
+
+it('copies persisted row source data when importing a validated run snapshot', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Storage::disk('local')->put('imports/source-data-snapshot.xlsx', 'source');
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'original_filename' => 'source-data-snapshot.xlsx',
+        'stored_path' => 'imports/source-data-snapshot.xlsx', 'status' => ImportRun::STATUS_COMPLETED,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 0, 'validated_rows_revision' => 0, 'rows_dirty' => false, 'full_revalidation_status' => 'completed'],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $validationRun->id, 'row_number' => 2, 'status' => 'valid',
+        'action_type' => 'create', 'label' => 'Aceite fuente',
+        'data' => ['nombre' => 'Aceite fuente', 'categoria' => 'Aceites', 'costo' => '1.00'],
+        'source_data' => ['description' => 'Aceite fuente', 'category' => 'Aceites', 'default_cost' => '1.00'],
+        'errors' => [], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', ['validated_import_run_id' => $validationRun->id])->assertOk();
+
+    $snapshot = ImportRun::query()
+        ->where('parent_import_run_id', $validationRun->id)
+        ->firstOrFail()
+        ->rows()
+        ->firstOrFail();
+
+    expect($snapshot->source_data)->toBe([
+        'description' => 'Aceite fuente',
+        'category' => 'Aceites',
+        'default_cost' => '1.00',
+    ]);
+});
+
+it('revalidates every persisted row and clears the dirty validation state', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 4, 'validated_rows_revision' => 3, 'rows_dirty' => true, 'full_revalidation_status' => 'pending'],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id, 'row_number' => 2, 'status' => 'error',
+        'data' => ['nombre' => 'Aceite corregido', 'categoria' => 'Aceites', 'brand' => 'Shell'],
+        'errors' => ['Error anterior'], 'warnings' => [], 'conflicts' => [], 'change_preview' => [], 'is_edited' => true,
+    ]);
+
+    (new RevalidateProductImportRunRows($importRun->id))->handle(app(ProductService::class), app(\App\Services\ProductImportRunRowService::class));
+    $importRun->refresh();
+    $row = $importRun->rows()->firstOrFail();
+
+    expect($importRun->summary['rows_dirty'])->toBeFalse()
+        ->and($importRun->summary['full_revalidation_status'])->toBe('completed')
+        ->and($importRun->summary['validated_rows_revision'])->toBe(4)
+        ->and($importRun->summary['groups'][0]['product_key'])->toBe('aceites|aceite corregido')
+        ->and($importRun->error_count)->toBe(0)
+        ->and($row->status)->toBe('valid')
+        ->and($row->is_edited)->toBeTrue();
+});
+
+it('persists source data for validated rows and remaps operational fields in the same run', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+
+    $file = productImportUploadedCsv([
+        ['Description', 'Category', 'Brand', 'Default Cost', 'Price', 'Qty.', 'Details'],
+        ['Aceite operativo', 'Aceites', 'Shell', '5.25', '7.50', '4', 'Descripcion rapida'],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => $file,
+        'mapping' => [
+            'description' => 'nombre',
+            'category' => 'categoria',
+            'brand' => 'brand',
+            'default_cost' => 'ignore',
+            'price' => 'ignore',
+            'qty' => 'ignore',
+            'details' => 'ignore',
+        ],
+    ])->assertOk();
+
+    $importRun = ImportRun::query()->firstOrFail();
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class), app(\App\Services\ProductImportRunRowService::class));
+    $importRun->refresh();
+    $row = $importRun->rows()->firstOrFail();
+
+    expect($row->source_data)->toMatchArray([
+        'default_cost' => '5.25',
+        'price' => '7.50',
+        'qty' => '4',
+        'details' => 'Descripcion rapida',
+    ]);
+
+    $response = $this->actingAs($admin)->patchJson("/api/v1/products/import/runs/{$importRun->id}/mapping", [
+        'rows_revision' => 0,
+        'mapping' => [
+            'description' => 'nombre',
+            'category' => 'categoria',
+            'brand' => 'brand',
+            'default_cost' => 'costo',
+            'price' => 'precio',
+            'qty' => 'cantidad',
+            'details' => 'descripcion',
+        ],
+        'visible_row_ids' => [$row->id],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.import_run_id', $importRun->id)
+        ->assertJsonPath('data.rows_revision', 1)
+        ->assertJsonPath('data.rows_dirty', true)
+        ->assertJsonPath('data.full_revalidation_status', 'pending')
+        ->assertJsonPath('data.rows.0.data.costo', '5.25')
+        ->assertJsonPath('data.rows.0.data.precio', '7.50')
+        ->assertJsonPath('data.rows.0.data.cantidad', '4')
+        ->assertJsonPath('data.rows.0.data.descripcion', 'Descripcion rapida');
+
+    $importRun->refresh();
+    expect(ImportRun::query()->count())->toBe(1)
+        ->and($importRun->mapping['default_cost'])->toBe('costo')
+        ->and($importRun->summary['rows_revision'])->toBe(1)
+        ->and($importRun->summary['pending_operational_mapping'])->toBe($importRun->mapping);
+
+    Queue::assertPushed(RevalidateProductImportRunRows::class, 1);
+
+    (new RevalidateProductImportRunRows($importRun->id))->handle(app(ProductService::class), app(\App\Services\ProductImportRunRowService::class));
+
+    $importRun->refresh();
+    $row->refresh();
+    expect($importRun->summary['full_revalidation_status'])->toBe('completed')
+        ->and($importRun->summary['rows_dirty'])->toBeFalse()
+        ->and($importRun->summary['validated_rows_revision'])->toBe(1)
+        ->and($row->data['costo'])->toBe('5.25')
+        ->and($row->data['precio'])->toBe('7.50')
+        ->and($row->data['cantidad'])->toBe('4')
+        ->and($row->data['descripcion'])->toBe('Descripcion rapida');
+});
+
+it('requires full restart when persisted mapping changes structural fields or lacks source data', function () {
+    Queue::fake();
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'mapping' => ['description' => 'nombre', 'category' => 'categoria'],
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 0, 'validated_rows_revision' => 0, 'rows_dirty' => false, 'full_revalidation_status' => 'completed'],
+    ]);
+    $row = ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id,
+        'row_number' => 2,
+        'status' => 'valid',
+        'data' => ['nombre' => 'Aceite', 'categoria' => 'Aceites'],
+        'errors' => [],
+        'warnings' => [],
+        'conflicts' => [],
+        'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->patchJson("/api/v1/products/import/runs/{$importRun->id}/mapping", [
+        'rows_revision' => 0,
+        'mapping' => ['item_name' => 'nombre', 'category' => 'categoria'],
+        'visible_row_ids' => [$row->id],
+    ])->assertStatus(409)
+        ->assertJsonPath('data.requires_full_restart', true);
+
+    $importRun->update(['mapping' => ['description' => 'nombre', 'category' => 'categoria']]);
+
+    $this->actingAs($admin)->patchJson("/api/v1/products/import/runs/{$importRun->id}/mapping", [
+        'rows_revision' => 0,
+        'mapping' => ['description' => 'nombre', 'category' => 'categoria', 'default_cost' => 'costo'],
+        'visible_row_ids' => [$row->id],
+    ])->assertStatus(409)
+        ->assertJsonPath('data.requires_full_restart', true);
+});
+
+it('revalidates persisted rows in chunks and detects duplicates across distant chunks', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'summary' => ['validation_rows_count' => 5000, 'rows_revision' => 2, 'validated_rows_revision' => 1, 'rows_dirty' => true, 'full_revalidation_status' => 'pending'],
+    ]);
+
+    foreach (array_chunk(range(1, 5000), 500) as $chunk) {
+        ImportRunRow::query()->insert(collect($chunk)->map(function (int $index) use ($importRun): array {
+            $isDuplicate = in_array($index, [1, 4998], true);
+
+            return [
+                'import_run_id' => $importRun->id,
+                'row_number' => $index + 1,
+                'status' => 'valid',
+                'action_type' => 'create',
+                'label' => "Aceite {$index}",
+                'data' => json_encode([
+                    'nombre' => $isDuplicate ? 'Aceite duplicado distante' : "Aceite {$index}",
+                    'sku' => $isDuplicate ? 'DUP-DISTANT' : "OIL-{$index}",
+                    'system_id' => $isDuplicate ? null : "SYS-{$index}",
+                    'brand' => 'Shell',
+                    'categoria' => 'Aceites',
+                ], JSON_UNESCAPED_UNICODE),
+                'errors' => json_encode([], JSON_UNESCAPED_UNICODE),
+                'warnings' => json_encode([], JSON_UNESCAPED_UNICODE),
+                'conflicts' => json_encode([], JSON_UNESCAPED_UNICODE),
+                'change_preview' => json_encode([], JSON_UNESCAPED_UNICODE),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+        })->all());
+    }
+
+    (new RevalidateProductImportRunRows($importRun->id))->handle(app(ProductService::class), app(\App\Services\ProductImportRunRowService::class));
+    $importRun->refresh();
+
+    $source = file_get_contents(app_path('Jobs/RevalidateProductImportRunRows.php'));
+    expect($source)->not->toContain('executableRows(')
+        ->and($importRun->processed_rows)->toBe(5000)
+        ->and($importRun->total_rows)->toBe(5000)
+        ->and($importRun->summary['rows_dirty'])->toBeFalse()
+        ->and($importRun->summary['full_revalidation_status'])->toBe('completed')
+        ->and($importRun->summary['retryable_failed_rows_count'])->toBe(2)
+        ->and($importRun->rows()->where('status', 'error')->count())->toBe(2)
+        ->and($importRun->rows()->where('row_number', 2)->firstOrFail()->conflicts[0]['type'])->toBe('duplicate_in_file')
+        ->and($importRun->rows()->where('row_number', 4999)->firstOrFail()->conflicts[0]['type'])->toBe('duplicate_in_file');
+});
+
+it('revalidates persisted rows after creating missing references in batch', function () {
+    Queue::fake();
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    productImportEnsureBrands(['Shell']);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY, 'status' => ImportRun::STATUS_COMPLETED,
+        'error_count' => 1,
+        'summary' => ['validation_rows_count' => 1, 'rows_revision' => 1, 'validated_rows_revision' => 0, 'rows_dirty' => true, 'full_revalidation_status' => 'required', 'missing_categories' => ['Aceites']],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id, 'row_number' => 2, 'status' => 'error',
+        'action_type' => 'invalid', 'label' => 'Aceite nuevo',
+        'data' => ['nombre' => 'Aceite nuevo', 'categoria' => 'Aceites', 'brand' => 'Shell'],
+        'errors' => ['La categoria no existe.'], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/references/batch', [
+        'categories' => ['Aceites'],
+        'brands' => [],
+    ])->assertCreated()
+        ->assertJsonPath('data.summary.created_count', 1);
+
+    $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRun->id}/revalidate")
+        ->assertOk()
+        ->assertJsonPath('data.full_revalidation_status', 'pending');
+
+    Queue::assertPushed(RevalidateProductImportRunRows::class, 1);
+    (new RevalidateProductImportRunRows($importRun->id))->handle(app(ProductService::class), app(\App\Services\ProductImportRunRowService::class));
+    $importRun->refresh();
+
+    expect($importRun->error_count)->toBe(0)
+        ->and($importRun->summary['rows_dirty'])->toBeFalse()
+        ->and($importRun->summary['missing_categories'] ?? [])->toBe([])
+        ->and($importRun->rows()->firstOrFail()->status)->toBe('valid');
+});
+
+it('imports corrected persisted snapshot rows instead of rereading the original file', function () {
+    Storage::fake('local');
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+    Storage::disk('local')->put('imports/snapshot-source.xlsx', 'not a spreadsheet');
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id, 'entity' => 'products', 'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE, 'status' => ImportRun::STATUS_PENDING,
+        'original_filename' => 'snapshot-source.xlsx', 'stored_path' => 'imports/snapshot-source.xlsx',
+        'summary' => ['use_persisted_rows_snapshot' => true],
+    ]);
+    ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id, 'row_number' => 2, 'status' => 'valid', 'action_type' => 'create',
+        'data' => ['nombre' => 'Aceite desde snapshot', 'categoria' => 'Aceites', 'brand' => 'Shell'],
+        'errors' => [], 'warnings' => [], 'conflicts' => [], 'change_preview' => [],
+    ]);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->success_count)->toBe(1)
+        ->and(Product::query()->where('name', 'Aceite desde snapshot')->exists())->toBeTrue();
+});
+
+it('does not delete shared product import source files while another run still references them', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $storedPath = 'imports/shared-source.xlsx';
+    Storage::disk('local')->put($storedPath, 'source');
+
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'shared-source.xlsx',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_COMPLETED,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['validation_rows_count' => 1],
+    ]);
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'parent_import_run_id' => $validationRun->id,
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'shared-source.xlsx',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_COMPLETED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)->deleteJson("/api/v1/products/import/runs/{$validationRun->id}")
+        ->assertOk();
+
+    Storage::disk('local')->assertExists($storedPath);
+
+    $this->actingAs($admin)->deleteJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertOk();
+
+    Storage::disk('local')->assertMissing($storedPath);
+});
+
+it('rejects importing from validation runs that are not completed', function (string $status, int $expectedStatus) {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'validation.xlsx',
+        'stored_path' => 'imports/validation.xlsx',
+        'status' => $status,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['validation_rows_count' => 1],
+    ]);
+    Storage::disk('local')->put('imports/validation.xlsx', 'xlsx');
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'validated_import_run_id' => $validationRun->id,
+    ])->assertStatus($expectedStatus)
+        ->assertJsonPath('success', false);
+
+    expect(ImportRun::query()->where('run_type', ImportRun::TYPE_IMPORT)->exists())->toBeFalse();
+    Queue::assertNothingPushed();
+})->with([
+    [ImportRun::STATUS_PENDING, 409],
+    [ImportRun::STATUS_RUNNING, 409],
+    [ImportRun::STATUS_FAILED, 409],
+    [ImportRun::STATUS_CANCELLED, 409],
+]);
+
+it('rejects importing from a completed validation run when its source file is missing', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'missing.xlsx',
+        'stored_path' => 'imports/missing.xlsx',
+        'status' => ImportRun::STATUS_COMPLETED,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['validation_rows_count' => 1],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'validated_import_run_id' => $validationRun->id,
+    ])->assertStatus(422)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('message', 'No se encontro el archivo validado para importar.');
+
+    Queue::assertNothingPushed();
+});
+
+it('rejects importing from completed validation runs with errors conflicts or missing references', function (array $overrides, string $message) {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Storage::disk('local')->put('imports/blocked-validation.xlsx', 'xlsx');
+
+    $summary = array_merge(['validation_rows_count' => 1], $overrides['summary'] ?? []);
+    $validationRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'blocked-validation.xlsx',
+        'stored_path' => 'imports/blocked-validation.xlsx',
+        'status' => ImportRun::STATUS_COMPLETED,
+        'error_count' => $overrides['error_count'] ?? 0,
+        'results' => [],
+        'errors' => [],
+        'summary' => $summary,
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'validated_import_run_id' => $validationRun->id,
+    ])->assertStatus(422)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('message', $message);
+
+    expect(ImportRun::query()->where('run_type', ImportRun::TYPE_IMPORT)->exists())->toBeFalse();
+    Queue::assertNothingPushed();
+})->with([
+    'errors' => [['error_count' => 1], 'La validacion seleccionada tiene errores pendientes.'],
+    'conflicts' => [['summary' => ['conflict_count' => 1]], 'La validacion seleccionada tiene conflictos pendientes.'],
+    'categories' => [['summary' => ['missing_categories' => ['Fantasma']]], 'La validacion seleccionada tiene referencias pendientes.'],
+    'brands' => [['summary' => ['missing_references' => ['brands' => ['Fantasma']]]], 'La validacion seleccionada tiene referencias pendientes.'],
+    'vehicles' => [['summary' => ['missing_vehicle_candidates' => [['label' => 'Toyota Yaris']]]], 'La validacion seleccionada tiene referencias pendientes.'],
+]);
+
+it('allows advanced direct full imports only with the exact confirmation', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedCsv([
+        ['Description', 'Category', 'System ID'],
+        ['Aceite urgente', 'Aceites', 'LS-FORCE-WRONG'],
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'file' => $file,
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR',
+    ])->assertStatus(422)
+        ->assertJsonPath('success', false);
+
+    expect(ImportRun::query()->count())->toBe(0);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'file' => productImportUploadedSpreadsheet([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite urgente', 'Aceites', 'LS-FORCE-OK'],
+        ]),
+        'sheet_index' => 1,
+        'sheet_name' => 'SAMPLE UPLOAD LIGHTSPEED',
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR SIN PREVIEW',
+        'force_reason' => 'Carga urgente aprobada por gerencia.',
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING);
+
+    $importRun = ImportRun::query()->firstOrFail();
+
+    expect($importRun->summary['force_without_preview'] ?? null)->toBeTrue()
+        ->and($importRun->summary['force_reason'] ?? null)->toBe('Carga urgente aprobada por gerencia.');
+
     Queue::assertPushed(ProcessProductImportRun::class);
 });
 
@@ -1573,7 +2414,15 @@ it('returns source download metadata in product import history and detail', func
         'error_count' => 0,
         'results' => [],
         'errors' => [],
-        'summary' => ['preview_async' => true],
+        'summary' => [
+            'preview_async' => true,
+            'action_counts' => [
+                'create' => 2,
+                'unchanged' => 1,
+            ],
+            'conflict_count' => 1,
+            'unchanged_count' => 1,
+        ],
     ]);
 
     $this->actingAs($admin)
@@ -1582,6 +2431,9 @@ it('returns source download metadata in product import history and detail', func
         ->assertJsonPath('data.0.id', $importRun->id)
         ->assertJsonPath('data.0.has_source_file', true)
         ->assertJsonPath('data.0.preview_async', true)
+        ->assertJsonPath('data.0.action_counts.create', 2)
+        ->assertJsonPath('data.0.conflict_count', 1)
+        ->assertJsonPath('data.0.unchanged_count', 1)
         ->assertJsonPath('data.0.user.name', $admin->name)
         ->assertJsonPath('data.0.source_download_url', "/api/v1/products/import/runs/{$importRun->id}/source")
         ->assertJsonPath('data.0.errors_download_url', "/api/v1/products/import/runs/{$importRun->id}/errors.xlsx");
@@ -1591,7 +2443,137 @@ it('returns source download metadata in product import history and detail', func
         ->assertOk()
         ->assertJsonPath('data.has_source_file', true)
         ->assertJsonPath('data.preview_async', true)
+        ->assertJsonPath('data.action_counts.unchanged', 1)
+        ->assertJsonPath('data.conflict_count', 1)
+        ->assertJsonPath('data.unchanged_count', 1)
         ->assertJsonPath('data.source_download_url', "/api/v1/products/import/runs/{$importRun->id}/source");
+});
+
+it('deletes a terminal product import run and its stored source file', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $storedPath = 'imports/item_listings_local_matches.csv';
+    Storage::disk('local')->put($storedPath, 'Description,Category');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'item_listings_local_matches.csv',
+        'stored_path' => $storedPath,
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_COMPLETED,
+        'total_rows' => 10,
+        'processed_rows' => 10,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    ImportRunRecord::query()->create([
+        'import_run_id' => $importRun->id,
+        'model_type' => Product::class,
+        'model_id' => null,
+        'action' => 'created',
+        'summary' => ['name' => 'Aceite'],
+    ]);
+
+    $this->actingAs($admin)
+        ->deleteJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('message', 'Importacion eliminada del historial.');
+
+    expect(ImportRun::query()->whereKey($importRun->id)->exists())->toBeFalse()
+        ->and(ImportRunRecord::query()->where('import_run_id', $importRun->id)->exists())->toBeFalse();
+
+    Storage::disk('local')->assertMissing($storedPath);
+});
+
+it('does not delete an active product import run', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $storedPath = 'imports/running.csv';
+    Storage::disk('local')->put($storedPath, 'Description,Category');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'running.csv',
+        'stored_path' => $storedPath,
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_RUNNING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)
+        ->deleteJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertStatus(409)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('message', 'No se puede eliminar una importacion en proceso.');
+
+    expect(ImportRun::query()->whereKey($importRun->id)->exists())->toBeTrue();
+    Storage::disk('local')->assertExists($storedPath);
+});
+
+it('reports whether product import runs can be deleted', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $completedRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'completed.csv',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_COMPLETED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $runningRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'running.csv',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_RUNNING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/products/import/runs?per_page=10')
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $runningRun->id)
+        ->assertJsonPath('data.0.can_delete', false)
+        ->assertJsonPath('data.0.delete_block_reason', 'No se puede eliminar una importacion en proceso.')
+        ->assertJsonPath('data.1.id', $completedRun->id)
+        ->assertJsonPath('data.1.can_delete', true)
+        ->assertJsonPath('data.1.delete_block_reason', null);
+
+    $this->actingAs($admin)
+        ->getJson("/api/v1/products/import/runs/{$runningRun->id}")
+        ->assertOk()
+        ->assertJsonPath('data.can_delete', false)
+        ->assertJsonPath('data.delete_block_reason', 'No se puede eliminar una importacion en proceso.');
 });
 
 it('lists recent product import runs ordered by newest first with progress flags', function () {
@@ -2000,13 +2982,13 @@ it('lets admins operate product import runs from other users', function () {
     $this->actingAs($admin)
         ->postJson("/api/v1/products/import/runs/{$pendingForeignRun->id}/cancel")
         ->assertOk()
-        ->assertJsonPath('data.status', ImportRun::STATUS_CANCEL_REQUESTED);
+        ->assertJsonPath('data.status', ImportRun::STATUS_CANCELLED);
 
     Queue::assertPushed(ProcessProductImportRun::class);
 });
 
 it('returns detected columns suggested mapping and applies manual mapping in preview', function () {
-    Category::create([
+    $category = Category::create([
         'name' => 'Aceite Motor',
         'slug' => 'aceite-motor',
     ]);
@@ -2035,8 +3017,245 @@ it('returns detected columns suggested mapping and applies manual mapping in pre
         ->assertJsonPath('data.suggested_mapping.item_name', 'ignore')
         ->assertJsonPath('data.required_fields.0', 'nombre')
         ->assertJsonPath('data.rows.0.data.nombre', 'Aceite manual')
-        ->assertJsonPath('data.rows.0.data.categoria', 'Aceite Motor')
+        ->assertJsonPath('data.rows.0.data.categoria', $category->id)
+        ->assertJsonPath('data.rows.0.data.__category_label', 'Aceite Motor')
         ->assertJsonPath('data.rows.0.data.system_id', 'MAN-001');
+});
+
+it('keeps original csv header labels and suggests lightspeed product mapping', function () {
+    $category = Category::create([
+        'name' => 'FILTRO',
+        'slug' => 'filtro',
+    ]);
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedCsv([
+        [
+            'System ID',
+            'UPC',
+            'EAN',
+            'Custom SKU',
+            'Manufact. SKU',
+            'Item',
+            'Vendor ID',
+            'Qty.',
+            'Price',
+            'Tax',
+            'Brand',
+            'Publish to eCom',
+            'Season',
+            'Department',
+            'MSRP',
+            'Tax Class',
+            'Default Cost',
+            'Vendor',
+            'Category',
+            'Subcategory 1',
+            'Subcategory 2',
+            'Subcategory 3',
+            'Subcategory 4',
+            'Subcategory 5',
+            'Subcategory 6',
+            'Subcategory 7',
+            'Subcategory 8',
+            'Subcategory 9',
+        ],
+        [
+            '210000000298',
+            '',
+            '',
+            'JT425K',
+            '35330-0W020 N/A',
+            'FILTRO ATM TOY YARIS',
+            '35330-0W021',
+            '2',
+            '$10.00',
+            'Yes',
+            '',
+            'No',
+            '',
+            '',
+            '0.00',
+            'Item',
+            '4.480000000',
+            'RENZO WBS',
+            'FILTRO',
+            'FILTRO ATM',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+        ],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $file,
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.detected_columns.0.key', 'system_id')
+        ->assertJsonPath('data.detected_columns.0.label', 'System ID')
+        ->assertJsonPath('data.detected_columns.3.key', 'custom_sku')
+        ->assertJsonPath('data.detected_columns.3.label', 'Custom SKU')
+        ->assertJsonPath('data.detected_columns.7.key', 'qty')
+        ->assertJsonPath('data.detected_columns.7.label', 'Qty.')
+        ->assertJsonPath('data.detected_columns.11.key', 'publish_to_ecom')
+        ->assertJsonPath('data.detected_columns.11.label', 'Publish to eCom')
+        ->assertJsonPath('data.detected_columns.15.key', 'tax_class')
+        ->assertJsonPath('data.detected_columns.15.label', 'Tax Class')
+        ->assertJsonPath('data.detected_columns.16.key', 'default_cost')
+        ->assertJsonPath('data.detected_columns.16.label', 'Default Cost')
+        ->assertJsonPath('data.detected_columns.18.key', 'category')
+        ->assertJsonPath('data.detected_columns.18.label', 'Category')
+        ->assertJsonPath('data.detected_columns.27.key', 'subcategory_9')
+        ->assertJsonPath('data.detected_columns.27.label', 'Subcategory 9')
+        ->assertJsonPath('data.suggested_mapping.system_id', 'system_id')
+        ->assertJsonPath('data.suggested_mapping.custom_sku', 'sku')
+        ->assertJsonPath('data.suggested_mapping.item', 'nombre')
+        ->assertJsonPath('data.suggested_mapping.qty', 'cantidad')
+        ->assertJsonPath('data.suggested_mapping.price', 'precio')
+        ->assertJsonPath('data.suggested_mapping.brand', 'brand')
+        ->assertJsonPath('data.suggested_mapping.category', 'categoria')
+        ->assertJsonPath('data.suggested_mapping.default_cost', 'costo')
+        ->assertJsonPath('data.suggested_mapping.upc', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.ean', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.manufact_sku', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.vendor_id', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.tax', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.publish_to_ecom', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.season', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.department', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.tax_class', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.vendor', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.subcategory_1', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.subcategory_9', 'ignore')
+        ->assertJsonPath('data.suggested_mapping.msrp', 'ignore')
+        ->assertJsonPath('data.rows.0.data.nombre', 'FILTRO ATM TOY YARIS')
+        ->assertJsonPath('data.rows.0.data.sku', 'JT425K')
+        ->assertJsonPath('data.rows.0.data.system_id', '210000000298')
+        ->assertJsonPath('data.rows.0.data.categoria', $category->id)
+        ->assertJsonPath('data.rows.0.data.__category_label', 'FILTRO')
+        ->assertJsonPath('data.rows.0.data.precio', '10.00')
+        ->assertJsonPath('data.rows.0.data.cantidad', '2')
+        ->assertJsonPath('data.rows.0.data.costo', '4.48');
+});
+
+it('keeps missing category text in preview when no category matches', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Category', 'Variant Code'],
+        ['Aceite sin categoria', 'Categoria Fantasma', 'MISS-CAT-001'],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $file,
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.rows.0.data.categoria', 'Categoria Fantasma')
+        ->assertJsonPath('data.rows.0.errors.0', "La categoria 'Categoria Fantasma' no existe. Creala primero para evitar duplicados.")
+        ->assertJsonPath('data.summary.missing_categories.0', 'Categoria Fantasma');
+});
+
+it('honors explicit ignore mappings before automatic product preview mapping', function () {
+    $category = Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor-ignore',
+    ]);
+    productImportEnsureBrands(['Generica']);
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Category', 'Variant Code'],
+        ['Aceite ignorado', 'Aceite Motor', 'IGN-001'],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $file,
+        'mapping' => [
+            'description' => 'ignore',
+            'category' => 'categoria',
+            'variant_code' => 'system_id',
+        ],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.rows.0.data.nombre', '')
+        ->assertJsonPath('data.rows.0.data.categoria', $category->id)
+        ->assertJsonPath('data.rows.0.data.__category_label', 'Aceite Motor')
+        ->assertJsonPath('data.rows.0.data.system_id', 'IGN-001')
+        ->assertJsonPath('data.rows.0.errors.0', 'El campo nombre es obligatorio.');
+});
+
+it('validate route returns and persists detected column metadata for a product import file', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Nombre', 'SKU', 'System ID', 'Brand', 'Categoria', 'Costo', 'Precio', 'Cantidad', 'Imagen URL', 'Descripcion'],
+        ['Bujia Iridium', 'SKU-001', '10000001', 'NGK', 'Encendido', '4.50', '7.99', '12', 'https://cdn.example.test/bujia.jpg', 'Bujia para motor gasolina'],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => $file,
+    ]);
+
+    $expectedMapping = [
+        'nombre' => 'nombre',
+        'sku' => 'sku',
+        'system_id' => 'system_id',
+        'brand' => 'brand',
+        'categoria' => 'categoria',
+        'costo' => 'costo',
+        'precio' => 'precio',
+        'cantidad' => 'cantidad',
+        'imagen_url' => 'ignore',
+        'descripcion' => 'descripcion',
+    ];
+
+    $response->assertOk()
+        ->assertJsonPath('data.detected_columns.0.key', 'nombre')
+        ->assertJsonPath('data.detected_columns.8.key', 'imagen_url')
+        ->assertJsonPath('data.suggested_mapping', $expectedMapping);
+
+    $importRun = ImportRun::query()->firstOrFail();
+
+    expect($importRun->mapping)->toBe([])
+        ->and($importRun->summary['detected_columns'][0]['key'])->toBe('nombre')
+        ->and($importRun->summary['detected_columns'][8]['key'])->toBe('imagen_url')
+        ->and($importRun->summary['suggested_mapping'])->toBe($expectedMapping)
+        ->and($importRun->summary)->toHaveKeys([
+            'sheets',
+            'selected_sheet',
+            'recommended_sheet',
+            'detected_columns',
+            'suggested_mapping',
+            'required_fields',
+            'sheet_detection_warning',
+        ]);
+
+    Queue::assertPushed(ProcessProductImportRun::class);
 });
 
 it('does not suggest hidden legacy product columns in preview mapping', function () {
@@ -2101,6 +3320,171 @@ it('validates a full product import without creating products', function () {
     Queue::assertPushed(ProcessProductImportRun::class);
 });
 
+it('restarts a terminal full product validation run in place when mapping changes', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $firstResponse = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedSpreadsheet([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite anterior', 'Aceites', 'LS-VALIDATE-OLD'],
+        ]),
+        'mapping' => [
+            'Description' => 'nombre',
+            'Category' => 'categoria',
+            'System ID' => 'system_id',
+        ],
+    ]);
+
+    $firstResponse->assertOk();
+
+    $importRun = ImportRun::query()->firstOrFail();
+    $originalStoredPath = $importRun->stored_path;
+    $importRun->rows()->create([
+        'row_number' => 2,
+        'status' => 'error',
+        'data' => ['nombre' => 'Aceite anterior'],
+        'errors' => ['Error anterior'],
+        'warnings' => [],
+        'conflicts' => [],
+        'change_preview' => [],
+    ]);
+    $importRun->records()->create([
+        'model_type' => Product::class,
+        'model_id' => null,
+        'action' => 'validated',
+        'summary' => ['name' => 'Aceite anterior'],
+    ]);
+    $importRun->update([
+        'status' => ImportRun::STATUS_COMPLETED,
+        'processed_rows' => 1,
+        'success_count' => 0,
+        'error_count' => 1,
+        'results' => [['row' => 2]],
+        'errors' => [['row' => 2, 'error' => 'Error anterior']],
+        'failed_rows' => [['row' => 2, 'error' => 'Error anterior']],
+        'summary' => ['old' => true],
+        'finished_at' => now(),
+    ]);
+
+    $secondResponse = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedSpreadsheet([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite actualizado', 'Aceites', 'LS-VALIDATE-NEW'],
+        ]),
+        'import_run_id' => $importRun->id,
+        'mapping' => [
+            'Description' => 'descripcion',
+            'Category' => 'categoria',
+            'System ID' => 'system_id',
+        ],
+    ]);
+
+    $secondResponse->assertOk()
+        ->assertJsonPath('data.import_run_id', $importRun->id)
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING);
+
+    $importRun->refresh();
+
+    expect(ImportRun::query()->count())->toBe(1)
+        ->and($importRun->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($importRun->mapping)->toBe([
+            'Description' => 'descripcion',
+            'Category' => 'categoria',
+            'System ID' => 'system_id',
+        ])
+        ->and($importRun->processed_rows)->toBe(0)
+        ->and($importRun->success_count)->toBe(0)
+        ->and($importRun->error_count)->toBe(0)
+        ->and($importRun->results)->toBe([])
+        ->and($importRun->errors)->toBe([])
+        ->and($importRun->failed_rows)->toBe([])
+        ->and($importRun->summary['old'] ?? null)->toBeNull()
+        ->and($importRun->rows()->exists())->toBeFalse()
+        ->and($importRun->records()->exists())->toBeFalse()
+        ->and($importRun->stored_path)->not->toBe($originalStoredPath);
+
+    Storage::disk('local')->assertMissing($originalStoredPath);
+    Storage::disk('local')->assertExists($importRun->stored_path);
+    Queue::assertPushed(ProcessProductImportRun::class, 2);
+});
+
+it('rejects restarting an active full product validation run in place', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'running.xlsx',
+        'stored_path' => 'imports/running.xlsx',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_RUNNING,
+        'mapping' => ['Description' => 'nombre'],
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    Storage::disk('local')->put($importRun->stored_path, 'old');
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedSpreadsheet([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite actualizado', 'Aceites', 'LS-VALIDATE-NEW'],
+        ]),
+        'import_run_id' => $importRun->id,
+        'mapping' => ['Description' => 'descripcion'],
+    ])->assertStatus(409)
+        ->assertJsonPath('message', 'La validacion anterior sigue en proceso. Espere a que termine antes de volver a validarla.');
+
+    expect($importRun->refresh()->stored_path)->toBe('imports/running.xlsx')
+        ->and($importRun->mapping)->toBe(['Description' => 'nombre']);
+    Storage::disk('local')->assertExists('imports/running.xlsx');
+    Queue::assertNothingPushed();
+});
+
+it('persists variant grouping metadata after validating a full product import file', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    Category::create(['name' => 'Terminales', 'slug' => 'terminales']);
+    productImportEnsureBrands(['555', 'CTR']);
+
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedSpreadsheet([
+            ['nombre', 'sku', 'system_id', 'brand', 'categoria'],
+            ['Terminal Rack', 'TIE-555', 'LS-001', '555', 'Terminales'],
+            ['Terminal Rack', 'TIE-CTR', 'LS-002', 'CTR', 'Terminales'],
+        ]),
+    ]);
+
+    $response->assertOk();
+
+    $importRun = ImportRun::query()->firstOrFail();
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+
+    $importRun->refresh();
+
+    expect($importRun->summary['groups'][0]['product_key'])->toBe('terminales|terminal rack')
+        ->and($importRun->summary['groups'][0]['variant_count'])->toBe(2)
+        ->and($importRun->summary['groups'][0]['variant_skus'])->toBe(['TIE-555', 'TIE-CTR'])
+        ->and($importRun->summary['productos_estimados'])->toBe(1)
+        ->and($importRun->summary['variantes_estimadas'])->toBe(2);
+});
+
 it('queues large product previews instead of validating every row during the request', function () {
     Queue::fake();
     Storage::fake('local');
@@ -2146,6 +3530,233 @@ it('queues large product previews instead of validating every row during the req
         ->and($importRun->total_rows)->toBe(251);
 
     Queue::assertPushed(ProcessProductImportRun::class);
+});
+
+it('updates an existing terminal async product preview run instead of creating another one', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $firstRows = collect(range(1, 251))
+        ->map(fn (int $index): array => [
+            "Aceite 10W30 {$index}",
+            "OIL-PREVIEW-{$index}",
+            "LS-PREVIEW-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $firstResponse = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => productImportUploadedSpreadsheet($firstRows),
+        'mapping' => [
+            'Description' => 'nombre',
+            'Custom SKU' => 'sku',
+            'System ID' => 'system_id',
+            'Brand' => 'marca',
+            'Category' => 'categoria',
+        ],
+    ]);
+
+    $firstResponse->assertOk()
+        ->assertJsonPath('data.async', true);
+
+    $importRun = ImportRun::query()->firstOrFail();
+    $originalStoredPath = $importRun->stored_path;
+    Storage::disk('local')->assertExists($originalStoredPath);
+
+    $importRun->records()->create([
+        'model_type' => Product::class,
+        'model_id' => null,
+        'action' => 'validated',
+        'summary' => ['name' => 'Aceite anterior'],
+    ]);
+    $importRun->update([
+        'status' => ImportRun::STATUS_COMPLETED,
+        'processed_rows' => 251,
+        'success_count' => 250,
+        'error_count' => 1,
+        'results' => [['row' => 2]],
+        'errors' => [['row' => 3]],
+        'failed_rows' => [['row' => 3]],
+        'summary' => ['preview_async' => true, 'old' => true],
+        'finished_at' => now(),
+    ]);
+
+    $secondRows = collect(range(1, 252))
+        ->map(fn (int $index): array => [
+            "Aceite 20W50 {$index}",
+            "OIL-REPREVIEW-{$index}",
+            "LS-REPREVIEW-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $secondResponse = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => productImportUploadedSpreadsheet($secondRows),
+        'import_run_id' => $importRun->id,
+        'mapping' => [
+            'Description' => 'nombre',
+            'Custom SKU' => 'sku',
+            'System ID' => 'system_id',
+            'Brand' => 'marca',
+            'Category' => 'categoria',
+        ],
+    ]);
+
+    $secondResponse->assertOk()
+        ->assertJsonPath('data.async', true)
+        ->assertJsonPath('data.import_run_id', $importRun->id)
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING)
+        ->assertJsonPath('data.total_rows', 252);
+
+    $importRun->refresh();
+
+    expect(ImportRun::query()->count())->toBe(1)
+        ->and($importRun->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($importRun->total_rows)->toBe(252)
+        ->and($importRun->processed_rows)->toBe(0)
+        ->and($importRun->success_count)->toBe(0)
+        ->and($importRun->error_count)->toBe(0)
+        ->and($importRun->results)->toBe([])
+        ->and($importRun->errors)->toBe([])
+        ->and($importRun->failed_rows)->toBe([])
+        ->and($importRun->summary['preview_async'])->toBeTrue()
+        ->and($importRun->summary['old'] ?? null)->toBeNull()
+        ->and($importRun->records()->exists())->toBeFalse()
+        ->and($importRun->stored_path)->not->toBe($originalStoredPath);
+
+    Storage::disk('local')->assertMissing($originalStoredPath);
+    Storage::disk('local')->assertExists($importRun->stored_path);
+    Queue::assertPushed(ProcessProductImportRun::class, 2);
+});
+
+it('does not let managers update another users async product preview run', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $manager = User::factory()->create([
+        'role' => 'manager',
+        'is_active' => true,
+    ]);
+    $otherManager = User::factory()->create([
+        'role' => 'manager',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $otherManager->id,
+        'entity' => 'products',
+        'original_filename' => 'other.xlsx',
+        'stored_path' => 'imports/other.xlsx',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_COMPLETED,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['preview_async' => true],
+    ]);
+    Storage::disk('local')->put($importRun->stored_path, 'old');
+
+    $rows = collect(range(1, 251))
+        ->map(fn (int $index): array => [
+            "Aceite 10W30 {$index}",
+            "OIL-PREVIEW-{$index}",
+            "LS-PREVIEW-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $this->actingAs($manager)
+        ->postJson('/api/v1/products/import/preview', [
+            'file' => productImportUploadedSpreadsheet($rows),
+            'import_run_id' => $importRun->id,
+        ])
+        ->assertNotFound();
+
+    expect($importRun->refresh()->stored_path)->toBe('imports/other.xlsx');
+    Storage::disk('local')->assertExists('imports/other.xlsx');
+    Queue::assertNothingPushed();
+});
+
+it('rejects repreviewing an active async product preview run', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'running.xlsx',
+        'stored_path' => 'imports/running.xlsx',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_RUNNING,
+        'mapping' => ['Description' => 'nombre'],
+        'results' => [],
+        'errors' => [],
+        'summary' => ['preview_async' => true],
+    ]);
+    Storage::disk('local')->put($importRun->stored_path, 'old');
+
+    $rows = collect(range(1, 251))
+        ->map(fn (int $index): array => [
+            "Aceite 10W30 {$index}",
+            "OIL-PREVIEW-{$index}",
+            "LS-PREVIEW-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $this->actingAs($admin)
+        ->postJson('/api/v1/products/import/preview', [
+            'file' => productImportUploadedSpreadsheet($rows),
+            'import_run_id' => $importRun->id,
+            'mapping' => ['Description' => 'descripcion'],
+        ])
+        ->assertStatus(409)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('message', 'La previsualizacion anterior sigue en proceso. Espere a que termine antes de volver a previsualizar.');
+
+    $importRun->refresh();
+
+    expect($importRun->stored_path)->toBe('imports/running.xlsx')
+        ->and($importRun->mapping)->toBe(['Description' => 'nombre']);
+    Storage::disk('local')->assertExists('imports/running.xlsx');
+    Queue::assertNothingPushed();
 });
 
 it('returns every row for small product previews and reports sheet totals', function () {
@@ -2309,7 +3920,51 @@ it('validates more than 200 product rows in a full validation job', function () 
         ->and(Product::query()->count())->toBe(0);
 });
 
-it('exposes every validated row in full validation run details', function () {
+it('persists fifteen hundred product validation rows outside the import run summary', function () {
+    Storage::fake('local');
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor-1500',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $rows = collect(range(1, 1500))
+        ->map(fn (int $index): array => [
+            "Aceite 15W40 {$index}",
+            "OIL-15W40-{$index}",
+            "LS-1500-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $file = productImportUploadedSpreadsheet($rows);
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'validate-1500-products.xlsx');
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'validate-1500-products.xlsx',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->processed_rows)->toBe(1500)
+        ->and(array_key_exists('validation_rows', $importRun->summary))->toBeFalse()
+        ->and($importRun->summary['validation_rows_count'])->toBe(1500)
+        ->and(ImportRunRow::query()->where('import_run_id', $importRun->id)->count())->toBe(1500);
+});
+
+it('persists validated product rows and exposes them through paginated run rows endpoints', function () {
     Storage::fake('local');
 
     $admin = User::factory()->create([
@@ -2360,18 +4015,36 @@ it('exposes every validated row in full validation run details', function () {
         ->assertJsonPath('data.success_count', 500)
         ->assertJsonPath('data.error_count', 1)
         ->assertJsonPath('data.validation_rows_count', 501)
-        ->assertJsonPath('data.validation_rows_limited', false)
-        ->assertJsonPath('data.validation_rows.0.row', 2)
-        ->assertJsonPath('data.validation_rows.0.is_valid', true)
-        ->assertJsonPath('data.validation_rows.0.data.nombre', 'Aceite 10W30 1')
-        ->assertJsonPath('data.validation_rows.0.errors', [])
-        ->assertJsonPath('data.validation_rows.0.warnings', [])
-        ->assertJsonPath('data.validation_rows.276.row', 278)
-        ->assertJsonPath('data.validation_rows.276.is_valid', false)
-        ->assertJsonPath('data.validation_rows.276.data.brand', 'Marca Fantasma')
-        ->assertJsonPath('data.validation_rows.276.warnings', []);
+        ->assertJsonPath('data.validation_rows_limited', true)
+        ->assertJsonCount(0, 'data.validation_rows');
 
-    expect($response->json('data.validation_rows.276.errors.0'))->toContain('no existe')
+    $rowsResponse = $this->actingAs($admin)->getJson("/api/v1/products/import/runs/{$importRun->id}/rows?per_page=25&page=12");
+
+    $rowsResponse->assertOk()
+        ->assertJsonPath('meta.total', 501)
+        ->assertJsonPath('meta.current_page', 12)
+        ->assertJsonPath('meta.valid_count', 500)
+        ->assertJsonPath('meta.error_count', 1)
+        ->assertJsonPath('meta.warning_count', 0)
+        ->assertJsonPath('meta.conflict_count', 0)
+        ->assertJsonPath('meta.action_counts.create', 500)
+        ->assertJsonPath('meta.action_counts.invalid', 1)
+        ->assertJsonPath('meta.retryable_failed_rows_count', 1)
+        ->assertJsonPath('data.1.row', 278)
+        ->assertJsonPath('data.1.is_valid', false)
+        ->assertJsonPath('data.1.action_type', 'invalid')
+        ->assertJsonPath('data.1.data.brand', 'Marca Fantasma')
+        ->assertJsonPath('data.1.warnings', []);
+
+    $errorsResponse = $this->actingAs($admin)->getJson("/api/v1/products/import/runs/{$importRun->id}/errors?per_page=10");
+
+    $errorsResponse->assertOk()
+        ->assertJsonPath('meta.total', 1)
+        ->assertJsonPath('data.0.row', 278)
+        ->assertJsonPath('data.0.is_valid', false);
+
+    expect(ImportRunRow::query()->where('import_run_id', $importRun->id)->count())->toBe(501)
+        ->and($errorsResponse->json('data.0.errors.0'))->toContain('no existe')
         ->and(Product::query()->count())->toBe(0);
 });
 
@@ -2424,11 +4097,12 @@ it('processes a pending full validation run immediately when the queue has not s
         ->assertJsonPath('data.success_count', 501)
         ->assertJsonPath('data.error_count', 0)
         ->assertJsonPath('data.validation_rows_count', 501)
-        ->assertJsonPath('data.validation_rows_limited', false)
-        ->assertJsonPath('data.validation_rows.500.row', 502)
-        ->assertJsonPath('data.validation_rows.500.is_valid', true);
+        ->assertJsonPath('data.validation_rows_limited', true)
+        ->assertJsonPath('data.action_counts.create', 501)
+        ->assertJsonCount(0, 'data.validation_rows');
 
-    expect(Product::query()->count())->toBe(0);
+    expect(ImportRunRow::query()->where('import_run_id', $importRun->id)->count())->toBe(501)
+        ->and(Product::query()->count())->toBe(0);
 });
 
 it('processes a pending full import run immediately when the queue has not started it', function () {
@@ -2765,6 +4439,428 @@ it('supports stock and price update mode without creating missing variants', fun
         ->and((float) ProductVariant::query()->where('system_id', 'LS-001')->firstOrFail()->pricing()->firstOrFail()->base_price)->toBe(12.0);
 });
 
+it('uses stock and price update mode when importing edited preview rows', function () {
+    Setting::set('store_tax_rate', 0, 'number', 'store');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $category = Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor-preview-mode',
+    ]);
+
+    $brand = Brand::create([
+        'name' => 'Shell',
+        'status' => 'active',
+    ]);
+
+    $warehouse = Warehouse::create([
+        'code' => 'MAIN',
+        'name' => 'Principal',
+    ]);
+
+    $product = Product::create([
+        'name' => '10W30',
+        'sku_base' => 'OIL-001',
+        'category_id' => $category->id,
+        'status' => 'active',
+    ]);
+
+    ProductVariant::create([
+        'product_id' => $product->id,
+        'brand_id' => $brand->id,
+        'sku' => 'OIL-001',
+        'system_id' => 'LS-001',
+        'status' => 'active',
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/execute', [
+        'mode' => ImportRun::MODE_UPDATE_STOCK_PRICE,
+        'rows' => [
+            [
+                '__row' => 2,
+                'nombre' => '10W30',
+                'sku' => 'OIL-001',
+                'system_id' => 'LS-001',
+                'brand' => 'Shell',
+                'categoria' => 'Aceite Motor',
+                'costo' => '10',
+                'precio' => '12',
+                'cantidad' => '7',
+                'warehouse' => $warehouse->code,
+            ],
+            [
+                '__row' => 3,
+                'nombre' => '10W40',
+                'sku' => 'OIL-002',
+                'system_id' => 'LS-404',
+                'brand' => 'Shell',
+                'categoria' => 'Aceite Motor',
+                'costo' => '10',
+                'precio' => '12',
+                'cantidad' => '3',
+                'warehouse' => $warehouse->code,
+            ],
+        ],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.success_count', 1)
+        ->assertJsonPath('data.error_count', 1);
+
+    expect(ProductVariant::query()->where('system_id', 'LS-404')->exists())->toBeFalse()
+        ->and((float) ProductVariant::query()->where('system_id', 'LS-001')->firstOrFail()->pricing()->firstOrFail()->base_price)->toBe(12.0);
+});
+
+it('previews and stores product image urls from imported spreadsheets', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Filtros',
+        'slug' => 'filtros-image-url',
+    ]);
+    productImportEnsureBrands(['Mann']);
+
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Custom SKU', 'System ID', 'Brand', 'Category', 'Image URL'],
+        ['Filtro Aceite', 'FIL-001', 'LS-FIL-001', 'Mann', 'Filtros', 'https://cdn.example.test/filtro.jpg'],
+    ]);
+
+    $preview = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $file,
+    ]);
+
+    $preview->assertOk()
+        ->assertJsonPath('data.detected_columns.5.suggested_field', 'ignore')
+        ->assertJsonMissingPath('data.rows.0.data.imagen_url');
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/execute', [
+        'rows' => [
+            [
+                '__row' => 2,
+                'nombre' => 'Filtro Aceite',
+                'sku' => 'FIL-001',
+                'system_id' => 'LS-FIL-001',
+                'brand' => 'Mann',
+                'categoria' => 'Filtros',
+                'imagen_url' => 'https://cdn.example.test/filtro.jpg',
+            ],
+        ],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.success_count', 1)
+        ->assertJsonPath('data.error_count', 0);
+
+    expect(Product::query()->where('sku_base', 'FIL-001')->firstOrFail()->image_url)
+        ->toBe('https://cdn.example.test/filtro.jpg');
+});
+
+it('rejects invalid product image urls during import validation', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Filtros',
+        'slug' => 'filtros-invalid-image-url',
+    ]);
+    productImportEnsureBrands(['Mann']);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/validate-rows', [
+        'rows' => [
+            [
+                '__row' => 2,
+                'nombre' => 'Filtro Aceite',
+                'sku' => 'FIL-001',
+                'system_id' => 'LS-FIL-001',
+                'brand' => 'Mann',
+                'categoria' => 'Filtros',
+                'imagen_url' => 'no-es-url',
+            ],
+        ],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.rows.0.is_valid', false)
+        ->assertJsonPath('data.rows.0.errors.0', 'La URL de imagen debe ser una URL valida.');
+});
+
+it('validates only submitted product import rows without creating products', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/validate-rows', [
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'rows' => [
+            [
+                '__row' => 2,
+                'nombre' => 'Aceite valido',
+                'sku' => 'OIL-VALID-001',
+                'categoria' => 'Aceite Motor',
+            ],
+            [
+                '__row' => 27,
+                'nombre' => 'Aceite invalido',
+                'sku' => 'OIL-INVALID-001',
+                'categoria' => 'Categoria Fantasma',
+            ],
+        ],
+    ]);
+
+    $response
+        ->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.count', 2)
+        ->assertJsonPath('data.error_count', 1)
+        ->assertJsonPath('data.rows.0.row', 2)
+        ->assertJsonPath('data.rows.0.is_valid', true)
+        ->assertJsonPath('data.rows.0.action_type', 'create')
+        ->assertJsonPath('data.rows.1.row', 27)
+        ->assertJsonPath('data.rows.1.is_valid', false)
+        ->assertJsonPath('data.rows.1.action_type', 'invalid')
+        ->assertJsonPath('data.summary.action_counts.create', 1)
+        ->assertJsonPath('data.summary.action_counts.invalid', 1);
+
+    expect($response->json('data.rows.1.errors.0'))->toContain('no existe')
+        ->and(Product::query()->count())->toBe(0);
+});
+
+it('creates missing product import categories and brands in one backend batch', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::query()->create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    Brand::query()->create([
+        'name' => 'Shell',
+        'status' => 'active',
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/references/batch', [
+        'categories' => ['Aceite Motor', 'Filtros'],
+        'brands' => ['Shell', 'Mann Filter'],
+    ]);
+
+    $response->assertCreated()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.categories.created.0.name', 'Filtros')
+        ->assertJsonPath('data.categories.existing.0.name', 'Aceite Motor')
+        ->assertJsonPath('data.brands.created.0.name', 'Mann Filter')
+        ->assertJsonPath('data.brands.existing.0.name', 'Shell')
+        ->assertJsonPath('data.summary.created_count', 2)
+        ->assertJsonPath('data.summary.existing_count', 2)
+        ->assertJsonPath('data.summary.error_count', 0);
+
+    expect(Category::query()->where('name', 'Filtros')->count())->toBe(1)
+        ->and(Category::query()->where('name', 'Aceite Motor')->count())->toBe(1)
+        ->and(Brand::query()->where('name', 'Mann Filter')->count())->toBe(1)
+        ->and(Brand::query()->where('name', 'Shell')->count())->toBe(1);
+});
+
+it('reports invalid product import batch references without aborting the whole batch', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/references/batch', [
+        'categories' => ['', str_repeat('C', 101), 'Baterias'],
+        'brands' => ['', 'ACDelco'],
+    ]);
+
+    $response->assertStatus(207)
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.categories.created.0.name', 'Baterias')
+        ->assertJsonPath('data.brands.created.0.name', 'ACDelco')
+        ->assertJsonPath('data.summary.created_count', 2)
+        ->assertJsonPath('data.summary.skipped_count', 2)
+        ->assertJsonPath('data.summary.error_count', 1);
+
+    expect($response->json('data.categories.errors.0.name'))->toBe(str_repeat('C', 101))
+        ->and($response->json('data.categories.errors.0.message'))->toContain('100 caracteres')
+        ->and(Category::query()->where('name', 'Baterias')->exists())->toBeTrue()
+        ->and(Brand::query()->where('name', 'ACDelco')->exists())->toBeTrue();
+});
+
+it('creates product import vehicle candidates in one backend batch', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/vehicle-candidates/batch', [
+        'candidates' => [[
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'chassis' => 'P90',
+            'engine' => '1NZFE',
+            'label' => 'TOYOTA YARIS P90 1NZFE',
+            'source' => 'nombre',
+        ]],
+    ]);
+
+    $response->assertCreated()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.candidates.0.status', 'created')
+        ->assertJsonPath('data.candidates.0.make.name', 'TOYOTA')
+        ->assertJsonPath('data.candidates.0.model.name', 'YARIS')
+        ->assertJsonPath('data.candidates.0.chassis.code', 'P90')
+        ->assertJsonPath('data.candidates.0.engine.engine_code', '1NZFE')
+        ->assertJsonPath('data.summary.created_count', 4)
+        ->assertJsonPath('data.summary.error_count', 0);
+
+    $model = VehicleModel::query()->where('name', 'YARIS')->firstOrFail();
+    $chassis = VehicleChassis::query()->where('code', 'P90')->firstOrFail();
+    $engine = VehicleEngine::query()->where('engine_code', '1NZFE')->firstOrFail();
+
+    expect($model->chassis()->whereKey($chassis->id)->exists())->toBeTrue()
+        ->and($engine->models()->whereKey($model->id)->exists())->toBeTrue();
+});
+
+it('reuses existing product import vehicle candidates without duplicating catalog records', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    ['make' => $make, 'model' => $model] = productImportCreateVehicleScope();
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/vehicle-candidates/batch', [
+        'candidates' => [[
+            'make_id' => $make->id,
+            'model_id' => $model->id,
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'chassis' => 'P90',
+            'engine' => '1NZFE',
+            'label' => 'TOYOTA YARIS P90 1NZFE',
+            'source' => 'nombre',
+        ]],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.candidates.0.status', 'existing')
+        ->assertJsonPath('data.summary.created_count', 0)
+        ->assertJsonPath('data.summary.existing_count', 4)
+        ->assertJsonPath('data.summary.error_count', 0);
+
+    expect(VehicleMake::query()->where('name', 'TOYOTA')->count())->toBe(1)
+        ->and(VehicleModel::query()->where('name', 'YARIS')->count())->toBe(1)
+        ->and(VehicleChassis::query()->where('code', 'P90')->count())->toBe(1)
+        ->and(VehicleEngine::query()->where('engine_code', '1NZFE')->count())->toBe(1);
+});
+
+it('exports edited product import preview rows as an excel file without importing anything', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/export-preview', [
+        'rows' => [
+            [
+                '__row' => 2,
+                '__valid' => true,
+                '__action_type' => 'create',
+                '__errors' => [],
+                'nombre' => 'Aceite 10W30 editado',
+                'sku' => 'OIL-EDIT-001',
+                'system_id' => 'LS-EDIT-001',
+                'brand' => 'Shell',
+                'categoria' => 'Aceite Motor',
+                'costo' => '5.35',
+                'precio' => '6.42',
+                'cantidad' => '10',
+                'descripcion' => 'Fila corregida en preview',
+            ],
+            [
+                '__row' => 7,
+                '__valid' => false,
+                '__action_type' => 'invalid',
+                '__errors' => ['La categoria no existe.'],
+                'nombre' => 'Producto pendiente',
+                'sku' => 'OIL-EDIT-ERR',
+                'categoria' => 'Fantasma',
+            ],
+        ],
+    ]);
+
+    $response->assertOk();
+
+    $path = tempnam(sys_get_temp_dir(), 'edited-preview-export-').'.xlsx';
+    file_put_contents($path, $response->streamedContent());
+    $sheet = IOFactory::load($path)->getActiveSheet();
+
+    expect($response->headers->get('content-type'))->toContain('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        ->and($sheet->getCell('A1')->getValue())->toBe('Fila')
+        ->and($sheet->getCell('B1')->getValue())->toBe('Estado')
+        ->and($sheet->getCell('C1')->getValue())->toBe('Accion prevista')
+        ->and($sheet->getCell('D1')->getValue())->toBe('Errores')
+        ->and($sheet->getCell('E1')->getValue())->toBe('nombre')
+        ->and($sheet->getCell('M1')->getValue())->toBe('descripcion')
+        ->and($sheet->getCell('N1')->getValue())->toBeNull()
+        ->and($sheet->getCell('A2')->getValue())->toBe(2)
+        ->and($sheet->getCell('B2')->getValue())->toBe('Valida')
+        ->and($sheet->getCell('C2')->getValue())->toBe('create')
+        ->and($sheet->getCell('E2')->getValue())->toBe('Aceite 10W30 editado')
+        ->and($sheet->getCell('M2')->getValue())->toBe('Fila corregida en preview')
+        ->and($sheet->getCell('B3')->getValue())->toBe('Con errores')
+        ->and($sheet->getCell('D3')->getValue())->toBe('La categoria no existe.')
+        ->and(Product::query()->count())->toBe(0)
+        ->and(ImportRun::query()->count())->toBe(0);
+});
+
+it('rejects edited product import preview export without rows', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/export-preview', [
+        'rows' => [],
+    ])->assertStatus(422)
+        ->assertJsonPath('message', 'Debe enviar filas para exportar.');
+});
+
+it('downloads the product import template without the image url column', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)->get('/api/v1/products/import/template');
+
+    $response->assertOk();
+
+    $path = tempnam(sys_get_temp_dir(), 'product-template-').'.xlsx';
+    file_put_contents($path, $response->streamedContent());
+    $sheet = IOFactory::load($path)->getActiveSheet();
+
+    expect($sheet->getCell('I1')->getValue())->toBe('descripcion')
+        ->and($sheet->getCell('J1')->getValue())->toBeNull()
+        ->and($sheet->getCell('I2')->getValue())->toBe('Terminal importado desde Lightspeed');
+});
+
 it('exports import run errors as an excel file', function () {
     $admin = User::factory()->create([
         'role' => 'admin',
@@ -2781,10 +4877,17 @@ it('exports import run errors as an excel file', function () {
         'errors' => [[
             'row' => 7,
             'label' => 'Aceite',
+            'action_type' => 'invalid',
             'column' => 'categoria',
             'value' => 'Fantasma',
             'error' => 'La categoria no existe.',
             'suggestion' => 'Aceite Motor',
+            'change_preview' => [[
+                'field' => 'categoria',
+                'label' => 'Categoria',
+                'current' => null,
+                'imported' => 'Fantasma',
+            ]],
         ]],
         'results' => [],
         'summary' => [],
@@ -2799,7 +4902,106 @@ it('exports import run errors as an excel file', function () {
     $sheet = IOFactory::load($path)->getActiveSheet();
 
     expect($sheet->getCell('A1')->getValue())->toBe('Fila')
-        ->and($sheet->getCell('G2')->getValue())->toBe('La categoria no existe.');
+        ->and($sheet->getCell('F2')->getValue())->toBe('invalid')
+        ->and($sheet->getCell('I2')->getValue())->toBeNull()
+        ->and($sheet->getCell('J2')->getValue())->toBe('Fantasma')
+        ->and($sheet->getCell('H2')->getValue())->toBe('La categoria no existe.');
+});
+
+it('exports all failed rows even when the panel errors are limited', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $failedRows = [];
+
+    foreach (range(1, 150) as $index) {
+        $failedRows[] = [
+            'row' => $index + 1,
+            'label' => "Producto {$index}",
+            'action_type' => 'invalid',
+            'data' => ['nombre' => "Producto {$index}", 'categoria' => 'Fantasma'],
+            'error' => "Error {$index}",
+        ];
+    }
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'errors.xlsx',
+        'stored_path' => 'imports/errors.xlsx',
+        'status' => ImportRun::STATUS_COMPLETED,
+        'failed_rows' => $failedRows,
+        'errors' => array_slice($failedRows, -100),
+        'results' => [],
+        'summary' => ['latest_errors_limited_to' => 100],
+    ]);
+
+    $response = $this->actingAs($admin)->get("/api/v1/products/import/runs/{$importRun->id}/errors.xlsx");
+
+    $response->assertOk();
+
+    $path = tempnam(sys_get_temp_dir(), 'full-errors-export-').'.xlsx';
+    file_put_contents($path, $response->streamedContent());
+    $sheet = IOFactory::load($path)->getActiveSheet();
+
+    expect($sheet->getHighestDataRow())->toBe(151)
+        ->and($sheet->getCell('A2')->getValue())->toBe(2)
+        ->and($sheet->getCell('C2')->getValue())->toBe('Producto 1')
+        ->and($sheet->getCell('A151')->getValue())->toBe(151)
+        ->and($sheet->getCell('C151')->getValue())->toBe('Producto 150')
+        ->and($sheet->getCell('H151')->getValue())->toBe('Error 150');
+});
+
+it('exports all persisted import run row errors before falling back to limited panel errors', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'persisted-errors.xlsx',
+        'stored_path' => 'imports/persisted-errors.xlsx',
+        'status' => ImportRun::STATUS_COMPLETED,
+        'error_count' => 125,
+        'errors' => [['row' => 126, 'label' => 'Limitado', 'error' => 'Solo panel']],
+        'results' => [],
+        'summary' => ['latest_errors_limited_to' => 100],
+    ]);
+
+    foreach (range(1, 125) as $index) {
+        ImportRunRow::query()->create([
+            'import_run_id' => $importRun->id,
+            'row_number' => $index + 1,
+            'sheet_name' => 'Productos',
+            'status' => 'error',
+            'action_type' => 'invalid',
+            'label' => "Producto {$index}",
+            'data' => ['nombre' => "Producto {$index}", 'categoria' => 'Fantasma'],
+            'errors' => ["Error persistido {$index}"],
+            'warnings' => [],
+            'conflicts' => [],
+            'change_preview' => [],
+        ]);
+    }
+
+    $response = $this->actingAs($admin)->get("/api/v1/products/import/runs/{$importRun->id}/errors.xlsx");
+
+    $response->assertOk();
+
+    $path = tempnam(sys_get_temp_dir(), 'persisted-errors-export-').'.xlsx';
+    file_put_contents($path, $response->streamedContent());
+    $sheet = IOFactory::load($path)->getActiveSheet();
+
+    expect($sheet->getHighestDataRow())->toBe(126)
+        ->and($sheet->getCell('B126')->getValue())->toBe('Productos')
+        ->and($sheet->getCell('C126')->getValue())->toBe('Producto 125')
+        ->and($sheet->getCell('H126')->getValue())->toBe('Error persistido 125');
 });
 
 it('creates a retry import run linked to the original failed rows', function () {
@@ -2987,6 +5189,51 @@ it('marks an import run as cancel requested and the job stops before processing 
     Storage::disk('local')->assertExists($storedPath);
 });
 
+it('cancels pending product import runs immediately and requests cancellation for running runs', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $pendingRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'pending.xlsx',
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $runningRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'running.xlsx',
+        'status' => ImportRun::STATUS_RUNNING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)
+        ->postJson("/api/v1/products/import/runs/{$pendingRun->id}/cancel")
+        ->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_CANCELLED);
+
+    $this->actingAs($admin)
+        ->postJson("/api/v1/products/import/runs/{$runningRun->id}/cancel")
+        ->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_CANCEL_REQUESTED);
+
+    expect($pendingRun->refresh()->finished_at)->not->toBeNull()
+        ->and($pendingRun->status)->toBe(ImportRun::STATUS_CANCELLED)
+        ->and($runningRun->refresh()->status)->toBe(ImportRun::STATUS_CANCEL_REQUESTED)
+        ->and($runningRun->finished_at)->toBeNull();
+});
+
 it('marks a pending import run as failed when the source file is missing', function () {
     Storage::fake('local');
 
@@ -3007,6 +5254,65 @@ it('marks a pending import run as failed when the source file is missing', funct
     expect($importRun->refresh()->status)->toBe(ImportRun::STATUS_FAILED)
         ->and($importRun->errors[0]['error'])->toContain('No se encontro el archivo almacenado')
         ->and(Product::query()->count())->toBe(0);
+});
+
+it('marks orphaned product import runs as terminal when listing history without touching fresh cancellations', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $stalePending = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'pending.xlsx',
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $stalePending->forceFill([
+        'created_at' => now()->subHours(8),
+        'updated_at' => now()->subHours(8),
+    ])->save();
+    $freshCancelRequested = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'cancel.xlsx',
+        'status' => ImportRun::STATUS_CANCEL_REQUESTED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $staleCancelRequested = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'stale-cancel.xlsx',
+        'status' => ImportRun::STATUS_CANCEL_REQUESTED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $staleCancelRequested->forceFill([
+        'created_at' => now()->subHours(2),
+        'updated_at' => now()->subHours(2),
+    ])->save();
+
+    $this->actingAs($admin)->getJson('/api/v1/products/import/runs')
+        ->assertOk();
+
+    expect($stalePending->refresh()->status)->toBe(ImportRun::STATUS_FAILED)
+        ->and($stalePending->canCancel())->toBeFalse()
+        ->and($freshCancelRequested->refresh()->status)->toBe(ImportRun::STATUS_CANCEL_REQUESTED)
+        ->and($freshCancelRequested->canCancel())->toBeFalse()
+        ->and($staleCancelRequested->refresh()->status)->toBe(ImportRun::STATUS_CANCELLED)
+        ->and($staleCancelRequested->canCancel())->toBeFalse();
 });
 
 it('keeps the source file when a product import run fails unexpectedly', function () {
@@ -3090,6 +5396,23 @@ it('creates and lists product import profiles', function () {
         ->assertJsonPath('data.0.name', 'Lightspeed productos');
 
     expect(ImportProfile::query()->where('name', 'Lightspeed productos')->exists())->toBeTrue();
+});
+
+it('returns spanish validation messages when storing import profiles', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/profiles', [
+        'name' => '',
+        'mapping' => 'description:nombre',
+        'sheet_index' => -1,
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['name', 'mapping', 'sheet_index'])
+        ->assertJsonPath('errors.name.0', 'Debe asignar un nombre al perfil de importacion.')
+        ->assertJsonPath('errors.mapping.0', 'El mapeo del perfil debe enviarse como un objeto.')
+        ->assertJsonPath('errors.sheet_index.0', 'La hoja del perfil no puede ser negativa.');
 });
 
 it('lists import profiles according to role visibility', function () {
@@ -3190,9 +5513,14 @@ it('enforces profile visibility when starting product import runs', function () 
     ]);
 
     $managerResponse = $this->actingAs($manager)->postJson('/api/v1/products/import', [
-        'file' => UploadedFile::fake()->create('manager.xlsx', 12, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+        'file' => productImportUploadedSpreadsheet([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite manager', 'Aceites', 'LS-PROFILE-MANAGER'],
+        ]),
         'profile_id' => $adminProfile->id,
         'sheet_name' => 'SAMPLE UPLOAD LIGHTSPEED',
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR SIN PREVIEW',
     ]);
 
     $managerResponse->assertStatus(422)
@@ -3201,9 +5529,14 @@ it('enforces profile visibility when starting product import runs', function () 
     expect(ImportRun::query()->count())->toBe(0);
 
     $adminResponse = $this->actingAs($admin)->postJson('/api/v1/products/import', [
-        'file' => UploadedFile::fake()->create('admin.xlsx', 12, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+        'file' => productImportUploadedSpreadsheet([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite admin', 'Aceites', 'LS-PROFILE-ADMIN'],
+        ]),
         'profile_id' => $managerProfile->id,
         'sheet_name' => 'SAMPLE UPLOAD LIGHTSPEED',
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR SIN PREVIEW',
     ]);
 
     $adminResponse->assertOk()
@@ -3215,4 +5548,167 @@ it('enforces profile visibility when starting product import runs', function () 
         ->and($importRun->import_profile_id)->toBe($managerProfile->id);
 
     Queue::assertPushed(ProcessProductImportRun::class);
+});
+
+it('blocks new heavy product import runs when the user already has two active runs', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    foreach ([ImportRun::STATUS_PENDING, ImportRun::STATUS_RUNNING] as $status) {
+        ImportRun::query()->create([
+            'user_id' => $admin->id,
+            'entity' => 'products',
+            'original_filename' => "active-{$status}.csv",
+            'run_type' => ImportRun::TYPE_IMPORT,
+            'mode' => ImportRun::MODE_CREATE_UPDATE,
+            'status' => $status,
+            'results' => [],
+            'errors' => [],
+            'summary' => [],
+        ]);
+    }
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'file' => productImportUploadedCsv([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite bloqueado', 'Aceites', 'LS-CONCURRENCY'],
+        ]),
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR SIN PREVIEW',
+    ]);
+
+    $response->assertStatus(409)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('data.active_runs_limit', 2);
+
+    expect(ImportRun::query()->count())->toBe(2);
+    Queue::assertNothingPushed();
+});
+
+it('does not block reads or cancellation when the product import concurrency limit is reached', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $pendingRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'pending.csv',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'running.csv',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_RUNNING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)->getJson('/api/v1/products/import/runs')
+        ->assertOk();
+
+    $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$pendingRun->id}/cancel")
+        ->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_CANCELLED);
+});
+
+it('applies a specific throttle to heavy product import endpoints', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    RateLimiter::clear("product-import-heavy|{$admin->id}");
+
+    for ($attempt = 1; $attempt <= 6; $attempt++) {
+        $this->actingAs($admin)->postJson('/api/v1/products/import/validate-rows', [
+            'rows' => [
+                ['__row' => $attempt + 1, 'nombre' => "Producto {$attempt}"],
+            ],
+        ])->assertOk();
+    }
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/validate-rows', [
+        'rows' => [
+            ['__row' => 99, 'nombre' => 'Producto limitado'],
+        ],
+    ])->assertStatus(429);
+});
+
+it('nulls import run profile references when an import profile is deleted', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $profile = ImportProfile::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'name' => 'Perfil temporal',
+        'mapping' => ['description' => 'nombre'],
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+    ]);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'import_profile_id' => $profile->id,
+        'original_filename' => 'profile.csv',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_COMPLETED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $profile->delete();
+
+    expect($importRun->refresh()->import_profile_id)->toBeNull();
+});
+
+it('records product import activity for mutation operations', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import/references/batch', [
+        'categories' => ['Categoria auditable'],
+        'brands' => ['Marca auditable'],
+    ])->assertCreated();
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'cancel.csv',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRun->id}/cancel")
+        ->assertOk();
+
+    expect(DB::table('activity_log')->where('log_name', 'product_import')->where('event', 'references_batch_created')->exists())->toBeTrue()
+        ->and(DB::table('activity_log')->where('log_name', 'product_import')->where('event', 'cancelled')->exists())->toBeTrue();
 });

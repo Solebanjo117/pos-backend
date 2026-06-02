@@ -45,6 +45,7 @@ class SalesQuoteOperationalDetailService
                 'warnings_count' => count($warnings),
                 'warnings' => $warnings,
             ],
+            'payment_context' => $this->paymentContext($quote),
             'documents' => $this->documents($quote),
             'converted_order_context' => $this->convertedOrderContext($quote),
             'timeline' => $this->timeline($quote),
@@ -253,6 +254,21 @@ class SalesQuoteOperationalDetailService
                 'mode' => 'blind',
                 'href' => "/api/v1/sales-quotes/{$quote->id}/proforma?mode=blind",
             ],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function paymentContext(SalesQuote $quote): array
+    {
+        return [
+            'expected_total' => $this->money($quote->total),
+            'is_collected' => $quote->status === 'collected',
+            'requires_payment' => ! in_array($quote->status, ['collected', 'converted', 'rejected', 'expired'], true),
+            'converted_order_id' => $quote->converted_order_id,
+            'converted_order_payment_status' => $quote->convertedOrder?->payment_status,
+            'converted_order_total' => $quote->convertedOrder ? $this->money($quote->convertedOrder->total) : null,
         ];
     }
 

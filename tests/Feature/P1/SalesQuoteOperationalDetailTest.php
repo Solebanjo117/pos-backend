@@ -128,10 +128,24 @@ it('returns a complete operational detail for a sales quote', function () {
         ->assertJsonPath('data.workflow.actions.can_send_to_deposit', false)
         ->assertJsonPath('data.workflow.actions.can_send_to_cashier', true)
         ->assertJsonPath('data.stock_context.warnings.0.type', 'stock_shortage')
+        ->assertJsonPath('data.payment_context.expected_total', 111.3)
+        ->assertJsonPath('data.payment_context.is_collected', false)
+        ->assertJsonPath('data.payment_context.converted_order_id', $order->id)
+        ->assertJsonPath('data.payment_context.converted_order_payment_status', 'pending')
         ->assertJsonPath('data.converted_order_context.id', $order->id)
         ->assertJsonPath('data.documents.0.type', 'ticket')
-        ->assertJsonPath('data.documents.1.type', 'proforma');
+        ->assertJsonPath('data.documents.0.mode', 'standard')
+        ->assertJsonPath('data.documents.1.type', 'proforma')
+        ->assertJsonPath('data.documents.1.mode', 'standard');
 
     expect(collect($response->json('data.timeline'))->pluck('type')->all())
         ->toContain('created', 'sent_to_deposit', 'sent_to_cashier');
+
+    $timelineDates = collect($response->json('data.timeline'))
+        ->pluck('occurred_at')
+        ->filter()
+        ->values()
+        ->all();
+
+    expect($timelineDates)->toBe(collect($timelineDates)->sort()->values()->all());
 });

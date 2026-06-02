@@ -278,6 +278,16 @@ it('returns operational detail for a sales order without mixing other orders', f
         ->assertJsonPath('data.payment_summary.0.amount', 40)
         ->assertJsonPath('data.payment_summary.1.method', 'credit')
         ->assertJsonPath('data.payment_summary.1.amount', 30)
+        ->assertJsonPath('data.payment_context.real_paid_amount', 40)
+        ->assertJsonPath('data.payment_context.credit_amount', 30)
+        ->assertJsonPath('data.payment_context.refunded_amount', 10)
+        ->assertJsonPath('data.payment_context.amount_due', 70)
+        ->assertJsonPath('data.documents.0.type', 'ticket')
+        ->assertJsonPath('data.documents.1.type', 'note')
+        ->assertJsonPath('data.documents.2.type', 'proforma')
+        ->assertJsonPath('data.workflow.status', 'completed')
+        ->assertJsonPath('data.workflow.actions.can_edit', false)
+        ->assertJsonPath('data.workflow.actions.can_open_customer', true)
         ->assertJsonPath('data.ar_context.amount_paid', 40)
         ->assertJsonPath('data.ar_context.amount_due', 70)
         ->assertJsonPath('data.ar_context.customer_transactions.0.reference_type', 'sales_order')
@@ -292,4 +302,15 @@ it('returns operational detail for a sales order without mixing other orders', f
 
     expect(collect($response->json('data.inventory_context.movements'))->pluck('reference_id')->unique()->all())
         ->toBe([$order->id]);
+
+    expect(collect($response->json('data.timeline'))->pluck('type')->all())
+        ->toContain('created', 'payment', 'refund_payment', 'sales_return', 'inventory_movement', 'customer_transaction', 'ledger_entry', 'audit');
+
+    $timelineDates = collect($response->json('data.timeline'))
+        ->pluck('occurred_at')
+        ->filter()
+        ->values()
+        ->all();
+
+    expect($timelineDates)->toBe(collect($timelineDates)->sort()->values()->all());
 });
