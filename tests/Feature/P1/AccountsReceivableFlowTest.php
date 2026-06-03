@@ -8,6 +8,8 @@ use App\Models\PosSession;
 use App\Models\SalesOrder;
 use App\Models\User;
 use App\Models\Warehouse;
+use Carbon\Carbon;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -201,6 +203,90 @@ it('exposes receivable dashboard aging and collection metrics for the full filte
         ->assertJsonPath('summary.collections_received', 50)
         ->assertJsonPath('summary.aging_buckets.90_plus.amount', 240)
         ->assertJsonPath('summary.over_90_count', 1);
+});
+
+it('exposes design ready receivable rows summary trend and recent movements', function () {
+    Carbon::setTestNow('2026-06-03 10:00:00');
+    CarbonImmutable::setTestNow('2026-06-03 10:00:00');
+
+    ['warehouse' => $warehouse, 'cashier' => $cashier, 'customer' => $currentCustomer, 'order' => $currentOrder] = accountsReceivableContext(150);
+    createArPaymentMethod('cash', 'Efectivo', 1);
+
+    $overdueCustomer = Customer::create([
+        'code' => 'AR-RISK-'.fake()->unique()->randomNumber(5),
+        'name' => 'Cliente Riesgo Alto',
+        'credit_limit' => 500,
+        'current_balance' => 240,
+        'credit_days' => 15,
+    ]);
+
+    SalesOrder::create([
+        'order_number' => 'SO-RISK-001',
+        'customer_id' => $overdueCustomer->id,
+        'user_id' => $cashier->id,
+        'date' => now()->subDays(150)->toDateString(),
+        'status' => 'confirmed',
+        'subtotal' => 240,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 240,
+        'payment_status' => 'pending',
+        'payment_method' => 'credit',
+    ]);
+
+    PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 0,
+        'expected_amount' => 0,
+        'status' => 'open',
+    ]);
+
+    $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$currentCustomer->id}/receipts", [
+        'amount' => 50,
+        'method' => 'cash',
+        'paid_at' => '2026-06-03 12:00:00',
+        'reference_number' => 'RC-READY-001',
+        'applications' => [
+            ['document_id' => $currentOrder->id, 'amount' => 50],
+        ],
+    ])->assertCreated();
+
+    $response = $this->actingAs($cashier)->getJson('/api/v1/accounts-receivable?per_page=50');
+
+    $response->assertOk()
+        ->assertJsonPath('summary.aging_segments.0.key', 'current')
+        ->assertJsonPath('summary.aging_segments.4.key', '90_plus')
+        ->assertJsonPath('summary.portfolio_metrics.dso_days', 23)
+        ->assertJsonPath('summary.portfolio_metrics.collection_efficiency_percent', 33.33)
+        ->assertJsonPath('summary.monthly_trend.5.month', 'Jun')
+        ->assertJsonPath('summary.monthly_trend.5.credits', 150)
+        ->assertJsonPath('summary.monthly_trend.5.collections', 50)
+        ->assertJsonPath('summary.recent_movements.0.type', 'payment')
+        ->assertJsonPath('summary.recent_movements.0.reference_number', 'RC-READY-001')
+        ->assertJsonPath('summary.recent_movements.1.type', 'credit')
+        ->assertJsonPath('summary.recent_movements.1.document_number', $currentOrder->order_number);
+
+    $rows = collect($response->json('data'));
+    $currentRow = $rows->firstWhere('id', $currentCustomer->id);
+    $overdueRow = $rows->firstWhere('id', $overdueCustomer->id);
+
+    expect($currentRow)
+        ->toHaveKey('initials', 'CC')
+        ->and($currentRow)->toHaveKey('credit_used_percent', 2.0)
+        ->and($currentRow)->toHaveKey('max_days_overdue', 0)
+        ->and($currentRow)->toHaveKey('reliability_score', 100)
+        ->and($currentRow)->toHaveKey('can_register_payment', true)
+        ->and($currentRow)->toHaveKey('last_payment_days', 0)
+        ->and($overdueRow)->toHaveKey('initials', 'CR')
+        ->and($overdueRow)->toHaveKey('credit_used_percent', 48.0)
+        ->and($overdueRow)->toHaveKey('max_days_overdue', 135)
+        ->and($overdueRow)->toHaveKey('reliability_score', 25);
+
+    Carbon::setTestNow();
+    CarbonImmutable::setTestNow();
 });
 
 it('rejects credit as accounts receivable receipt method', function () {

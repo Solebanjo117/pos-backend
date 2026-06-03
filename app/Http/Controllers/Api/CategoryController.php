@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreCategoryRequest;
+use App\Http\Requests\UpdateCategoryRequest;
 use App\Models\Category;
 use App\Models\CategoryMedia;
 use App\Models\Product;
@@ -24,26 +26,24 @@ class CategoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Category::query();
-
-        // Option 1: Return only root categories with children loaded (tree structure)
         if ($request->boolean('tree')) {
-            $categories = Category::whereNull('parent_id')
-                ->with('descendants')
+            $categories = Category::with('parents')
                 ->orderBy('priority')
                 ->get();
+
+            return response()->json($this->buildCategoryTree($categories));
         }
-        // Option 2: Return all categories with parent info
-        elseif ($request->boolean('with_parent')) {
-            $categories = Category::with('parent')
+
+        if ($request->boolean('with_parent')) {
+            $categories = Category::with(['parent', 'parents'])
                 ->orderBy('parent_id')
                 ->orderBy('priority')
                 ->get();
+
+            return response()->json($categories);
         }
-        // Option 3: Return flat list (default)
-        else {
-            $categories = Category::orderBy('priority')->get();
-        }
+
+        $categories = Category::with('parents')->orderBy('priority')->get();
 
         return response()->json($categories);
     }
@@ -53,7 +53,8 @@ class CategoryController extends Controller
      */
     public function all(): JsonResponse
     {
-        $categories = Category::orderBy('name')
+        $categories = Category::with('parents')
+            ->orderBy('name')
             ->select('id', 'name', 'parent_id', 'image_url')
             ->get();
 
@@ -63,34 +64,12 @@ class CategoryController extends Controller
     /**
      * Store a newly created category.
      */
-    public function store(Request $request): JsonResponse
+    public function store(StoreCategoryRequest $request): JsonResponse
     {
-        $this->normalizeIntegerPercentField($request, 'itbm_percent');
-
-        $validated = $request->validate([
-            'name' => 'required|string|max:100',
-            'slug' => 'nullable|string|max:100|unique:categories,slug',
-            'parent_id' => 'nullable|exists:categories,id',
-            'description' => 'nullable|string',
-            'default_attributes' => 'nullable|array',
-            'default_attributes.*.name' => 'required_with:default_attributes|string|max:100',
-            'default_attributes.*.type' => 'nullable|string|in:string,select',
-            'default_attributes.*.options' => 'nullable|array',
-            'default_attributes.*.options.*' => 'string|max:100',
-            'default_attributes.*.required' => 'nullable|boolean',
-            'default_attributes.*.unit' => 'nullable|string|max:50',
-            'default_attributes.*.value' => 'nullable|string',
-            'default_attributes.*.default_value' => 'nullable|string',
-            'icon' => 'nullable|string|max:50',
-            'image_url' => 'nullable|url|max:500',
-            'priority' => 'nullable|integer',
-            'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
-            'pricing_formula' => 'nullable|string|max:500',
-            'min_suggested_price' => 'nullable|numeric|min:0',
-            'upsale_path' => 'nullable|string|max:255',
-            'applies_itbm' => 'nullable|boolean',
-            'itbm_percent' => 'nullable|integer|min:0|max:100',
-        ]);
+        $validated = $request->validated();
+        $parentIds = $this->resolveParentIds($validated);
+        unset($validated['parent_ids']);
+        $validated['parent_id'] = $parentIds[0] ?? null;
 
         // Normalizar y validar default_attributes
         if (isset($validated['default_attributes'])) {
@@ -99,9 +78,14 @@ class CategoryController extends Controller
 
         $validated['itbm_percent'] = TaxRateHelper::resolve($validated['itbm_percent'] ?? null);
 
-        $category = Category::create($validated);
+        $category = DB::transaction(function () use ($validated, $parentIds): Category {
+            $category = Category::create($validated);
+            $category->syncParents($parentIds);
 
-        return response()->json($category, 201);
+            return $category;
+        });
+
+        return response()->json($category->load(['parent', 'parents']), 201);
     }
 
     /**
@@ -109,7 +93,7 @@ class CategoryController extends Controller
      */
     public function show(Category $category): JsonResponse
     {
-        $category->load(['parent', 'children', 'products']);
+        $category->load(['parent', 'parents', 'childrenThroughParents', 'products']);
 
         return response()->json($category);
     }
@@ -117,34 +101,16 @@ class CategoryController extends Controller
     /**
      * Update the specified category.
      */
-    public function update(Request $request, Category $category): JsonResponse
+    public function update(UpdateCategoryRequest $request, Category $category): JsonResponse
     {
-        $this->normalizeIntegerPercentField($request, 'itbm_percent');
+        $validated = $request->validated();
+        $syncParents = $request->has('parent_ids') || $request->has('parent_id');
+        $parentIds = $syncParents ? $this->resolveParentIds($validated) : [];
+        unset($validated['parent_ids']);
 
-        $validated = $request->validate([
-            'name' => 'sometimes|string|max:100',
-            'slug' => 'sometimes|string|max:100|unique:categories,slug,'.$category->id,
-            'parent_id' => 'nullable|exists:categories,id',
-            'description' => 'nullable|string',
-            'default_attributes' => 'nullable|array',
-            'default_attributes.*.name' => 'required_with:default_attributes|string|max:100',
-            'default_attributes.*.type' => 'nullable|string|in:string,select',
-            'default_attributes.*.options' => 'nullable|array',
-            'default_attributes.*.options.*' => 'string|max:100',
-            'default_attributes.*.required' => 'nullable|boolean',
-            'default_attributes.*.unit' => 'nullable|string|max:50',
-            'default_attributes.*.value' => 'nullable|string',
-            'default_attributes.*.default_value' => 'nullable|string',
-            'icon' => 'nullable|string|max:50',
-            'image_url' => 'nullable|url|max:500',
-            'priority' => 'nullable|integer',
-            'default_margin_percent' => 'nullable|numeric|min:0|max:9999.99',
-            'pricing_formula' => 'nullable|string|max:500',
-            'min_suggested_price' => 'nullable|numeric|min:0',
-            'upsale_path' => 'nullable|string|max:255',
-            'applies_itbm' => 'nullable|boolean',
-            'itbm_percent' => 'nullable|integer|min:0|max:100',
-        ]);
+        if ($syncParents) {
+            $validated['parent_id'] = $parentIds[0] ?? null;
+        }
 
         $oldDefaults = $category->default_attributes ?? [];
 
@@ -157,7 +123,13 @@ class CategoryController extends Controller
             $validated['itbm_percent'] = TaxRateHelper::resolve($validated['itbm_percent']);
         }
 
-        $category->update($validated);
+        DB::transaction(function () use ($category, $validated, $syncParents, $parentIds): void {
+            $category->update($validated);
+
+            if ($syncParents) {
+                $category->syncParents($parentIds);
+            }
+        });
 
         // Propagate attribute name renames to existing products
         if (array_key_exists('default_attributes', $validated)) {
@@ -165,7 +137,68 @@ class CategoryController extends Controller
             $this->propagateAttributeRenames($category, $oldDefaults, $newDefaults);
         }
 
-        return response()->json($category);
+        return response()->json($category->fresh()->load(['parent', 'parents']));
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, Category>  $categories
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildCategoryTree($categories): array
+    {
+        $childrenByParent = [];
+
+        foreach ($categories as $category) {
+            foreach ($category->parent_ids as $parentId) {
+                $childrenByParent[$parentId] ??= [];
+                $childrenByParent[$parentId][] = $category;
+            }
+        }
+
+        return $categories
+            ->filter(fn (Category $category): bool => empty($category->parent_ids))
+            ->sortBy('priority')
+            ->map(fn (Category $category): array => $this->buildCategoryTreeNode($category, $childrenByParent))
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<int, array<int, Category>>  $childrenByParent
+     * @param  array<int, bool>  $visited
+     * @return array<string, mixed>
+     */
+    private function buildCategoryTreeNode(Category $category, array $childrenByParent, array $visited = []): array
+    {
+        $visited[$category->id] = true;
+        $node = $category->toArray();
+        $children = collect($childrenByParent[$category->id] ?? [])
+            ->reject(fn (Category $child): bool => isset($visited[$child->id]))
+            ->sortBy('priority')
+            ->map(fn (Category $child): array => $this->buildCategoryTreeNode($child, $childrenByParent, $visited))
+            ->values()
+            ->all();
+
+        $node['children'] = $children;
+
+        return $node;
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<int, int>
+     */
+    private function resolveParentIds(array $validated): array
+    {
+        if (array_key_exists('parent_ids', $validated) && is_array($validated['parent_ids'])) {
+            return Category::normalizeParentIds($validated['parent_ids']);
+        }
+
+        if (array_key_exists('parent_id', $validated)) {
+            return Category::normalizeParentIds([$validated['parent_id']]);
+        }
+
+        return [];
     }
 
     /**

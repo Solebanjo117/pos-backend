@@ -5,12 +5,18 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class Category extends Model
 {
     use HasFactory;
+
+    protected $appends = [
+        'parent_ids',
+    ];
 
     protected $fillable = [
         'name',
@@ -61,12 +67,28 @@ class Category extends Model
         return $this->belongsTo(Category::class, 'parent_id');
     }
 
+    public function parents(): BelongsToMany
+    {
+        return $this->belongsToMany(Category::class, 'category_parents', 'category_id', 'parent_id')
+            ->withPivot('priority')
+            ->withTimestamps()
+            ->orderByPivot('priority');
+    }
+
     /**
      * Get the child categories.
      */
     public function children(): HasMany
     {
         return $this->hasMany(Category::class, 'parent_id')->orderBy('priority');
+    }
+
+    public function childrenThroughParents(): BelongsToMany
+    {
+        return $this->belongsToMany(Category::class, 'category_parents', 'parent_id', 'category_id')
+            ->withPivot('priority')
+            ->withTimestamps()
+            ->orderByPivot('priority');
     }
 
     /**
@@ -103,7 +125,143 @@ class Category extends Model
      */
     public function hasChildren(): bool
     {
-        return $this->children()->count() > 0;
+        return $this->childrenThroughParents()->exists() || $this->children()->exists();
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function getParentIdsAttribute(): array
+    {
+        if ($this->relationLoaded('parents')) {
+            $parentIds = $this->parents
+                ->pluck('id')
+                ->map(fn ($id): int => (int) $id)
+                ->values()
+                ->all();
+
+            if (! empty($parentIds)) {
+                return $parentIds;
+            }
+        }
+
+        if ($this->exists) {
+            $parentIds = DB::table('category_parents')
+                ->where('category_id', $this->id)
+                ->orderBy('priority')
+                ->pluck('parent_id')
+                ->map(fn ($id): int => (int) $id)
+                ->values()
+                ->all();
+
+            if (! empty($parentIds)) {
+                return $parentIds;
+            }
+        }
+
+        return $this->parent_id !== null ? [(int) $this->parent_id] : [];
+    }
+
+    /**
+     * @param  array<int, mixed>  $parentIds
+     */
+    public function syncParents(array $parentIds): void
+    {
+        $normalizedParentIds = self::normalizeParentIds($parentIds);
+        $syncPayload = [];
+
+        foreach ($normalizedParentIds as $index => $parentId) {
+            $syncPayload[$parentId] = ['priority' => $index];
+        }
+
+        DB::transaction(function () use ($normalizedParentIds, $syncPayload): void {
+            $this->parents()->sync($syncPayload);
+            $this->forceFill([
+                'parent_id' => $normalizedParentIds[0] ?? null,
+            ])->saveQuietly();
+        });
+    }
+
+    /**
+     * @param  array<int, mixed>  $parentIds
+     * @return array<int, int>
+     */
+    public static function normalizeParentIds(array $parentIds): array
+    {
+        $normalized = [];
+
+        foreach ($parentIds as $parentId) {
+            if ($parentId === null || $parentId === '') {
+                continue;
+            }
+
+            $parentId = (int) $parentId;
+            if ($parentId > 0 && ! in_array($parentId, $normalized, true)) {
+                $normalized[] = $parentId;
+            }
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param  array<int, int>  $parentIds
+     */
+    public static function parentIdsWouldCreateCycle(int $categoryId, array $parentIds): bool
+    {
+        foreach ($parentIds as $parentId) {
+            if ($parentId === $categoryId) {
+                return true;
+            }
+
+            if (self::ancestorChainContains($parentId, $categoryId)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function ancestorChainContains(int $startCategoryId, int $targetCategoryId): bool
+    {
+        $visited = [];
+        $pending = [$startCategoryId];
+
+        while (! empty($pending)) {
+            $currentId = array_shift($pending);
+
+            if ($currentId === $targetCategoryId) {
+                return true;
+            }
+
+            if (isset($visited[$currentId])) {
+                continue;
+            }
+
+            $visited[$currentId] = true;
+
+            $parentIds = DB::table('category_parents')
+                ->where('category_id', $currentId)
+                ->pluck('parent_id')
+                ->map(fn ($id): int => (int) $id)
+                ->all();
+
+            $legacyParentId = Category::query()
+                ->whereKey($currentId)
+                ->value('parent_id');
+
+            if ($legacyParentId !== null) {
+                $parentIds[] = (int) $legacyParentId;
+            }
+
+            foreach (array_unique($parentIds) as $parentId) {
+                if (! isset($visited[$parentId])) {
+                    $pending[] = $parentId;
+                }
+            }
+        }
+
+        return false;
     }
 
     public function setItbmPercentAttribute($value): void

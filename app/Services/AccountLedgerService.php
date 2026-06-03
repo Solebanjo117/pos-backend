@@ -6,6 +6,7 @@ use App\Models\AccountLedgerEntry;
 use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
 use App\Models\Customer;
+use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
@@ -611,20 +612,26 @@ class AccountLedgerService
     {
         $documents = $this->openSalesOrders($customer, $filters);
         $openBalance = round((float) $documents->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
+        $maxDaysOverdue = $this->maxReceivableDaysOverdue($documents);
 
         return [
             'id' => $customer->id,
             'code' => $customer->code,
             'name' => $customer->name,
+            'initials' => $this->customerInitials($customer->name),
             'email' => $customer->email,
             'phone' => $customer->phone,
             'current_balance' => $openBalance,
             'credit_limit' => (float) $customer->credit_limit,
             'available_credit' => $customer->getAvailableCredit(),
+            'credit_used_percent' => $this->creditUsedPercent($openBalance, (float) $customer->credit_limit),
             'open_documents_count' => $documents->count(),
             'total_billed' => round((float) $documents->sum('total'), 2),
             'total_paid' => round((float) $documents->sum(fn (SalesOrder $order): float => (float) $order->amount_paid), 2),
             'last_payment_days' => $this->lastCustomerPaymentDays($customer),
+            'max_days_overdue' => $maxDaysOverdue,
+            'reliability_score' => $this->receivableReliabilityScore($maxDaysOverdue),
+            'can_register_payment' => $openBalance > 0,
             'status' => $this->receivableCustomerStatus($documents),
             'aging_buckets' => $this->customerReceivableAgingBuckets($documents),
         ];
@@ -645,13 +652,22 @@ class AccountLedgerService
             }
         }
 
+        $totalReceivable = round((float) $rows->sum('current_balance'), 2);
+        $creditsGranted = $this->receivableCreditsGranted($filters);
+        $collectionsReceived = $this->receivableCollectionsReceived($filters);
+        $monthlyTrend = $this->receivableMonthlyTrend($filters);
+
         return [
-            'total_receivable' => round((float) $rows->sum('current_balance'), 2),
+            'total_receivable' => $totalReceivable,
             'active_customers' => $rows->count(),
             'open_documents_count' => (int) $rows->sum('open_documents_count'),
-            'credits_granted' => $this->receivableCreditsGranted($filters),
-            'collections_received' => $this->receivableCollectionsReceived($filters),
+            'credits_granted' => $creditsGranted,
+            'collections_received' => $collectionsReceived,
             'aging_buckets' => $aging,
+            'aging_segments' => $this->receivableAgingSegments($aging, $totalReceivable),
+            'portfolio_metrics' => $this->receivablePortfolioMetrics($aging, $totalReceivable, $creditsGranted, $collectionsReceived, $monthlyTrend),
+            'monthly_trend' => $monthlyTrend,
+            'recent_movements' => $this->receivableRecentMovements($filters),
             'over_90_amount' => $aging['90_plus']['amount'],
             'over_90_count' => $aging['90_plus']['count'],
         ];
@@ -713,6 +729,294 @@ class AccountLedgerService
                 $query->where('warehouse_id', $filters['warehouse_id']);
             });
         }
+    }
+
+    /**
+     * @param  array<string, array{label: string, amount: float, count: int}>  $aging
+     * @return array<int, array<string, mixed>>
+     */
+    private function receivableAgingSegments(array $aging, float $totalReceivable): array
+    {
+        $recoveryByBucket = [
+            'current' => 99,
+            '1_30' => 95,
+            '31_60' => 85,
+            '61_90' => 70,
+            '90_plus' => 55,
+        ];
+
+        $riskByBucket = [
+            'current' => 'Bajo',
+            '1_30' => 'Medio',
+            '31_60' => 'Alto',
+            '61_90' => 'Alto',
+            '90_plus' => 'Critico',
+        ];
+
+        return collect($aging)
+            ->map(fn (array $bucket, string $key): array => [
+                'key' => $key,
+                'label' => $bucket['label'],
+                'amount' => round((float) $bucket['amount'], 2),
+                'count' => (int) $bucket['count'],
+                'percentage' => $totalReceivable > 0 ? round(((float) $bucket['amount'] / $totalReceivable) * 100, 2) : 0.0,
+                'expected_recovery_percent' => $recoveryByBucket[$key],
+                'risk' => $riskByBucket[$key],
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<string, array{label: string, amount: float, count: int}>  $aging
+     * @param  array<int, array{month: string, credits: float, collections: float}>  $monthlyTrend
+     * @return array<string, mixed>
+     */
+    private function receivablePortfolioMetrics(array $aging, float $totalReceivable, float $creditsGranted, float $collectionsReceived, array $monthlyTrend): array
+    {
+        $segments = $this->receivableAgingSegments($aging, $totalReceivable);
+        $expectedRecovery = collect($segments)->sum(
+            fn (array $segment): float => (float) $segment['amount'] * ((float) $segment['expected_recovery_percent'] / 100)
+        );
+        $latestMonth = collect($monthlyTrend)->last() ?? ['credits' => 0.0, 'collections' => 0.0];
+        $latestCredits = (float) $latestMonth['credits'];
+        $latestCollections = (float) $latestMonth['collections'];
+        $healthyBalance = (float) ($aging['current']['amount'] + $aging['1_30']['amount']);
+
+        return [
+            'dso_days' => ($creditsGranted + $collectionsReceived) > 0
+                ? (int) round(($totalReceivable / ($creditsGranted + $collectionsReceived)) * 30)
+                : 0,
+            'expected_recovery_amount' => round($expectedRecovery, 2),
+            'expected_recovery_percent' => $totalReceivable > 0 ? round(($expectedRecovery / $totalReceivable) * 100, 2) : 0.0,
+            'portfolio_health_percent' => $totalReceivable > 0 ? round(($healthyBalance / $totalReceivable) * 100, 2) : 100.0,
+            'collection_efficiency_percent' => $latestCredits > 0 ? round(($latestCollections / $latestCredits) * 100, 2) : 0.0,
+        ];
+    }
+
+    /**
+     * @return array<int, array{month: string, credits: float, collections: float}>
+     */
+    private function receivableMonthlyTrend(array $filters): array
+    {
+        $end = CarbonImmutable::today()->startOfMonth();
+        $start = $end->subMonths(5);
+
+        return collect(range(0, 5))
+            ->map(function (int $offset) use ($start, $filters): array {
+                $month = $start->addMonths($offset);
+                $monthStart = $month->startOfMonth();
+                $monthEnd = $month->endOfMonth();
+
+                return [
+                    'month' => Str::of($monthStart->locale('es')->isoFormat('MMM'))->replace('.', '')->ucfirst()->toString(),
+                    'credits' => $this->receivableCreditsForPeriod($monthStart, $monthEnd, $filters),
+                    'collections' => $this->receivableCollectionsForPeriod($monthStart, $monthEnd, $filters),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function receivableCreditsForPeriod(CarbonImmutable $dateFrom, CarbonImmutable $dateTo, array $filters): float
+    {
+        $query = SalesOrder::query()
+            ->where('payment_method', 'credit')
+            ->whereNotIn('status', ['cancelled'])
+            ->whereDate('date', '>=', $dateFrom->toDateString())
+            ->whereDate('date', '<=', $dateTo->toDateString());
+
+        if (! empty($filters['warehouse_id'])) {
+            $query->whereHas('items', function ($query) use ($filters): void {
+                $query->where('warehouse_id', $filters['warehouse_id']);
+            });
+        }
+
+        return round((float) $query->sum('total'), 2);
+    }
+
+    private function receivableCollectionsForPeriod(CarbonImmutable $dateFrom, CarbonImmutable $dateTo, array $filters): float
+    {
+        $query = AccountPaymentBatch::query()
+            ->where('account_type', 'customer')
+            ->where('direction', 'incoming')
+            ->whereDate('paid_at', '>=', $dateFrom->toDateString())
+            ->whereDate('paid_at', '<=', $dateTo->toDateString());
+
+        $this->applyReceivableBatchWarehouseFilter($query, $filters);
+
+        return round((float) $query->sum('amount'), 2);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function receivableRecentMovements(array $filters): array
+    {
+        $creditMovements = $this->receivableRecentCreditMovements($filters);
+        $paymentMovements = $this->receivableRecentPaymentMovements($filters);
+
+        return collect($creditMovements)
+            ->merge($paymentMovements)
+            ->sortByDesc('occurred_at')
+            ->take(20)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function receivableRecentCreditMovements(array $filters): array
+    {
+        $query = SalesOrder::query()
+            ->with(['customer:id,code,name', 'user:id,name'])
+            ->where('payment_method', 'credit')
+            ->whereNotIn('status', ['cancelled'])
+            ->latest('date')
+            ->latest('id')
+            ->limit(20);
+
+        $this->applyReceivableOrderFilters($query, $filters);
+
+        return $query->get()
+            ->map(fn (SalesOrder $order): array => [
+                'id' => 'credit-'.$order->id,
+                'type' => 'credit',
+                'description' => 'Credito otorgado',
+                'customer' => [
+                    'id' => $order->customer?->id,
+                    'name' => $order->customer?->name,
+                    'code' => $order->customer?->code,
+                ],
+                'document_number' => $order->order_number,
+                'amount' => round((float) $order->total, 2),
+                'method' => 'credit',
+                'method_label' => 'Credito',
+                'reference_number' => $order->order_number,
+                'processed_by' => $order->user?->name,
+                'occurred_at' => $order->date?->startOfDay()->toISOString(),
+                'status' => 'Completado',
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function receivableRecentPaymentMovements(array $filters): array
+    {
+        $query = AccountPaymentBatch::query()
+            ->with(['creator:id,name', 'applications'])
+            ->where('account_type', 'customer')
+            ->where('direction', 'incoming')
+            ->latest('paid_at')
+            ->latest('id')
+            ->limit(20);
+
+        if (! empty($filters['date_from'])) {
+            $query->whereDate('paid_at', '>=', $filters['date_from']);
+        }
+
+        if (! empty($filters['date_to'])) {
+            $query->whereDate('paid_at', '<=', $filters['date_to']);
+        }
+
+        $this->applyReceivableBatchWarehouseFilter($query, $filters);
+
+        $batches = $query->get();
+        $customers = Customer::query()
+            ->whereIn('id', $batches->pluck('account_id')->all())
+            ->get(['id', 'code', 'name'])
+            ->keyBy('id');
+
+        return $batches
+            ->map(function (AccountPaymentBatch $batch) use ($customers): array {
+                $customer = $customers->get($batch->account_id);
+
+                return [
+                    'id' => 'payment-'.$batch->id,
+                    'type' => 'payment',
+                    'description' => 'Cobro recibido',
+                    'customer' => [
+                        'id' => $customer?->id,
+                        'name' => $customer?->name,
+                        'code' => $customer?->code,
+                    ],
+                    'document_number' => $batch->applications->first()?->document_number,
+                    'amount' => round((float) $batch->amount, 2),
+                    'method' => $batch->method,
+                    'method_label' => PaymentMethod::getNameByCode($batch->method),
+                    'reference_number' => $batch->reference_number ?? $batch->batch_number,
+                    'processed_by' => $batch->creator?->name,
+                    'occurred_at' => $batch->paid_at?->toISOString(),
+                    'status' => 'Completado',
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function applyReceivableBatchWarehouseFilter($query, array $filters): void
+    {
+        if (empty($filters['warehouse_id'])) {
+            return;
+        }
+
+        $orderIds = SalesOrder::query()
+            ->whereHas('items', function ($query) use ($filters): void {
+                $query->where('warehouse_id', $filters['warehouse_id']);
+            })
+            ->pluck('id');
+
+        $query->whereHas('applications', function ($query) use ($orderIds): void {
+            $query->where('document_type', 'sales_order')
+                ->whereIn('document_id', $orderIds);
+        });
+    }
+
+    private function customerInitials(string $name): string
+    {
+        $words = collect(preg_split('/\s+/', trim($name)) ?: [])
+            ->filter()
+            ->values();
+
+        if ($words->isEmpty()) {
+            return 'CL';
+        }
+
+        return $words
+            ->take(2)
+            ->map(fn (string $word): string => Str::upper(Str::substr($word, 0, 1)))
+            ->implode('');
+    }
+
+    private function creditUsedPercent(float $openBalance, float $creditLimit): float
+    {
+        if ($creditLimit <= 0) {
+            return $openBalance > 0 ? 100.0 : 0.0;
+        }
+
+        return round(min(100, ($openBalance / $creditLimit) * 100), 1);
+    }
+
+    private function maxReceivableDaysOverdue(Collection $documents): int
+    {
+        return (int) ($documents
+            ->map(fn (SalesOrder $order): int => $this->salesOrderDaysOverdue($order, $order->customer))
+            ->max() ?? 0);
+    }
+
+    private function receivableReliabilityScore(int $maxDaysOverdue): int
+    {
+        return match (true) {
+            $maxDaysOverdue <= 0 => 100,
+            $maxDaysOverdue <= 30 => 85,
+            $maxDaysOverdue <= 60 => 70,
+            $maxDaysOverdue <= 90 => 50,
+            default => 25,
+        };
     }
 
     /**

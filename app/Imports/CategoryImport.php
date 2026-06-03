@@ -12,6 +12,7 @@ class CategoryImport extends BaseImport
         return [
             ['key' => 'nombre', 'label' => 'Nombre', 'type' => 'text', 'required' => true],
             ['key' => 'slug', 'label' => 'Slug', 'type' => 'text'],
+            ['key' => 'categorias_padre', 'label' => 'Categorias Padre', 'type' => 'text'],
             ['key' => 'categoria_padre', 'label' => 'Categoría Padre', 'type' => 'searchable', 'endpoint' => '/categories/all'],
             ['key' => 'descripcion', 'label' => 'Descripción', 'type' => 'text'],
             ['key' => 'imagen_url', 'label' => 'Imagen URL', 'type' => 'text'],
@@ -31,6 +32,7 @@ class CategoryImport extends BaseImport
         return [
             'nombre' => 'Frenos',
             'slug' => '',
+            'categorias_padre' => 'Filtros, Sistema Combustible',
             'categoria_padre' => 'Auto',
             'descripcion' => 'Partes del sistema de frenado',
             'imagen_url' => 'https://example.com/frenos.jpg',
@@ -55,6 +57,7 @@ class CategoryImport extends BaseImport
         return match ($header) {
             'nombre', 'name' => 'nombre',
             'slug' => 'slug',
+            'categorias_padre', 'parent_categories', 'parents' => 'categorias_padre',
             'categoria_padre', 'parent_category', 'parent' => 'categoria_padre',
             'descripcion', 'description' => 'descripcion',
             'imagen_url', 'image_url' => 'imagen_url',
@@ -122,11 +125,8 @@ class CategoryImport extends BaseImport
 
     public function processRow(array $row): mixed
     {
-        $parentId = null;
-        $parentName = $this->nullIfEmpty($row['categoria_padre'] ?? null);
-        if ($parentName) {
-            $parentId = $this->resolveIdOrCreateByName(Category::class, 'name', $parentName);
-        }
+        $parentIds = $this->resolveParentIdsForProcessing($row);
+        $parentId = $parentIds[0] ?? null;
 
         $existing = $this->findExistingCategory($row, $parentId);
         $slug = $this->resolveSlugForRow($row, $existing);
@@ -165,16 +165,22 @@ class CategoryImport extends BaseImport
 
         if ($existing) {
             $existing->update(array_filter($data, fn ($v) => $v !== null));
+            $existing->syncParents($parentIds);
 
             return $existing;
         }
 
-        return Category::create(array_filter($data, fn ($v) => $v !== null));
+        $category = Category::create(array_filter($data, fn ($v) => $v !== null));
+        $category->syncParents($parentIds);
+
+        return $category;
     }
 
     private function findExistingParentId(array $row): ?int
     {
-        $parentName = $this->nullIfEmpty($row['categoria_padre'] ?? null);
+        $parentNames = $this->parseParentNames($row);
+        $parentName = $parentNames[0] ?? null;
+
         if ($parentName === null) {
             return null;
         }
@@ -186,6 +192,46 @@ class CategoryImport extends BaseImport
         return Category::query()
             ->whereRaw('LOWER(name) = ?', [mb_strtolower($parentName)])
             ->value('id');
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function resolveParentIdsForProcessing(array $row): array
+    {
+        $parentIds = [];
+
+        foreach ($this->parseParentNames($row) as $parentName) {
+            $parentId = $this->resolveIdOrCreateByName(Category::class, 'name', $parentName);
+
+            if (! in_array($parentId, $parentIds, true)) {
+                $parentIds[] = $parentId;
+            }
+        }
+
+        return $parentIds;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function parseParentNames(array $row): array
+    {
+        $multipleParents = $this->nullIfEmpty($row['categorias_padre'] ?? null);
+        $legacyParent = $this->nullIfEmpty($row['categoria_padre'] ?? null);
+        $rawValue = $multipleParents ?? $legacyParent;
+
+        if ($rawValue === null) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            array_map(
+                fn (string $parentName): string => trim($parentName),
+                preg_split('/[,>]+/', (string) $rawValue) ?: []
+            ),
+            fn (string $parentName): bool => $parentName !== ''
+        ));
     }
 
     private function findExistingCategory(array $row, ?int $parentId): ?Category
