@@ -16,10 +16,16 @@ class ImportRunRow extends Model
         'sheet_name',
         'status',
         'action_type',
+        'execution_status',
         'label',
         'search_text',
+        'product_group_key',
+        'variant_key',
+        'conflict_key',
         'is_edited',
         'validated_at',
+        'executed_at',
+        'execution_error',
         'data',
         'source_data',
         'errors',
@@ -37,6 +43,7 @@ class ImportRunRow extends Model
         'change_preview' => 'array',
         'is_edited' => 'boolean',
         'validated_at' => 'datetime',
+        'executed_at' => 'datetime',
     ];
 
     public function importRun(): BelongsTo

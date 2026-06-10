@@ -23,6 +23,7 @@ Route::prefix('products/import')->middleware('role:admin,manager')->group(functi
     Route::get('/runs/{importRun}/errors.xlsx', [ProductImportController::class, 'errors'])->middleware('throttle:product-import-export');
     Route::get('/runs/{importRun}/source', [ProductImportController::class, 'source']);
     Route::post('/runs/{importRun}/retry-failed', [ProductImportController::class, 'retryFailed'])->middleware('throttle:product-import-heavy');
+    Route::post('/runs/{importRun}/process-chunk', [ProductImportController::class, 'processChunk'])->middleware('throttle:product-import-heavy');
     Route::post('/runs/{importRun}/process-now', [ProductImportController::class, 'processNow'])->middleware('throttle:product-import-heavy');
     Route::post('/runs/{importRun}/cancel', [ProductImportController::class, 'cancel'])->middleware('throttle:product-import-mutation');
     Route::delete('/runs/{importRun}', [ProductImportController::class, 'destroy'])->middleware('throttle:product-import-mutation');

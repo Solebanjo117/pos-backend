@@ -22,11 +22,15 @@ use App\Models\ImportRun;
 use App\Models\ImportRunRow;
 use App\Models\User;
 use App\Services\ProductImportReferenceBatchService;
+use App\Services\ProductImportRunChunkProcessor;
+use App\Services\ProductImportRunReconciler;
 use App\Services\ProductImportRunRowService;
+use App\Services\ProductImportWorkerSupervisor;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Maatwebsite\Excel\Facades\Excel;
@@ -38,13 +42,9 @@ class ProductImportController extends Controller
 {
     private const ASYNC_PREVIEW_ROW_THRESHOLD = 200;
 
-    private const ORPHANED_PENDING_MINUTES = 360;
-
-    private const ORPHANED_RUNNING_MINUTES = 60;
-
-    private const STALE_CANCEL_REQUESTED_MINUTES = 60;
-
     private const MAX_ACTIVE_RUNS_PER_USER = 2;
+
+    private const PROCESS_NOW_MAX_ROWS = 5000;
 
     private const ACTIVE_RUN_STATUSES = [
         ImportRun::STATUS_PENDING,
@@ -54,7 +54,10 @@ class ProductImportController extends Controller
 
     public function __construct(
         private readonly ProductService $productService,
-        private readonly ProductImportRunRowService $rowService
+        private readonly ProductImportRunReconciler $runReconciler,
+        private readonly ProductImportRunRowService $rowService,
+        private readonly ProductImportRunChunkProcessor $chunkProcessor,
+        private readonly ProductImportWorkerSupervisor $workerSupervisor
     ) {}
 
     public function template(): BinaryFileResponse
@@ -421,6 +424,7 @@ class ProductImportController extends Controller
             'total_rows' => (int) ($metadata['selected_sheet']['row_count'] ?? 0),
             'mapping' => $mapping,
             'status' => ImportRun::STATUS_PENDING,
+            'phase' => ImportRun::PHASE_QUEUED,
             'results' => [],
             'errors' => [],
             'summary' => array_merge($metadataSummary, $asyncPreview ? [
@@ -446,8 +450,6 @@ class ProductImportController extends Controller
                 : 'Importacion de productos iniciada.'
         );
 
-        ProcessProductImportRun::dispatch($importRun->id);
-
         return response()->json([
             'success' => true,
             'data' => [
@@ -456,6 +458,8 @@ class ProductImportController extends Controller
                 'mode' => $importRun->mode,
                 'run_type' => $importRun->run_type,
                 'async' => $asyncPreview,
+                'chunk_processing' => true,
+                'process_chunk_url' => "/api/v1/products/import/runs/{$importRun->id}/process-chunk",
                 'total_rows' => $importRun->total_rows,
                 'preview_limited' => false,
                 'sheets' => $metadata['sheets'] ?? [],
@@ -473,14 +477,14 @@ class ProductImportController extends Controller
     private function startFileRunMessage(string $runType, bool $asyncPreview): string
     {
         if ($asyncPreview) {
-            return 'Previsualizacion en cola. Puede consultar el avance desde esta pantalla.';
+            return 'Previsualizacion lista para procesar por lotes desde esta pantalla.';
         }
 
         if ($runType === ImportRun::TYPE_VALIDATION) {
-            return 'Validacion en proceso. Puede consultar el avance desde esta pantalla.';
+            return 'Validacion lista para procesar por lotes desde esta pantalla.';
         }
 
-        return 'Importacion en proceso. Puede consultar el avance desde esta pantalla.';
+        return 'Importacion lista para procesar por lotes desde esta pantalla.';
     }
 
     private function startImportFromValidatedRun(StoreProductImportRequest $request): JsonResponse
@@ -571,6 +575,7 @@ class ProductImportController extends Controller
                 'total_rows' => $validationRun->total_rows,
                 'mapping' => $validationRun->mapping ?? [],
                 'status' => ImportRun::STATUS_PENDING,
+                'phase' => ImportRun::PHASE_QUEUED,
                 'results' => [],
                 'errors' => [],
                 'summary' => [
@@ -601,8 +606,6 @@ class ProductImportController extends Controller
             return $importRun;
         });
 
-        ProcessProductImportRun::dispatch($importRun->id);
-
         activity('product_import')
             ->causedBy($request->user())
             ->performedOn($importRun)
@@ -620,10 +623,12 @@ class ProductImportController extends Controller
                 'mode' => $importRun->mode,
                 'run_type' => $importRun->run_type,
                 'async' => false,
+                'chunk_processing' => true,
+                'process_chunk_url' => "/api/v1/products/import/runs/{$importRun->id}/process-chunk",
                 'total_rows' => $importRun->total_rows,
                 'preview_limited' => false,
             ],
-            'message' => 'Importacion iniciada desde una validacion completada.',
+            'message' => 'Importacion lista para procesar por lotes desde una validacion completada.',
         ]);
     }
 
@@ -674,6 +679,7 @@ class ProductImportController extends Controller
                 'mapping' => $mapping,
                 'failed_rows' => [],
                 'status' => ImportRun::STATUS_PENDING,
+                'phase' => ImportRun::PHASE_QUEUED,
                 'results' => [],
                 'errors' => [],
                 'summary' => array_merge($asyncPreview ? [
@@ -701,7 +707,6 @@ class ProductImportController extends Controller
             Storage::disk('local')->delete($previousStoredPath);
         }
 
-        ProcessProductImportRun::dispatch($importRun->id);
         $this->recordImportRunActivity($importRun, $request, 'validation_restarted', 'Validacion persistida reiniciada.');
 
         return response()->json([
@@ -712,6 +717,8 @@ class ProductImportController extends Controller
                 'mode' => $importRun->mode,
                 'run_type' => $importRun->run_type,
                 'async' => $asyncPreview,
+                'chunk_processing' => true,
+                'process_chunk_url' => "/api/v1/products/import/runs/{$importRun->id}/process-chunk",
                 'total_rows' => $importRun->total_rows,
                 'preview_limited' => false,
                 'sheets' => $metadata['sheets'] ?? [],
@@ -723,8 +730,8 @@ class ProductImportController extends Controller
                 'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
             ],
             'message' => $asyncPreview
-                ? 'Previsualizacion actualizada en cola. Puede consultar el avance desde esta pantalla.'
-                : 'Validacion actualizada en cola. Puede consultar el avance desde esta pantalla.',
+                ? 'Previsualizacion actualizada y lista para procesar por lotes desde esta pantalla.'
+                : 'Validacion actualizada y lista para procesar por lotes desde esta pantalla.',
         ]);
     }
 
@@ -738,9 +745,13 @@ class ProductImportController extends Controller
         }
 
         if (! $importRun->isTerminal()) {
+            $isAsyncPreview = (bool) ($importRun->summary['preview_async'] ?? false);
+
             return response()->json([
                 'success' => false,
-                'message' => 'La validacion anterior sigue en proceso. Espere a que termine antes de volver a validarla.',
+                'message' => $isAsyncPreview
+                    ? 'La previsualizacion anterior sigue en proceso. Espere a que termine antes de volver a previsualizar.'
+                    : 'La validacion anterior sigue en proceso. Espere a que termine antes de volver a validarla.',
             ], 409);
         }
 
@@ -845,6 +856,11 @@ class ProductImportController extends Controller
 
     public function processNow(Request $request, ImportRun $importRun): JsonResponse
     {
+        return $this->processChunk($request, $importRun);
+    }
+
+    public function processChunk(Request $request, ImportRun $importRun): JsonResponse
+    {
         $this->abortUnlessVisibleImportRun($importRun, $request->user());
 
         $importModes = [
@@ -861,42 +877,25 @@ class ProductImportController extends Controller
         if (! $isValidationRun && ! $isImportRun) {
             return response()->json([
                 'success' => false,
-                'message' => 'Este import no se puede procesar inmediatamente.',
+                'message' => 'Este import no se puede procesar por chunks.',
             ], 422);
-        }
-
-        if ($importRun->status !== ImportRun::STATUS_PENDING) {
-            return response()->json([
-                'success' => false,
-                'message' => 'El proceso ya fue tomado por la cola o ya finalizo.',
-                'data' => $this->importRunDetail($importRun),
-            ], 409);
         }
 
         if ($response = $this->activeRunLimitResponse($request, $importRun->id)) {
             return $response;
         }
 
-        if ($importRun->mode === ImportRun::MODE_RETRY_FAILED && empty($importRun->failed_rows)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No hay filas fallidas guardadas para reintentar.',
-            ], 422);
-        }
-
-        if ($importRun->mode !== ImportRun::MODE_RETRY_FAILED && (! is_string($importRun->stored_path) || $importRun->stored_path === '' || ! Storage::disk('local')->exists($importRun->stored_path))) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No se encontro el archivo almacenado para procesar.',
-            ], 422);
-        }
-
-        (new ProcessProductImportRun($importRun->id))->handle($this->productService);
-        $importRun->refresh();
+        $result = $this->chunkProcessor->process($importRun);
+        $processedRun = $result['import_run'];
 
         return response()->json([
             'success' => true,
-            'data' => $this->importRunDetail($importRun),
+            'data' => array_merge($this->importRunDetail($processedRun), [
+                'chunk' => [
+                    'processed_rows' => $result['processed_rows'],
+                    'has_more' => $result['has_more'],
+                ],
+            ]),
         ]);
     }
 
@@ -1177,12 +1176,11 @@ class ProductImportController extends Controller
             'mapping' => $importRun->mapping ?? [],
             'failed_rows' => $failedRows,
             'status' => ImportRun::STATUS_PENDING,
+            'phase' => ImportRun::PHASE_QUEUED,
             'results' => [],
             'errors' => [],
             'summary' => [],
         ]);
-
-        ProcessProductImportRun::dispatch($retryRun->id);
 
         $this->recordImportRunActivity($retryRun, $request, 'retry_created', 'Reintento de filas fallidas creado.');
 
@@ -1191,6 +1189,8 @@ class ProductImportController extends Controller
             'data' => [
                 'import_run_id' => $retryRun->id,
                 'status' => $retryRun->status,
+                'chunk_processing' => true,
+                'process_chunk_url' => "/api/v1/products/import/runs/{$retryRun->id}/process-chunk",
             ],
         ]);
     }
@@ -1221,6 +1221,32 @@ class ProductImportController extends Controller
                     'success' => true,
                     'data' => ['status' => $importRun->refresh()->status],
                     'message' => 'Importacion cancelada antes de ser tomada por la cola.',
+                ]);
+            }
+
+            if (($importRun->summary['chunk_processing'] ?? false) === true) {
+                $importRun->update([
+                    'status' => ImportRun::STATUS_CANCELLED,
+                    'phase' => ImportRun::PHASE_FINALIZING,
+                    'finished_at' => now(),
+                    'heartbeat_at' => now(),
+                    'summary' => array_merge($importRun->summary ?? [], [
+                        'cancelled_from_ui_chunks' => true,
+                        'source_file_deleted' => false,
+                    ]),
+                ]);
+
+                $this->recordImportRunActivity(
+                    $importRun,
+                    $request,
+                    'cancelled',
+                    'Importacion cancelada desde procesamiento por lotes.'
+                );
+
+                return response()->json([
+                    'success' => true,
+                    'data' => ['status' => $importRun->refresh()->status],
+                    'message' => 'Importacion cancelada.',
                 ]);
             }
 
@@ -1461,7 +1487,7 @@ class ProductImportController extends Controller
             ? (int) $summary['retryable_failed_rows_count']
             : $this->rowService->retryableFailedRowsCount($importRun);
 
-        return [
+        return array_merge([
             'id' => $importRun->id,
             'entity' => $importRun->entity,
             'original_filename' => $importRun->original_filename,
@@ -1470,6 +1496,7 @@ class ProductImportController extends Controller
             'run_type' => $importRun->run_type,
             'mode' => $importRun->mode,
             'status' => $importRun->status,
+            'phase' => $importRun->phase,
             'total_rows' => $importRun->total_rows,
             'processed_rows' => $importRun->processed_rows,
             'success_count' => $importRun->success_count,
@@ -1494,9 +1521,10 @@ class ProductImportController extends Controller
             'can_cancel' => $importRun->canCancel(),
             'started_at' => $importRun->started_at,
             'finished_at' => $importRun->finished_at,
+            'heartbeat_at' => $importRun->heartbeat_at,
             'created_at' => $importRun->created_at,
             'updated_at' => $importRun->updated_at,
-        ];
+        ], $this->queueWorkerMetadata($importRun));
     }
 
     private function importRunDetail(ImportRun $importRun): array
@@ -1533,72 +1561,84 @@ class ProductImportController extends Controller
 
     private function reconcileOrphanedImportRuns(User $user): void
     {
-        ImportRun::query()
-            ->where('entity', 'products')
-            ->visibleTo($user)
-            ->whereIn('status', [
-                ImportRun::STATUS_PENDING,
-                ImportRun::STATUS_RUNNING,
-                ImportRun::STATUS_CANCEL_REQUESTED,
-            ])
-            ->where(function ($query): void {
-                $query->where(function ($query): void {
-                    $query->where('status', ImportRun::STATUS_CANCEL_REQUESTED)
-                        ->where('updated_at', '<', now()->subMinutes(self::STALE_CANCEL_REQUESTED_MINUTES));
-                })
-                    ->orWhere(function ($query): void {
-                        $query->where('status', ImportRun::STATUS_PENDING)
-                            ->where('updated_at', '<', now()->subMinutes(self::ORPHANED_PENDING_MINUTES));
-                    })
-                    ->orWhere(function ($query): void {
-                        $query->where('status', ImportRun::STATUS_RUNNING)
-                            ->where('updated_at', '<', now()->subMinutes(self::ORPHANED_RUNNING_MINUTES));
-                    });
-            })
-            ->get()
-            ->each(fn (ImportRun $importRun): bool => $this->reconcileImportRun(
-                $importRun
-            ));
+        $this->runReconciler->reconcileOrphaned($user);
     }
 
     private function reconcileImportRun(ImportRun $importRun): bool
     {
-        if ($importRun->status === ImportRun::STATUS_CANCEL_REQUESTED) {
-            if (! $importRun->updated_at?->lt(now()->subMinutes(self::STALE_CANCEL_REQUESTED_MINUTES))) {
-                return false;
-            }
+        return $this->runReconciler->reconcile($importRun) !== null;
+    }
 
-            return $importRun->update([
-                'status' => ImportRun::STATUS_CANCELLED,
-                'finished_at' => $importRun->finished_at ?? now(),
-                'summary' => array_merge($importRun->summary ?? [], [
-                    'cancel_reconciled' => true,
-                    'source_file_deleted' => false,
-                ]),
-            ]);
+    /**
+     * @return array{waiting_for_worker: bool, worker_required?: bool, blocking_reason?: string, worker_message?: string, queue?: string, queue_connection?: string, queue_driver?: mixed, worker_command?: string, worker_auto_start_enabled?: bool, worker_auto_start_status?: string, worker_auto_start_error?: string, worker_php_binary?: string, worker_process_id?: int|null, worker_start_verified?: bool}
+     */
+    private function queueWorkerMetadata(ImportRun $importRun): array
+    {
+        return [
+            'queue' => (string) config('queue.connections.product_imports.queue', 'product-imports'),
+            'queue_connection' => 'product_imports',
+            'queue_driver' => config('queue.connections.product_imports.driver'),
+            'worker_command' => $this->workerSupervisor->commandDisplay(),
+            'waiting_for_worker' => false,
+            'worker_required' => false,
+            'chunk_processing' => true,
+            'process_chunk_url' => "/api/v1/products/import/runs/{$importRun->id}/process-chunk",
+        ];
+    }
+
+    /**
+     * @param  array{worker_auto_start_status?: string}  $workerStart
+     */
+    private function workerBlockingReason(array $workerStart): string
+    {
+        return in_array($workerStart['worker_auto_start_status'] ?? null, ['failed', 'startup_unconfirmed'], true)
+            ? 'worker_auto_start_failed'
+            : 'worker_not_detected';
+    }
+
+    /**
+     * @param  array{worker_auto_start_enabled?: bool, worker_auto_start_status?: string, worker_auto_start_error?: string}  $workerStart
+     */
+    private function workerMessage(array $workerStart): string
+    {
+        $status = $workerStart['worker_auto_start_status'] ?? null;
+
+        if (in_array($status, ['started', 'already_active', 'already_requested'], true)) {
+            return 'Worker product-imports solicitado automaticamente. El archivo continuara en cola.';
         }
 
-        $isOrphanedPending = $importRun->status === ImportRun::STATUS_PENDING
-            && $importRun->updated_at?->lt(now()->subMinutes(self::ORPHANED_PENDING_MINUTES));
-        $isOrphanedRunning = $importRun->status === ImportRun::STATUS_RUNNING
-            && $importRun->updated_at?->lt(now()->subMinutes(self::ORPHANED_RUNNING_MINUTES));
-
-        if (! $isOrphanedPending && ! $isOrphanedRunning) {
-            return false;
+        if (in_array($status, ['failed', 'startup_unconfirmed'], true)) {
+            return 'No se pudo confirmar el arranque automatico del worker product-imports. Inicia la cola product-imports para procesar este archivo.';
         }
 
-        return $importRun->update([
-            'status' => ImportRun::STATUS_FAILED,
-            'finished_at' => $importRun->finished_at ?? now(),
-            'errors' => $importRun->errors ?: [[
-                'error' => 'El proceso quedo huerfano y fue marcado como fallido para permitir recuperacion.',
-            ]],
-            'error_count' => max(1, (int) $importRun->error_count),
-            'summary' => array_merge($importRun->summary ?? [], [
-                'orphaned_recovered' => true,
-                'source_file_deleted' => false,
-            ]),
-        ]);
+        return 'Esperando worker de importacion. Inicia la cola product-imports para procesar este archivo.';
+    }
+
+    private function productImportQueueUnavailableResponse(): ?JsonResponse
+    {
+        $driver = (string) config('queue.connections.product_imports.driver');
+        if ($driver !== 'redis') {
+            return null;
+        }
+
+        try {
+            Redis::connection(config('queue.connections.product_imports.connection'))->ping();
+
+            return null;
+        } catch (\Throwable) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La cola product-imports usa Redis, pero Redis no esta disponible. Cambia PRODUCT_IMPORT_QUEUE_DRIVER a database o levanta Redis antes de importar.',
+                'data' => [
+                    'blocking_reason' => 'queue_backend_unavailable',
+                    'queue' => (string) config('queue.connections.product_imports.queue', 'product-imports'),
+                    'queue_connection' => 'product_imports',
+                    'queue_driver' => $driver,
+                    'worker_required' => true,
+                    'worker_command' => $this->workerSupervisor->commandDisplay(),
+                ],
+            ], 422);
+        }
     }
 
     private function activeRunLimitResponse(Request $request, ?int $exceptImportRunId = null): ?JsonResponse
@@ -1607,6 +1647,8 @@ class ProductImportController extends Controller
         if (! $user) {
             return null;
         }
+
+        $this->reconcileOrphanedImportRuns($user);
 
         $activeRuns = ImportRun::query()
             ->where('entity', 'products')
@@ -1677,6 +1719,16 @@ class ProductImportController extends Controller
         return ImportRun::query()
             ->where('stored_path', $storedPath)
             ->exists();
+    }
+
+    private function dispatchProductImportRun(ImportRun $importRun): void
+    {
+        ProcessProductImportRun::dispatch($importRun->id)
+            ->onConnection('product_imports')
+            ->onQueue((string) config('queue.connections.product_imports.queue', 'product-imports'))
+            ->afterCommit();
+
+        $this->workerSupervisor->ensureRunningAfterCommit();
     }
 
     private function sourceFileExists(ImportRun $importRun): bool

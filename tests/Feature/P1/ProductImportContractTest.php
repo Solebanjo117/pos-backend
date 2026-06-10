@@ -21,12 +21,21 @@ use App\Models\VehicleEngine;
 use App\Models\VehicleMake;
 use App\Models\VehicleModel;
 use App\Models\Warehouse;
+use App\Services\ProductImportBulkWriter;
+use App\Services\ProductImportRunChunkProcessor;
+use App\Services\ProductImportRunRowService;
+use App\Services\ProductImportWorkerSupervisor;
 use App\Services\ProductService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -35,6 +44,12 @@ use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 uses(RefreshDatabase::class);
+
+it('configures the product import queue database fallback table', function () {
+    expect(config('queue.connections.product_imports.driver'))->toBe('database')
+        ->and(config('queue.connections.product_imports.table'))->toBe('jobs')
+        ->and(Schema::hasTable('jobs'))->toBeTrue();
+});
 
 function productImportUploadedSpreadsheet(array $rows): UploadedFile
 {
@@ -298,6 +313,150 @@ it('defaults imported variant tax rates to store tax rate when omitted', functio
         ->and((int) $pricing->cost_tax_rate)->toBe(10)
         ->and((int) $pricing->tax_rate)->toBe(10)
         ->and((float) $pricing->cost_total)->toBe(55.0);
+});
+
+it('bulk imports flat product rows with pricing inventory fifo and import records', function () {
+    Setting::set('store_tax_rate', 0, 'number', 'store');
+
+    $category = Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    $warehouse = Warehouse::create([
+        'code' => 'MAIN',
+        'name' => 'Principal',
+    ]);
+    productImportEnsureBrands(['Shell', 'Pennzoil']);
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_PENDING,
+    ]);
+    $writer = new class extends ProductImportBulkWriter
+    {
+        public bool $used = false;
+
+        public function write(array $rows, ?int $importRunId = null): array
+        {
+            $this->used = true;
+
+            return parent::write($rows, $importRunId);
+        }
+    };
+
+    $import = (new ProductImport(app(ProductService::class), $writer))->forImportRun($importRun->id);
+    $import->execute([
+        [
+            '__row' => 2,
+            'nombre' => '10W30 galon mineral',
+            'sku' => 'OIL-BULK-001',
+            'system_id' => 'LS-BULK-001',
+            'brand' => 'Shell',
+            'categoria' => $category->name,
+            'costo' => '5.35',
+            'precio' => '6.42',
+            'cantidad' => '10',
+            'warehouse' => $warehouse->code,
+        ],
+        [
+            '__row' => 3,
+            'nombre' => '10W40 galon mineral',
+            'sku' => 'OIL-BULK-002',
+            'system_id' => 'LS-BULK-002',
+            'brand' => 'Pennzoil',
+            'categoria' => $category->name,
+            'costo' => '6.00',
+            'precio' => '7.25',
+            'cantidad' => '4',
+            'warehouse' => $warehouse->code,
+        ],
+    ]);
+
+    expect($writer->used)->toBeTrue()
+        ->and($import->successCount)->toBe(2)
+        ->and($import->errorCount)->toBe(0);
+
+    $variant = ProductVariant::query()->where('system_id', 'LS-BULK-001')->firstOrFail();
+
+    $this->assertDatabaseHas('product_pricing', [
+        'variant_id' => $variant->id,
+        'base_price' => 6.42,
+        'cost_base' => 5.35,
+    ]);
+    $this->assertDatabaseHas('product_inventory', [
+        'product_id' => $variant->product_id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'quantity_available' => 10,
+    ]);
+    $this->assertDatabaseHas('inventory_lots', [
+        'product_id' => $variant->product_id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'quantity_available' => 10,
+        'source_type' => 'opening_balance',
+    ]);
+    expect(ImportRunRecord::query()->where('import_run_id', $importRun->id)->where('model_type', Product::class)->count())->toBe(2)
+        ->and(ImportRunRecord::query()->where('import_run_id', $importRun->id)->where('model_type', ProductVariant::class)->count())->toBe(2);
+});
+
+it('isolates failed bulk product groups without blocking valid flat rows', function () {
+    Setting::set('store_tax_rate', 0, 'number', 'store');
+
+    $category = Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $writer = new class extends ProductImportBulkWriter
+    {
+        public int $calls = 0;
+
+        public function write(array $rows, ?int $importRunId = null): array
+        {
+            $this->calls++;
+
+            return parent::write($rows, $importRunId);
+        }
+    };
+
+    $import = new ProductImport(app(ProductService::class), $writer);
+    $import->execute([
+        [
+            '__row' => 2,
+            'nombre' => '10W30 cuarto mineral',
+            'sku' => 'OIL-BULK-DUP-001',
+            'system_id' => 'LS-BULK-DUP-001',
+            'brand' => 'Shell',
+            'categoria' => $category->name,
+        ],
+        [
+            '__row' => 3,
+            'nombre' => '10W30 cuarto mineral',
+            'sku' => 'OIL-BULK-DUP-002',
+            'system_id' => 'LS-BULK-DUP-002',
+            'brand' => 'Shell',
+            'categoria' => $category->name,
+        ],
+        [
+            '__row' => 4,
+            'nombre' => '10W40 cuarto mineral',
+            'sku' => 'OIL-BULK-OK-001',
+            'system_id' => 'LS-BULK-OK-001',
+            'brand' => 'Shell',
+            'categoria' => $category->name,
+        ],
+    ]);
+
+    expect($writer->calls)->toBeGreaterThan(1)
+        ->and($import->successCount)->toBe(2)
+        ->and($import->errorCount)->toBe(1)
+        ->and(ProductVariant::query()->where('system_id', 'LS-BULK-DUP-001')->exists())->toBeTrue()
+        ->and(ProductVariant::query()->where('system_id', 'LS-BULK-DUP-002')->exists())->toBeFalse()
+        ->and(ProductVariant::query()->where('system_id', 'LS-BULK-OK-001')->exists())->toBeTrue();
 });
 
 it('groups repeated product rows as variants even when imported skus differ', function () {
@@ -1457,6 +1616,65 @@ it('rejects product import files when the detected content does not match the fo
         ->and(Validator::make(['file' => $wrongMime], $rules)->passes())->toBeFalse();
 });
 
+it('rejects oversized product import previews before queue processing starts', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $tooLargeFile = UploadedFile::fake()->create(
+        'lightspeed.xlsx',
+        102401,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => $tooLargeFile,
+    ]);
+
+    $response->assertStatus(422)
+        ->assertJsonValidationErrors(['file']);
+
+    expect(ImportRun::query()->count())->toBe(0);
+    Queue::assertNothingPushed();
+});
+
+it('rejects queued product imports before creating a run when the configured redis backend is unavailable', function () {
+    Queue::fake();
+    Storage::fake('local');
+    config([
+        'queue.connections.product_imports.driver' => 'redis',
+        'queue.connections.product_imports.connection' => 'default',
+    ]);
+    Redis::shouldReceive('connection')
+        ->once()
+        ->with('default')
+        ->andThrow(new RuntimeException('Redis no disponible.'));
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', [
+        'file' => productImportUploadedCsv([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite cola redis', 'Aceites', 'LS-REDIS-DOWN'],
+        ]),
+    ]);
+
+    $response->assertStatus(422)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('data.blocking_reason', 'queue_backend_unavailable')
+        ->assertJsonPath('data.queue_driver', 'redis');
+
+    expect(ImportRun::query()->count())->toBe(0);
+    Queue::assertNothingPushed();
+});
+
 it('rejects direct full product imports without a validated run or advanced confirmation', function () {
     Queue::fake();
     Storage::fake('local');
@@ -1488,6 +1706,9 @@ it('rejects direct full product imports without a validated run or advanced conf
 it('starts a queued full product import run from a completed validation run', function () {
     Queue::fake();
     Storage::fake('local');
+    $this->mock(ProductImportWorkerSupervisor::class, function ($mock): void {
+        $mock->shouldReceive('ensureRunningAfterCommit')->once();
+    });
 
     $admin = User::factory()->create([
         'role' => 'admin',
@@ -1903,6 +2124,57 @@ it('revalidates persisted rows in chunks and detects duplicates across distant c
         ->and($importRun->rows()->where('row_number', 4999)->firstOrFail()->conflicts[0]['type'])->toBe('duplicate_in_file');
 });
 
+it('counts duplicate variant identities with a hash index regardless of row distance', function () {
+    $rows = collect(range(1, 3000))
+        ->map(function (int $index): array {
+            $isDuplicate = in_array($index, [1, 3000], true);
+
+            return [
+                '__row' => $index + 1,
+                'nombre' => $isDuplicate ? 'Aceite hash distante' : "Aceite hash {$index}",
+                'sku' => $isDuplicate ? 'DUP-HASH' : "OIL-HASH-{$index}",
+                'brand' => 'Shell',
+                'categoria' => 'Aceites',
+            ];
+        })
+        ->all();
+
+    $duplicateKeys = (new ProductImport(app(ProductService::class)))->duplicateRowKeysForRows($rows);
+
+    expect($duplicateKeys['aceites|aceite hash distante|sku:DUP-HASH'] ?? null)->toBe(2)
+        ->and($duplicateKeys['aceites|aceite hash 2|sku:OIL-HASH-2'] ?? null)->toBe(1)
+        ->and(count($duplicateKeys))->toBe(2999);
+});
+
+it('detects distant duplicate identities while validating a large streaming product file', function () {
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+
+    $rows = collect(range(1, 1001))
+        ->map(function (int $index): array {
+            $isDuplicate = in_array($index, [1, 1001], true);
+
+            return [
+                $isDuplicate ? 'Aceite streaming distante' : "Aceite streaming {$index}",
+                $isDuplicate ? 'DUP-STREAM' : "OIL-STREAM-{$index}",
+                'Shell',
+                'Aceites',
+            ];
+        })
+        ->prepend(['Description', 'Custom SKU', 'Brand', 'Category'])
+        ->all();
+
+    $import = new ProductImport(app(ProductService::class));
+    $import->validateFileInChunks(productImportUploadedCsv($rows, 'large-streaming-duplicates.csv'), 200);
+
+    expect($import->processedCount)->toBe(1001)
+        ->and($import->errorCount)->toBe(2)
+        ->and(collect($import->errors)->pluck('conflicts.0.type')->filter()->values()->all())->toBe([
+            'duplicate_in_file',
+            'duplicate_in_file',
+        ]);
+});
+
 it('revalidates persisted rows after creating missing references in batch', function () {
     Queue::fake();
     $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
@@ -2233,8 +2505,6 @@ it('allows advanced direct full imports only with the exact confirmation', funct
             ['Description', 'Category', 'System ID'],
             ['Aceite urgente', 'Aceites', 'LS-FORCE-OK'],
         ]),
-        'sheet_index' => 1,
-        'sheet_name' => 'SAMPLE UPLOAD LIGHTSPEED',
         'force_without_preview' => true,
         'force_confirmation' => 'IMPORTAR SIN PREVIEW',
         'force_reason' => 'Carga urgente aprobada por gerencia.',
@@ -3618,6 +3888,56 @@ it('queues large product previews instead of validating every row during the req
     Queue::assertPushed(ProcessProductImportRun::class);
 });
 
+it('queues large product validations and requests the import worker automatically', function () {
+    Queue::fake();
+    Storage::fake('local');
+    $this->mock(ProductImportWorkerSupervisor::class, function ($mock): void {
+        $mock->shouldReceive('ensureRunningAfterCommit')->once();
+    });
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $rows = collect(range(1, 251))
+        ->map(fn (int $index): array => [
+            "Aceite 10W30 {$index}",
+            "OIL-VALIDATE-{$index}",
+            "LS-VALIDATE-{$index}",
+            'Shell',
+            'Aceite Motor',
+        ])
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedSpreadsheet($rows),
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING)
+        ->assertJsonPath('data.mode', ImportRun::MODE_VALIDATE_ONLY)
+        ->assertJsonPath('data.run_type', ImportRun::TYPE_VALIDATION)
+        ->assertJsonPath('data.total_rows', 251);
+
+    $importRun = ImportRun::query()->firstOrFail();
+
+    expect($importRun->run_type)->toBe(ImportRun::TYPE_VALIDATION)
+        ->and($importRun->mode)->toBe(ImportRun::MODE_VALIDATE_ONLY)
+        ->and($importRun->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($importRun->total_rows)->toBe(251);
+
+    Queue::assertPushed(ProcessProductImportRun::class);
+});
+
 it('updates an existing terminal async product preview run instead of creating another one', function () {
     Queue::fake();
     Storage::fake('local');
@@ -3882,6 +4202,64 @@ it('returns every row for small product previews and reports sheet totals', func
         ->assertJsonPath('data.rows.24.data.nombre', 'Aceite 10W30 25');
 });
 
+it('reuses technical and vehicle context across repeated preview and validation rows', function () {
+    Category::create([
+        'name' => 'Terminales',
+        'slug' => 'terminales-context-cache',
+        'default_attributes' => [
+            ['name' => 'RACK', 'type' => 'string'],
+            ['name' => 'LENGTH', 'type' => 'select', 'options' => ['220']],
+        ],
+    ]);
+    productImportEnsureBrands(['555']);
+    productImportCreateVehicleScope();
+
+    $rows = collect(range(1, 1001))
+        ->map(function (int $index): array {
+            $isDuplicate = $index === 1001;
+
+            return [
+                '__row' => $index + 1,
+                'nombre' => 'M14x1.50RACK 220LENGTH TOYOTA YARIS P90 1NZFE',
+                'sku' => $isDuplicate ? 'TIE-0001' : sprintf('TIE-%04d', $index),
+                'system_id' => $isDuplicate ? 'LS-0001' : sprintf('LS-%04d', $index),
+                'brand' => '555',
+                'categoria' => 'Terminales',
+            ];
+        })
+        ->all();
+
+    $spreadsheetRows = collect($rows)
+        ->map(fn (array $row): array => [
+            $row['nombre'],
+            $row['sku'],
+            $row['system_id'],
+            $row['brand'],
+            $row['categoria'],
+        ])
+        ->prepend(['nombre', 'sku', 'system_id', 'brand', 'categoria'])
+        ->all();
+
+    DB::enableQueryLog();
+
+    $import = new ProductImport(app(ProductService::class));
+    $preview = $import->previewWithSummary(productImportUploadedSpreadsheet($spreadsheetRows), null);
+    $import->validateRows($rows);
+
+    $vehicleModelQueries = collect(DB::getQueryLog())
+        ->filter(fn (array $query): bool => str_contains($query['query'], 'vehicle_models'))
+        ->count();
+
+    expect($preview['summary']['groups'])->toHaveCount(1)
+        ->and($preview['summary']['groups'][0]['variant_count'])->toBe(1000)
+        ->and($preview['rows'][0]['data']['__attributes'][0]['name'])->toBe('RACK')
+        ->and($preview['rows'][0]['data']['__attributes'][0]['value'])->toBe('M14x1.50')
+        ->and($preview['rows'][0]['data']['__vehicle_compatibility'])->toBeArray()
+        ->and($import->validationRows[0]['conflicts'][0]['type'])->toBe('duplicate_in_file')
+        ->and($import->validationRows[1000]['conflicts'][0]['type'])->toBe('duplicate_in_file')
+        ->and($vehicleModelQueries)->toBeLessThanOrEqual(3);
+});
+
 it('reuses vehicle catalog lookups while validating repeated name-derived vehicles', function () {
     productImportCreateVehicleScope();
     Category::create([
@@ -3899,9 +4277,20 @@ it('reuses vehicle catalog lookups while validating repeated name-derived vehicl
         ])
         ->all();
 
+    $fileRows = collect($rows)
+        ->map(fn (array $row): array => [
+            $row['nombre'],
+            $row['system_id'],
+            'Generica',
+            $row['categoria'],
+        ])
+        ->prepend(['Description', 'System ID', 'Brand', 'Category'])
+        ->all();
+
     DB::enableQueryLog();
 
     $import = new ProductImport(app(ProductService::class));
+    $preview = $import->previewWithSummary(productImportUploadedSpreadsheet($fileRows));
     $import->validateRows($rows);
 
     $vehicleModelQueries = collect(DB::getQueryLog())
@@ -3909,7 +4298,19 @@ it('reuses vehicle catalog lookups while validating repeated name-derived vehicl
         ->count();
 
     expect($import->errorCount)->toBe(0)
+        ->and($preview['rows'][0]['data']['__vehicle_compatibility'])->toBeArray()
         ->and($vehicleModelQueries)->toBeLessThanOrEqual(3);
+});
+
+it('uses indexed preview product data while preparing product import lookups', function () {
+    $source = file_get_contents(app_path('Imports/ProductImport.php'));
+    $start = strpos($source, 'private function prepareLookupContext');
+    $end = strpos($source, 'private function brandSkuKey', $start);
+
+    $methodSource = substr($source, $start, $end - $start);
+
+    expect($methodSource)->toContain('row_preview_products')
+        ->and($methodSource)->not->toContain('previewProductData(');
 });
 
 it('keeps full product validation chunk processing on a streaming row path', function () {
@@ -3958,6 +4359,43 @@ it('runs validation jobs without creating products and stores row errors', funct
         ->and($importRun->error_count)->toBe(1)
         ->and(Product::query()->count())->toBe(0)
         ->and($importRun->errors[0]['error'])->toContain('no existe');
+});
+
+it('keeps all failed validation rows available when more than one hundred rows fail', function () {
+    Storage::fake('local');
+
+    $rows = collect(range(1, 125))
+        ->map(fn (int $index): array => [
+            "Aceite invalido {$index}",
+            'Fantasma',
+        ])
+        ->prepend(['Description', 'Category'])
+        ->all();
+
+    $file = productImportUploadedSpreadsheet($rows);
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'validate-125-errors.xlsx');
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'validate-125-errors.xlsx',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->error_count)->toBe(125)
+        ->and($importRun->errors)->toHaveCount(100)
+        ->and($importRun->failed_rows)->toHaveCount(125)
+        ->and($importRun->failed_rows[0]['data']['nombre'])->toBe('Aceite invalido 1');
 });
 
 it('validates more than 200 product rows in a full validation job', function () {
@@ -4048,6 +4486,104 @@ it('persists fifteen hundred product validation rows outside the import run summ
         ->and(array_key_exists('validation_rows', $importRun->summary))->toBeFalse()
         ->and($importRun->summary['validation_rows_count'])->toBe(1500)
         ->and(ImportRunRow::query()->where('import_run_id', $importRun->id)->count())->toBe(1500);
+});
+
+it('detects duplicate product identities across initial validation chunks', function () {
+    Storage::fake('local');
+
+    Category::create([
+        'name' => 'Aceite Motor',
+        'slug' => 'aceite-motor-duplicate-chunks',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $rows = collect(range(1, 501))
+        ->map(function (int $index): array {
+            $isDuplicate = in_array($index, [1, 501], true);
+
+            return [
+                $isDuplicate ? 'Aceite duplicado distante' : "Aceite unico {$index}",
+                $isDuplicate ? 'OIL-DUP-CHUNK' : "OIL-UNIQUE-{$index}",
+                '',
+                'Shell',
+                'Aceite Motor',
+            ];
+        })
+        ->prepend(['Description', 'Custom SKU', 'System ID', 'Brand', 'Category'])
+        ->all();
+
+    $file = productImportUploadedSpreadsheet($rows);
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'validate-duplicate-chunks.xlsx');
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'validate-duplicate-chunks.xlsx',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class));
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->processed_rows)->toBe(501)
+        ->and($importRun->success_count)->toBe(499)
+        ->and($importRun->error_count)->toBe(2)
+        ->and($importRun->rows()->where('status', 'error')->count())->toBe(2)
+        ->and($importRun->rows()->where('row_number', 2)->firstOrFail()->conflicts[0]['type'])->toBe('duplicate_in_file')
+        ->and($importRun->rows()->where('row_number', 502)->firstOrFail()->conflicts[0]['type'])->toBe('duplicate_in_file');
+});
+
+it('validates product rows with long conflict identity keys without exceeding indexed column limits', function () {
+    Storage::fake('local');
+
+    Category::create([
+        'name' => 'ELECTRICO',
+        'slug' => 'electrico-long-conflict-key',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $longName = 'MOTOR ARRANQUE TOY 13TH 55DIAM 122SCREW SPECIALHAT 1.6KW LHSELENOID SPECIAL COROLLA E140 CAMRY V30 V50 RAV4 A20 A30 SIENNA L30 06- AZFE ARFE 28100-28041 28100-28060 10983 19046 19047 19171 19172 19316 19318 17774LESTER 17777LESTER';
+    $file = productImportUploadedCsv([
+        ['Description', 'Category', 'System ID', 'Brand'],
+        [$longName, 'ELECTRICO', '210000005948', 'Shell'],
+    ], 'long-conflict-key.csv');
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'long-conflict-key.csv');
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'long-conflict-key.csv',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class), app(ProductImportRunRowService::class));
+    $importRun->refresh();
+    $row = $importRun->rows()->firstOrFail();
+    $fullConflictKey = $row->data['__product_group_key'].'|'.$row->data['__variant_preview']['variant_key'];
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->processed_rows)->toBe(1)
+        ->and($importRun->error_count)->toBe(0)
+        ->and($row->status)->toBe('valid')
+        ->and($row->product_group_key)->toStartWith('pg:')
+        ->and($row->variant_key)->toStartWith('vk:')
+        ->and($row->conflict_key)->toStartWith('ck:')
+        ->and(mb_strlen($row->product_group_key))->toBeLessThanOrEqual(255)
+        ->and(mb_strlen($row->variant_key))->toBeLessThanOrEqual(255)
+        ->and(mb_strlen($row->conflict_key))->toBeLessThanOrEqual(255)
+        ->and(mb_strlen($fullConflictKey))->toBeGreaterThan(255)
+        ->and($row->data['__variant_preview']['variant_key'] ?? null)->toBe('system:210000005948');
 });
 
 it('persists validated product rows and exposes them through paginated run rows endpoints', function () {
@@ -4280,6 +4816,391 @@ it('processes a pending retry-only import run immediately when the queue has not
         ->assertJsonPath('data.error_count', 0);
 
     expect(Product::query()->where('sku_base', 'OIL-PROCESS-NOW-RETRY')->exists())->toBeTrue();
+});
+
+it('keeps large product import runs queued and requests the worker automatically', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(1)->id(1234));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Storage::disk('local')->put('imports/large-validation.xlsx', 'placeholder');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'large-validation.xlsx',
+        'stored_path' => 'imports/large-validation.xlsx',
+        'total_rows' => 42038,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $response = $this->actingAs($admin)
+        ->postJson("/api/v1/products/import/runs/{$importRun->id}/process-now");
+
+    $response->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('message', 'Este archivo es grande y continuara por la cola product-imports.')
+        ->assertJsonPath('data.process_now_max_rows', 5000)
+        ->assertJsonPath('data.queue', 'product-imports')
+        ->assertJsonPath('data.queue_connection', 'product_imports')
+        ->assertJsonPath('data.queue_driver', config('queue.connections.product_imports.driver'))
+        ->assertJsonPath('data.worker_auto_start_status', 'started')
+        ->assertJsonPath('data.worker_process_id', 1234)
+        ->assertJsonPath('data.worker_start_verified', true)
+        ->assertJsonPath('data.worker_command', 'php artisan queue:work product_imports --queue=product-imports --sleep=1 --tries=1 --timeout=1800 --stop-when-empty')
+        ->assertJsonPath('data.worker_required', true);
+
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($importRun->processed_rows)->toBe(0)
+        ->and($importRun->started_at)->toBeNull()
+        ->and(ImportRunRow::query()->where('import_run_id', $importRun->id)->count())->toBe(0)
+        ->and($response->json('data.blocking_reason'))->toBeNull();
+
+    Process::assertRan(function ($process): bool {
+        return is_array($process->command)
+            && $process->path === base_path()
+            && in_array('queue:work', $process->command, true)
+            && in_array('product_imports', $process->command, true)
+            && in_array('--queue=product-imports', $process->command, true)
+            && in_array('--stop-when-empty', $process->command, true);
+    });
+});
+
+it('does not auto start a second product import worker when one appears active', function () {
+    Process::fake();
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+
+    ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'running-validation.xlsx',
+        'status' => ImportRun::STATUS_RUNNING,
+        'phase' => ImportRun::PHASE_VALIDATING,
+        'heartbeat_at' => now(),
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $metadata = app(ProductImportWorkerSupervisor::class)->ensureRunning();
+
+    expect($metadata['worker_auto_start_status'])->toBe('already_active');
+    Process::assertNothingRan();
+});
+
+it('deduplicates recent product import worker auto start requests', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(1)->id(4321));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+
+    $supervisor = app(ProductImportWorkerSupervisor::class);
+
+    expect($supervisor->ensureRunning()['worker_auto_start_status'])->toBe('started')
+        ->and($supervisor->ensureRunning()['worker_auto_start_status'])->toBe('already_requested');
+
+    Process::assertRanTimes(function ($process): bool {
+        return is_array($process->command)
+            && in_array('queue:work', $process->command, true)
+            && in_array('--stop-when-empty', $process->command, true);
+    }, 1);
+});
+
+it('reports failed product import worker auto start attempts without throwing', function () {
+    Process::fake(fn () => throw new RuntimeException('No se pudo iniciar el proceso.'));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+
+    $metadata = app(ProductImportWorkerSupervisor::class)->ensureRunning();
+
+    expect($metadata['worker_auto_start_enabled'])->toBeTrue()
+        ->and($metadata['worker_auto_start_status'])->toBe('failed')
+        ->and($metadata['worker_auto_start_error'])->toBe('No se pudo iniciar el proceso.');
+});
+
+it('derives a cli php binary when the configured product import worker binary is php cgi', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(1)->id(2468));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+
+    $phpDirectory = storage_path('framework/cache/php-worker-bin-'.Str::uuid());
+    mkdir($phpDirectory, 0775, true);
+    $phpCgiPath = $phpDirectory.DIRECTORY_SEPARATOR.'php-cgi.exe';
+    $phpCliPath = $phpDirectory.DIRECTORY_SEPARATOR.'php.exe';
+    touch($phpCgiPath);
+    touch($phpCliPath);
+    Config::set('queue.connections.product_imports.worker_php_binary', $phpCgiPath);
+
+    $metadata = app(ProductImportWorkerSupervisor::class)->ensureRunning();
+
+    expect($metadata['worker_auto_start_status'])->toBe('started')
+        ->and($metadata['worker_php_binary'])->toBe($phpCliPath)
+        ->and($metadata['worker_start_verified'])->toBeTrue();
+
+    Process::assertRan(function ($process) use ($phpCliPath): bool {
+        return is_array($process->command)
+            && $process->command[0] === $phpCliPath;
+    });
+});
+
+it('fails product import worker auto start when the cli php binary cannot be resolved', function () {
+    Process::fake();
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_php_binary', storage_path('framework/cache/missing-php.exe'));
+
+    $supervisor = app(ProductImportWorkerSupervisor::class);
+    $metadata = $supervisor->ensureRunning();
+    $retryMetadata = $supervisor->ensureRunning();
+
+    expect($metadata['worker_auto_start_status'])->toBe('failed')
+        ->and($metadata['worker_start_verified'])->toBeFalse()
+        ->and($metadata['worker_auto_start_error'])->toContain('No se encontro el binario PHP CLI')
+        ->and($retryMetadata['worker_auto_start_status'])->toBe('failed');
+
+    Process::assertNothingRan();
+});
+
+it('does not mark the product import worker as started when startup cannot be confirmed', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(0)->id(1357));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+
+    $supervisor = app(ProductImportWorkerSupervisor::class);
+    $metadata = $supervisor->ensureRunning();
+    $retryMetadata = $supervisor->ensureRunning();
+
+    expect($metadata['worker_auto_start_status'])->toBe('startup_unconfirmed')
+        ->and($metadata['worker_start_verified'])->toBeFalse()
+        ->and($metadata['worker_process_id'])->toBe(1357)
+        ->and($retryMetadata['worker_auto_start_status'])->toBe('startup_unconfirmed');
+
+    Process::assertRanTimes(function ($process): bool {
+        return is_array($process->command)
+            && in_array('queue:work', $process->command, true);
+    }, 2);
+});
+
+it('confirms product import worker startup when it reserves a queued job', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(0)->id(8642));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+
+    DB::table(config('queue.connections.product_imports.table', 'jobs'))->insert([
+        'queue' => config('queue.connections.product_imports.queue', 'product-imports'),
+        'payload' => '{}',
+        'attempts' => 1,
+        'reserved_at' => now()->timestamp,
+        'available_at' => now()->timestamp,
+        'created_at' => now()->timestamp,
+    ]);
+
+    $metadata = app(ProductImportWorkerSupervisor::class)->ensureRunning();
+
+    expect($metadata['worker_auto_start_status'])->toBe('already_active');
+    Process::assertNothingRan();
+});
+
+it('starts the product import worker only after the database transaction commits', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(1)->id(5678));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+
+    DB::transaction(function (): void {
+        app(ProductImportWorkerSupervisor::class)->ensureRunningAfterCommit();
+        Process::assertNothingRan();
+    });
+
+    Process::assertRan(function ($process): bool {
+        return is_array($process->command)
+            && in_array('queue:work', $process->command, true)
+            && in_array('product_imports', $process->command, true)
+            && in_array('--stop-when-empty', $process->command, true);
+    });
+});
+
+it('does not mark fresh queued product import runs as waiting for worker', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Storage::disk('local')->put('imports/fresh-queued-validation.xlsx', 'placeholder');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'fresh-queued-validation.xlsx',
+        'stored_path' => 'imports/fresh-queued-validation.xlsx',
+        'total_rows' => 42038,
+        'status' => ImportRun::STATUS_PENDING,
+        'phase' => ImportRun::PHASE_QUEUED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING)
+        ->assertJsonPath('data.phase', ImportRun::PHASE_QUEUED)
+        ->assertJsonPath('data.waiting_for_worker', false)
+        ->assertJsonPath('data.queue', 'product-imports')
+        ->assertJsonPath('data.queue_connection', 'product_imports')
+        ->assertJsonPath('data.queue_driver', config('queue.connections.product_imports.driver'))
+        ->assertJsonPath('data.worker_command', 'php artisan queue:work product_imports --queue=product-imports --sleep=1 --tries=1 --timeout=1800 --stop-when-empty');
+
+    $runsResponse = $this->actingAs($admin)->getJson('/api/v1/products/import/runs?per_page=10');
+
+    $runsResponse->assertOk();
+
+    $runSummary = collect($runsResponse->json('data'))->firstWhere('id', $importRun->id);
+
+    expect($runSummary)->not->toBeNull()
+        ->and($runSummary['waiting_for_worker'] ?? null)->toBeFalse()
+        ->and($runSummary['queue'] ?? null)->toBe('product-imports')
+        ->and($runSummary['queue_connection'] ?? null)->toBe('product_imports')
+        ->and($runSummary['worker_command'] ?? null)->toBe('php artisan queue:work product_imports --queue=product-imports --sleep=1 --tries=1 --timeout=1800 --stop-when-empty');
+});
+
+it('marks stale queued product import runs as waiting for worker in history and detail', function () {
+    Process::fake(fn () => (new \Illuminate\Process\FakeProcessDescription)->runsFor(1)->id(9876));
+    Config::set('queue.connections.product_imports.auto_start_worker', true);
+    Config::set('queue.connections.product_imports.worker_lock_path', storage_path('framework/cache/test-product-import-worker-'.Str::uuid().'.lock'));
+    Config::set('queue.connections.product_imports.worker_start_verification_seconds', 0);
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Storage::disk('local')->put('imports/stale-queued-validation.xlsx', 'placeholder');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'stale-queued-validation.xlsx',
+        'stored_path' => 'imports/stale-queued-validation.xlsx',
+        'total_rows' => 42038,
+        'status' => ImportRun::STATUS_PENDING,
+        'phase' => ImportRun::PHASE_QUEUED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $importRun->forceFill([
+        'created_at' => now()->subSeconds(31),
+        'updated_at' => now()->subSeconds(31),
+    ])->save();
+
+    $this->actingAs($admin)
+        ->getJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertOk()
+        ->assertJsonPath('data.waiting_for_worker', true)
+        ->assertJsonPath('data.worker_required', true)
+        ->assertJsonPath('data.blocking_reason', 'worker_not_detected')
+        ->assertJsonPath('data.worker_auto_start_status', 'started')
+        ->assertJsonPath('data.worker_message', 'Worker product-imports solicitado automaticamente. El archivo continuara en cola.');
+
+    $runsResponse = $this->actingAs($admin)->getJson('/api/v1/products/import/runs?per_page=10');
+
+    $runsResponse->assertOk();
+
+    $runSummary = collect($runsResponse->json('data'))->firstWhere('id', $importRun->id);
+
+    expect($runSummary)->not->toBeNull()
+        ->and($runSummary['waiting_for_worker'] ?? null)->toBeTrue()
+        ->and($runSummary['worker_required'] ?? null)->toBeTrue()
+        ->and($runSummary['worker_auto_start_status'] ?? null)->toBe('already_requested');
+});
+
+it('requests the product import worker again for stale queued runs and reports the automatic request', function () {
+    Storage::fake('local');
+
+    $this->mock(ProductImportWorkerSupervisor::class, function ($mock): void {
+        $mock->shouldReceive('commandDisplay')
+            ->andReturn('php artisan queue:work product_imports --queue=product-imports --sleep=1 --tries=1 --timeout=1800 --stop-when-empty');
+        $mock->shouldReceive('ensureRunning')
+            ->twice()
+            ->andReturn([
+                'worker_command' => 'php artisan queue:work product_imports --queue=product-imports --sleep=1 --tries=1 --timeout=1800 --stop-when-empty',
+                'queue' => 'product-imports',
+                'queue_connection' => 'product_imports',
+                'worker_auto_start_enabled' => true,
+                'worker_auto_start_status' => 'already_requested',
+            ]);
+    });
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    Storage::disk('local')->put('imports/stale-queued-auto-start.xlsx', 'placeholder');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'stale-queued-auto-start.xlsx',
+        'stored_path' => 'imports/stale-queued-auto-start.xlsx',
+        'total_rows' => 42038,
+        'status' => ImportRun::STATUS_PENDING,
+        'phase' => ImportRun::PHASE_QUEUED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $importRun->forceFill([
+        'created_at' => now()->subSeconds(31),
+        'updated_at' => now()->subSeconds(31),
+    ])->save();
+
+    $this->actingAs($admin)
+        ->getJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertOk()
+        ->assertJsonPath('data.waiting_for_worker', true)
+        ->assertJsonPath('data.worker_auto_start_status', 'already_requested')
+        ->assertJsonPath('data.worker_message', 'Worker product-imports solicitado automaticamente. El archivo continuara en cola.');
+
+    $runsResponse = $this->actingAs($admin)->getJson('/api/v1/products/import/runs?per_page=10');
+
+    $runsResponse->assertOk();
+
+    $runSummary = collect($runsResponse->json('data'))->firstWhere('id', $importRun->id);
+
+    expect($runSummary)->not->toBeNull()
+        ->and($runSummary['worker_auto_start_status'] ?? null)->toBe('already_requested')
+        ->and($runSummary['worker_message'] ?? null)->toBe('Worker product-imports solicitado automaticamente. El archivo continuara en cola.');
 });
 
 it('rejects immediate processing for non pending, foreign, or missing-source import runs', function () {
@@ -5238,6 +6159,316 @@ it('processes retry failed rows without requiring the original source file', fun
         ->and(Product::query()->where('sku_base', 'OIL-RETRY')->exists())->toBeTrue();
 });
 
+it('creates large product validation runs for ui chunk processing without dispatching the queue job', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceite Motor', 'slug' => 'aceite-motor']);
+
+    $rows = [['Nombre', 'SKU', 'Marca / Variante', 'Categoria']];
+    foreach (range(1, 1201) as $index) {
+        $rows[] = ["Aceite chunk {$index}", "OIL-CHUNK-{$index}", 'Generica', 'Aceite Motor'];
+    }
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedCsv($rows, 'large-ui-chunks.csv'),
+    ]);
+
+    $response->assertSuccessful()
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING)
+        ->assertJsonPath('data.chunk_processing', true);
+
+    Queue::assertNotPushed(ProcessProductImportRun::class);
+
+    $importRun = ImportRun::query()->findOrFail($response->json('data.import_run_id'));
+
+    expect($importRun->total_rows)->toBe(1201)
+        ->and($importRun->processed_rows)->toBe(0)
+        ->and($importRun->phase)->toBe(ImportRun::PHASE_QUEUED);
+})->group('chunk');
+
+it('processes product validation chunks and can resume from the next pending rows', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Category::create(['name' => 'Aceite Motor', 'slug' => 'aceite-motor']);
+
+    $rows = [['Nombre', 'SKU', 'Marca / Variante', 'Categoria']];
+    foreach (range(1, 1001) as $index) {
+        $rows[] = ["Aceite resumible {$index}", "OIL-RESUME-{$index}", 'Generica', 'Aceite Motor'];
+    }
+
+    $startResponse = $this->actingAs($admin)->postJson('/api/v1/products/import/validate', [
+        'file' => productImportUploadedCsv($rows, 'resume-ui-chunks.csv'),
+    ]);
+    $importRunId = $startResponse->json('data.import_run_id');
+
+    $firstChunk = $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRunId}/process-chunk");
+
+    $firstChunk->assertSuccessful()
+        ->assertJsonPath('data.status', ImportRun::STATUS_RUNNING)
+        ->assertJsonPath('data.processed_rows', 500)
+        ->assertJsonPath('data.chunk.processed_rows', 500)
+        ->assertJsonPath('data.chunk.has_more', true);
+
+    expect(ImportRunRow::query()->where('import_run_id', $importRunId)->count())->toBe(500);
+
+    $secondChunk = $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRunId}/process-chunk");
+
+    $secondChunk->assertSuccessful()
+        ->assertJsonPath('data.status', ImportRun::STATUS_RUNNING)
+        ->assertJsonPath('data.processed_rows', 1000)
+        ->assertJsonPath('data.chunk.processed_rows', 500)
+        ->assertJsonPath('data.chunk.has_more', true);
+
+    $finalChunk = $this->actingAs($admin)->postJson("/api/v1/products/import/runs/{$importRunId}/process-chunk");
+
+    $finalChunk->assertSuccessful()
+        ->assertJsonPath('data.status', ImportRun::STATUS_COMPLETED)
+        ->assertJsonPath('data.processed_rows', 1001)
+        ->assertJsonPath('data.chunk.processed_rows', 1)
+        ->assertJsonPath('data.chunk.has_more', false);
+
+    expect(ImportRunRow::query()->where('import_run_id', $importRunId)->count())->toBe(1001);
+})->group('chunk');
+
+it('does not continue processing chunks after a product import run is cancelled', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    Storage::disk('local')->put('imports/cancelled-chunk.csv', "Nombre,SKU,Categoria\nAceite cancelado,CAN-1,Aceite Motor\n");
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'cancelled-chunk.csv',
+        'stored_path' => 'imports/cancelled-chunk.csv',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_CANCELLED,
+        'phase' => ImportRun::PHASE_FINALIZING,
+        'total_rows' => 1,
+        'processed_rows' => 0,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+        'finished_at' => now(),
+    ]);
+
+    $this->actingAs($admin)
+        ->postJson("/api/v1/products/import/runs/{$importRun->id}/process-chunk")
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'La importacion ya finalizo y no admite mas chunks.');
+})->group('chunk');
+
+it('cancels running ui chunk product import runs immediately', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'running-chunk.csv',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_RUNNING,
+        'phase' => ImportRun::PHASE_VALIDATING,
+        'total_rows' => 42038,
+        'processed_rows' => 12000,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['chunk_processing' => true],
+        'started_at' => now()->subMinute(),
+        'heartbeat_at' => now(),
+    ]);
+
+    $this->actingAs($admin)
+        ->postJson("/api/v1/products/import/runs/{$importRun->id}/cancel")
+        ->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_CANCELLED);
+
+    expect($importRun->refresh()->status)->toBe(ImportRun::STATUS_CANCELLED)
+        ->and($importRun->finished_at)->not->toBeNull()
+        ->and($importRun->summary['cancelled_from_ui_chunks'] ?? null)->toBeTrue();
+})->group('chunk');
+
+it('reconciles existing cancel requested ui chunk runs when they are opened', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'stuck-cancel.csv',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_CANCEL_REQUESTED,
+        'phase' => ImportRun::PHASE_VALIDATING,
+        'total_rows' => 42038,
+        'processed_rows' => 12000,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['chunk_processing' => true],
+        'started_at' => now()->subMinutes(10),
+        'heartbeat_at' => now()->subMinutes(10),
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson("/api/v1/products/import/runs/{$importRun->id}")
+        ->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_CANCELLED);
+
+    expect($importRun->refresh()->summary['cancel_reconciled'] ?? null)->toBeTrue();
+})->group('chunk');
+
+it('reconciles existing cancel requested ui chunk runs when listing history', function () {
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'original_filename' => 'stuck-history-cancel.csv',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_CANCEL_REQUESTED,
+        'phase' => ImportRun::PHASE_VALIDATING,
+        'total_rows' => 42038,
+        'processed_rows' => 12000,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['chunk_processing' => true],
+        'started_at' => now(),
+        'heartbeat_at' => now(),
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/products/import/runs')
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $importRun->id)
+        ->assertJsonPath('data.0.status', ImportRun::STATUS_CANCELLED);
+})->group('chunk');
+
+it('claims complete product groups for parallel chunk imports without double claiming rows', function () {
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_RUNNING,
+        'summary' => ['use_persisted_rows_snapshot' => true],
+    ]);
+
+    foreach ([
+        [1, 'pg:oil', 'vk:shell', 'Aceite Shell'],
+        [2, 'pg:oil', 'vk:pennzoil', 'Aceite Pennzoil'],
+        [3, 'pg:filter', 'vk:bosch', 'Filtro Bosch'],
+    ] as [$rowNumber, $productGroupKey, $variantKey, $name]) {
+        ImportRunRow::query()->create([
+            'import_run_id' => $importRun->id,
+            'row_number' => $rowNumber,
+            'status' => 'valid',
+            'execution_status' => null,
+            'product_group_key' => $productGroupKey,
+            'variant_key' => $variantKey,
+            'conflict_key' => "{$productGroupKey}|{$variantKey}",
+            'label' => $name,
+            'data' => ['__row' => $rowNumber, 'nombre' => $name],
+            'source_data' => [],
+            'errors' => [],
+            'warnings' => [],
+            'conflicts' => [],
+            'change_preview' => [],
+        ]);
+    }
+
+    $rowService = app(ProductImportRunRowService::class);
+    $firstClaim = $rowService->claimPendingImportableRows($importRun, 1);
+    $secondClaim = $rowService->claimPendingImportableRows($importRun->refresh(), 1);
+
+    expect($firstClaim)->toHaveCount(2)
+        ->and(collect($firstClaim)->pluck('__row')->all())->toBe([1, 2])
+        ->and($secondClaim)->toHaveCount(1)
+        ->and(collect($secondClaim)->pluck('__row')->all())->toBe([3])
+        ->and(ImportRunRow::query()->where('import_run_id', $importRun->id)->where('execution_status', 'processing')->count())->toBe(3);
+})->group('chunk');
+
+it('reclaims stale processing product groups for chunk imports', function () {
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_RUNNING,
+        'summary' => ['use_persisted_rows_snapshot' => true],
+    ]);
+
+    $row = ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id,
+        'row_number' => 1,
+        'status' => 'valid',
+        'execution_status' => 'processing',
+        'product_group_key' => 'pg:stale',
+        'variant_key' => 'vk:stale',
+        'conflict_key' => 'pg:stale|vk:stale',
+        'label' => 'Aceite stale',
+        'data' => ['__row' => 1, 'nombre' => 'Aceite stale'],
+        'source_data' => [],
+        'errors' => [],
+        'warnings' => [],
+        'conflicts' => [],
+        'change_preview' => [],
+    ]);
+    $row->forceFill([
+        'updated_at' => now()->subMinutes(10),
+    ])->save();
+
+    $claim = app(ProductImportRunRowService::class)->claimPendingImportableRows($importRun, 500);
+
+    expect($claim)->toHaveCount(1)
+        ->and($claim[0]['__row'])->toBe(1);
+})->group('chunk');
+
+it('keeps persisted chunk imports running while another request owns processing rows', function () {
+    Storage::fake('local');
+    Storage::disk('local')->put('imports/in-flight.csv', 'source');
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'original_filename' => 'in-flight.csv',
+        'stored_path' => 'imports/in-flight.csv',
+        'status' => ImportRun::STATUS_RUNNING,
+        'phase' => ImportRun::PHASE_IMPORTING,
+        'total_rows' => 1,
+        'processed_rows' => 0,
+        'results' => [],
+        'errors' => [],
+        'summary' => ['use_persisted_rows_snapshot' => true],
+    ]);
+
+    ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id,
+        'row_number' => 1,
+        'status' => 'valid',
+        'execution_status' => 'processing',
+        'product_group_key' => 'pg:in-flight',
+        'variant_key' => 'vk:in-flight',
+        'conflict_key' => 'pg:in-flight|vk:in-flight',
+        'label' => 'Aceite en vuelo',
+        'data' => ['__row' => 1, 'nombre' => 'Aceite en vuelo'],
+        'source_data' => [],
+        'errors' => [],
+        'warnings' => [],
+        'conflicts' => [],
+        'change_preview' => [],
+    ]);
+
+    $result = app(ProductImportRunChunkProcessor::class)->process($importRun);
+
+    expect($result['processed_rows'])->toBe(0)
+        ->and($result['has_more'])->toBeTrue()
+        ->and($importRun->refresh()->status)->toBe(ImportRun::STATUS_RUNNING);
+})->group('chunk');
+
 it('ignores a queued product import job when the import run no longer exists', function () {
     (new ProcessProductImportRun(999999))->handle(app(ProductService::class));
 
@@ -5320,6 +6551,129 @@ it('cancels pending product import runs immediately and requests cancellation fo
         ->and($runningRun->finished_at)->toBeNull();
 });
 
+it('cancels a running product import before finishing the current chunk', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+    Storage::disk('local')->put('imports/quick-cancel-snapshot.xlsx', 'source');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_IMPORT,
+        'mode' => ImportRun::MODE_CREATE_UPDATE,
+        'status' => ImportRun::STATUS_PENDING,
+        'original_filename' => 'quick-cancel-snapshot.xlsx',
+        'stored_path' => 'imports/quick-cancel-snapshot.xlsx',
+        'summary' => ['use_persisted_rows_snapshot' => true],
+        'results' => [],
+        'errors' => [],
+    ]);
+
+    foreach (range(1, 40) as $index) {
+        ImportRunRow::query()->create([
+            'import_run_id' => $importRun->id,
+            'row_number' => $index + 1,
+            'status' => 'valid',
+            'action_type' => 'create',
+            'data' => [
+                'nombre' => "Aceite cancelable {$index}",
+                'categoria' => 'Aceites',
+                'brand' => 'Shell',
+                'sku' => "OIL-CANCEL-{$index}",
+                'system_id' => "LS-CANCEL-{$index}",
+            ],
+            'errors' => [],
+            'warnings' => [],
+            'conflicts' => [],
+            'change_preview' => [],
+        ]);
+    }
+
+    $cancelRequested = false;
+    Product::created(function () use ($importRun, &$cancelRequested): void {
+        if ($cancelRequested) {
+            return;
+        }
+
+        $cancelRequested = true;
+        ImportRun::query()
+            ->whereKey($importRun->id)
+            ->update(['status' => ImportRun::STATUS_CANCEL_REQUESTED]);
+    });
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class), app(ProductImportRunRowService::class));
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_CANCELLED)
+        ->and($importRun->processed_rows)->toBeLessThan(25)
+        ->and($importRun->success_count)->toBeLessThan(25)
+        ->and(Product::query()->where('sku_base', 'like', 'OIL-CANCEL-%')->count())->toBe($importRun->success_count)
+        ->and($importRun->summary['source_file_deleted'] ?? null)->toBeFalse();
+});
+
+it('does not complete a validation run after cancellation is requested', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+    Category::create(['name' => 'Aceites', 'slug' => 'aceites']);
+    productImportEnsureBrands(['Shell']);
+
+    $file = productImportUploadedCsv([
+        ['Description', 'Category', 'Brand', 'System ID'],
+        ...collect(range(1, 40))
+            ->map(fn (int $index): array => ["Aceite validacion {$index}", 'Aceites', 'Shell', "LS-VALID-CANCEL-{$index}"])
+            ->all(),
+    ]);
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'quick-cancel-validation.csv');
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'status' => ImportRun::STATUS_PENDING,
+        'original_filename' => 'quick-cancel-validation.csv',
+        'stored_path' => $storedPath,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $cancelRequested = false;
+    DB::listen(function ($query) use ($importRun, &$cancelRequested): void {
+        if (
+            $cancelRequested
+            || ! str_contains(mb_strtolower((string) $query->sql), 'import_run_rows')
+            || ! str_contains(mb_strtolower((string) $query->sql), 'insert')
+        ) {
+            return;
+        }
+
+        $cancelRequested = true;
+        ImportRun::query()
+            ->whereKey($importRun->id)
+            ->update(['status' => ImportRun::STATUS_CANCEL_REQUESTED]);
+    });
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class), app(ProductImportRunRowService::class));
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_CANCELLED)
+        ->and($importRun->status)->not->toBe(ImportRun::STATUS_COMPLETED)
+        ->and($importRun->rows()->count())->toBeGreaterThan(0)
+        ->and($importRun->summary['validation_rows_count'] ?? 0)->toBeGreaterThan(0)
+        ->and($importRun->summary['source_file_deleted'] ?? null)->toBeFalse();
+});
+
 it('marks a pending import run as failed when the source file is missing', function () {
     Storage::fake('local');
 
@@ -5340,6 +6694,51 @@ it('marks a pending import run as failed when the source file is missing', funct
     expect($importRun->refresh()->status)->toBe(ImportRun::STATUS_FAILED)
         ->and($importRun->errors[0]['error'])->toContain('No se encontro el archivo almacenado')
         ->and(Product::query()->count())->toBe(0);
+});
+
+it('marks a conflict validation run as failed when partial row persistence fails during failure handling', function () {
+    Storage::fake('local');
+
+    Category::create([
+        'name' => 'Aceites',
+        'slug' => 'aceites-conflict-failure',
+    ]);
+    productImportEnsureBrands(['Shell']);
+
+    $file = productImportUploadedCsv([
+        ['Description', 'Category', 'System ID', 'Brand'],
+        ['Aceite fallo persistencia parcial', 'Aceites', 'LS-PARTIAL-FAIL', 'Shell'],
+    ], 'partial-persist-failure.csv');
+    $storedPath = Storage::disk('local')->putFileAs('imports', $file, 'partial-persist-failure.csv');
+
+    $importRun = ImportRun::query()->create([
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'partial-persist-failure.csv',
+        'stored_path' => $storedPath,
+        'status' => ImportRun::STATUS_PENDING,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $throwingRowService = new class(app(ProductService::class)) extends ProductImportRunRowService
+    {
+        public function persistValidationRowsChunk(ImportRun $importRun, array $validationRows, bool $preserveEdited = false): void
+        {
+            throw new \RuntimeException('No se pudieron guardar las filas parciales.');
+        }
+    };
+    app()->instance(ProductImportRunRowService::class, $throwingRowService);
+
+    (new ProcessProductImportRun($importRun->id))->handle(app(ProductService::class), $throwingRowService);
+    $importRun->refresh();
+
+    expect($importRun->status)->toBe(ImportRun::STATUS_FAILED)
+        ->and($importRun->summary['failure_message'] ?? null)->toContain('No se pudieron guardar las filas parciales')
+        ->and($importRun->summary['partial_validation_rows_persist_failed'] ?? null)->toBeTrue()
+        ->and($importRun->summary['partial_validation_rows_persist_failure_message'] ?? null)->toContain('No se pudieron guardar las filas parciales')
+        ->and(collect($importRun->errors)->pluck('error')->implode(' '))->toContain('No se pudieron guardar las filas parciales');
 });
 
 it('marks orphaned product import runs as terminal when listing history without touching fresh cancellations', function () {
@@ -5399,6 +6798,108 @@ it('marks orphaned product import runs as terminal when listing history without 
         ->and($freshCancelRequested->canCancel())->toBeFalse()
         ->and($staleCancelRequested->refresh()->status)->toBe(ImportRun::STATUS_CANCELLED)
         ->and($staleCancelRequested->canCancel())->toBeFalse();
+});
+
+it('marks stale queued product import runs as failed with the reconcile command without touching fresh runs', function () {
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $stalePending = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'stale-pending.csv',
+        'status' => ImportRun::STATUS_PENDING,
+        'phase' => ImportRun::PHASE_QUEUED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+    $stalePending->forceFill([
+        'created_at' => now()->subMinutes(16),
+        'updated_at' => now()->subMinutes(16),
+    ])->save();
+
+    $freshPending = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'fresh-pending.csv',
+        'status' => ImportRun::STATUS_PENDING,
+        'phase' => ImportRun::PHASE_QUEUED,
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    $exitCode = Artisan::call('products:import-reconcile', [
+        '--pending-minutes' => 15,
+    ]);
+
+    expect($exitCode)->toBe(0)
+        ->and($stalePending->refresh()->status)->toBe(ImportRun::STATUS_FAILED)
+        ->and($stalePending->phase)->toBe(ImportRun::PHASE_FINALIZING)
+        ->and($stalePending->error_count)->toBe(1)
+        ->and($stalePending->summary['orphaned_recovered'] ?? null)->toBeTrue()
+        ->and($stalePending->summary['queue'] ?? null)->toBe('product-imports')
+        ->and($stalePending->summary['queue_connection'] ?? null)->toBe('product_imports')
+        ->and($stalePending->summary['reconciled_by_command'] ?? null)->toBeTrue()
+        ->and($freshPending->refresh()->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($freshPending->finished_at)->toBeNull();
+});
+
+it('requeues orphaned running product validation runs with persisted rows from the reconcile command', function () {
+    Queue::fake();
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $importRun = ImportRun::query()->create([
+        'user_id' => $admin->id,
+        'entity' => 'products',
+        'run_type' => ImportRun::TYPE_VALIDATION,
+        'mode' => ImportRun::MODE_VALIDATE_ONLY,
+        'original_filename' => 'running-validation.csv',
+        'status' => ImportRun::STATUS_RUNNING,
+        'phase' => ImportRun::PHASE_VALIDATING,
+        'started_at' => now()->subHours(2),
+        'heartbeat_at' => now()->subHours(2),
+        'results' => [],
+        'errors' => [],
+        'summary' => [],
+    ]);
+
+    ImportRunRow::query()->create([
+        'import_run_id' => $importRun->id,
+        'row_number' => 2,
+        'status' => 'valid',
+        'action_type' => 'create',
+        'data' => ['nombre' => 'Aceite reencolado'],
+        'errors' => [],
+        'warnings' => [],
+        'conflicts' => [],
+        'change_preview' => [],
+    ]);
+
+    $exitCode = Artisan::call('products:import-reconcile', [
+        '--running-minutes' => 60,
+    ]);
+
+    expect($exitCode)->toBe(0)
+        ->and($importRun->refresh()->status)->toBe(ImportRun::STATUS_PENDING)
+        ->and($importRun->phase)->toBe(ImportRun::PHASE_QUEUED)
+        ->and($importRun->started_at)->toBeNull()
+        ->and($importRun->heartbeat_at)->toBeNull()
+        ->and($importRun->summary['orphaned_requeued'] ?? null)->toBeTrue()
+        ->and($importRun->summary['reconciled_by_command'] ?? null)->toBeTrue();
+
+    Queue::assertPushed(ProcessProductImportRun::class);
 });
 
 it('keeps the source file when a product import run fails unexpectedly', function () {
@@ -5674,6 +7175,91 @@ it('blocks new heavy product import runs when the user already has two active ru
 
     expect(ImportRun::query()->count())->toBe(2);
     Queue::assertNothingPushed();
+});
+
+it('reconciles stale queued product import runs before applying the active run limit', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    foreach (['stale-a.csv', 'stale-b.csv'] as $filename) {
+        $importRun = ImportRun::query()->create([
+            'user_id' => $admin->id,
+            'entity' => 'products',
+            'original_filename' => $filename,
+            'run_type' => ImportRun::TYPE_VALIDATION,
+            'mode' => ImportRun::MODE_VALIDATE_ONLY,
+            'status' => ImportRun::STATUS_PENDING,
+            'phase' => ImportRun::PHASE_QUEUED,
+            'results' => [],
+            'errors' => [],
+            'summary' => [],
+        ]);
+        $importRun->forceFill([
+            'created_at' => now()->subMinutes(16),
+            'updated_at' => now()->subMinutes(16),
+        ])->save();
+    }
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'file' => productImportUploadedCsv([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite nuevo', 'Aceites', 'LS-PENDING-RECOVERED'],
+        ]),
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR SIN PREVIEW',
+    ])->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING);
+
+    expect(ImportRun::query()->where('status', ImportRun::STATUS_FAILED)->count())->toBe(2)
+        ->and(ImportRun::query()->where('status', ImportRun::STATUS_PENDING)->count())->toBe(1);
+    Queue::assertPushed(ProcessProductImportRun::class);
+});
+
+it('reconciles stale cancel requested import runs before applying the active run limit', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    foreach (['cancel-a.csv', 'cancel-b.csv'] as $filename) {
+        $importRun = ImportRun::query()->create([
+            'user_id' => $admin->id,
+            'entity' => 'products',
+            'original_filename' => $filename,
+            'run_type' => ImportRun::TYPE_VALIDATION,
+            'mode' => ImportRun::MODE_VALIDATE_ONLY,
+            'status' => ImportRun::STATUS_CANCEL_REQUESTED,
+            'results' => [],
+            'errors' => [],
+            'summary' => [],
+        ]);
+        $importRun->forceFill([
+            'created_at' => now()->subMinutes(15),
+            'updated_at' => now()->subMinutes(15),
+        ])->save();
+    }
+
+    $this->actingAs($admin)->postJson('/api/v1/products/import', [
+        'file' => productImportUploadedCsv([
+            ['Description', 'Category', 'System ID'],
+            ['Aceite nuevo', 'Aceites', 'LS-CANCEL-RECOVERED'],
+        ]),
+        'force_without_preview' => true,
+        'force_confirmation' => 'IMPORTAR SIN PREVIEW',
+    ])->assertOk()
+        ->assertJsonPath('data.status', ImportRun::STATUS_PENDING);
+
+    expect(ImportRun::query()->where('status', ImportRun::STATUS_CANCELLED)->count())->toBe(2)
+        ->and(ImportRun::query()->where('status', ImportRun::STATUS_PENDING)->count())->toBe(1);
+    Queue::assertPushed(ProcessProductImportRun::class);
 });
 
 it('does not block reads or cancellation when the product import concurrency limit is reached', function () {

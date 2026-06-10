@@ -73,6 +73,21 @@ return [
             'after_commit' => false,
         ],
 
+        'product_imports' => [
+            'driver' => env('PRODUCT_IMPORT_QUEUE_DRIVER', 'database'),
+            'connection' => env('PRODUCT_IMPORT_QUEUE_CONNECTION') ?: env('DB_QUEUE_CONNECTION') ?: env('DB_CONNECTION'),
+            'table' => env('PRODUCT_IMPORT_QUEUE_TABLE') ?: env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => env('PRODUCT_IMPORT_QUEUE', 'product-imports'),
+            'retry_after' => (int) env('PRODUCT_IMPORT_QUEUE_RETRY_AFTER', 1800),
+            'auto_start_worker' => (bool) env('PRODUCT_IMPORT_AUTO_START_WORKER', true),
+            'worker_startup_grace_seconds' => (int) env('PRODUCT_IMPORT_WORKER_STARTUP_GRACE_SECONDS', 60),
+            'worker_start_verification_seconds' => (int) env('PRODUCT_IMPORT_WORKER_START_VERIFICATION_SECONDS', 2),
+            'worker_php_binary' => env('PRODUCT_IMPORT_WORKER_PHP_BINARY'),
+            'worker_lock_path' => env('PRODUCT_IMPORT_WORKER_LOCK_PATH'),
+            'block_for' => null,
+            'after_commit' => false,
+        ],
+
         'deferred' => [
             'driver' => 'deferred',
         ],

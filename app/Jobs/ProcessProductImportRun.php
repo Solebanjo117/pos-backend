@@ -14,11 +14,23 @@ class ProcessProductImportRun implements ShouldQueue
 {
     use Queueable;
 
-    private const IMPORT_CHUNK_SIZE = 100;
+    private const IMPORT_CHUNK_SIZE = 500;
+
+    private const VALIDATION_CHUNK_SIZE = 500;
+
+    private const CANCEL_CHECK_ROWS = 10;
+
+    private const CANCEL_CHECK_MICROSECONDS = 250000;
+
+    private const RESULT_LIMIT = 100;
 
     public int $timeout = 1800;
 
-    public function __construct(public int $importRunId) {}
+    public function __construct(public int $importRunId)
+    {
+        $this->onConnection('product_imports');
+        $this->onQueue((string) config('queue.connections.product_imports.queue', 'product-imports'));
+    }
 
     public function handle(ProductService $productService, ?ProductImportRunRowService $rowService = null): void
     {
@@ -29,7 +41,9 @@ class ProcessProductImportRun implements ShouldQueue
             ->where('status', ImportRun::STATUS_PENDING)
             ->update([
                 'status' => ImportRun::STATUS_RUNNING,
+                'phase' => ImportRun::PHASE_STAGING,
                 'started_at' => now(),
+                'heartbeat_at' => now(),
             ]);
 
         $importRun = ImportRun::query()->find($this->importRunId);
@@ -54,30 +68,47 @@ class ProcessProductImportRun implements ShouldQueue
         $import = null;
 
         try {
+            $runStartedAt = microtime(true);
+            $shouldStop = $this->cancellationChecker($importRun);
             $import = (new ProductImport($productService))
                 ->forMode($importRun->mode ?? ImportRun::MODE_CREATE_UPDATE)
-                ->forImportRun($importRun->id);
+                ->forImportRun($importRun->id)
+                ->withCancellationCallback($shouldStop);
+            $isValidationRun = $importRun->mode === ImportRun::MODE_VALIDATE_ONLY
+                || $importRun->run_type === ImportRun::TYPE_VALIDATION;
 
-            $afterChunk = function (ProductImport $chunkImport, int $processedRows, int $totalRows) use ($importRun): bool {
+            $afterChunk = function (ProductImport $chunkImport, int $processedRows, int $totalRows) use ($importRun, $rowService, $shouldStop, $isValidationRun, $runStartedAt): bool {
+                if ($isValidationRun) {
+                    $this->persistPendingValidationRows($importRun, $chunkImport, $rowService);
+                }
+
                 $importRun->refresh();
-                if ($importRun->status === ImportRun::STATUS_CANCEL_REQUESTED) {
-                    $this->markCancelled($importRun, $processedRows);
+                if ($importRun->status === ImportRun::STATUS_CANCEL_REQUESTED || $shouldStop($chunkImport)) {
+                    $this->markCancelled($importRun, $processedRows, $chunkImport);
 
                     return false;
                 }
 
                 $importRun->update([
+                    'phase' => $isValidationRun ? ImportRun::PHASE_VALIDATING : ImportRun::PHASE_IMPORTING,
                     'total_rows' => $totalRows,
                     'processed_rows' => $processedRows,
                     'success_count' => $chunkImport->successCount,
                     'error_count' => $chunkImport->errorCount,
-                    'results' => array_slice($chunkImport->results, -100),
-                    'errors' => array_slice($chunkImport->errors, -100),
+                    'results' => array_slice($chunkImport->results, -self::RESULT_LIMIT),
+                    'errors' => array_slice($chunkImport->errors, -self::RESULT_LIMIT),
                     'summary' => $this->summaryForImportRun($importRun, $chunkImport, [
-                        'latest_results_limited_to' => 100,
-                        'latest_errors_limited_to' => 100,
+                        'latest_results_limited_to' => self::RESULT_LIMIT,
+                        'latest_errors_limited_to' => self::RESULT_LIMIT,
+                        'metrics' => $this->metricsSummary($chunkImport, $processedRows, $runStartedAt),
                     ]),
+                    'heartbeat_at' => now(),
                 ]);
+                $chunkImport->results = array_slice($chunkImport->results, -self::RESULT_LIMIT);
+
+                if ($isValidationRun) {
+                    $chunkImport->errors = array_slice($chunkImport->errors, -self::RESULT_LIMIT);
+                }
 
                 return true;
             };
@@ -85,38 +116,53 @@ class ProcessProductImportRun implements ShouldQueue
             if (($importRun->summary['use_persisted_rows_snapshot'] ?? false) === true && $importRun->rows()->exists()) {
                 $totalRows = $importRun->rows()->where('status', 'valid')->count();
                 $importRun->update([
+                    'phase' => ImportRun::PHASE_IMPORTING,
                     'total_rows' => $totalRows,
                     'processed_rows' => 0,
+                    'heartbeat_at' => now(),
                 ]);
                 $shouldContinue = true;
-                $rowService->eachImportableRowChunk($importRun, self::IMPORT_CHUNK_SIZE, function (array $chunk) use ($import, $afterChunk, $totalRows, &$shouldContinue): void {
+                $rowService->eachImportableRowChunk($importRun, self::IMPORT_CHUNK_SIZE, function (array $chunk) use ($import, $afterChunk, $totalRows, &$shouldContinue): bool {
                     if (! $shouldContinue) {
-                        return;
+                        return false;
                     }
 
                     $import->execute($chunk);
                     if (! $afterChunk($import, $import->processedCount, $totalRows)) {
                         $shouldContinue = false;
                     }
+
+                    return $shouldContinue;
                 });
-                $rowService->synchronizeExecutionErrors($importRun, $import);
+                if ($shouldContinue) {
+                    $rowService->synchronizeExecutionErrors($importRun, $import);
+                }
             } elseif ($importRun->shouldProcessFailedRows()) {
                 $rows = collect($importRun->failed_rows)->map(fn (array $row): array => $row['data'] ?? $row)->values()->all();
                 $importRun->update([
+                    'phase' => ImportRun::PHASE_IMPORTING,
                     'total_rows' => count($rows),
                     'processed_rows' => 0,
+                    'heartbeat_at' => now(),
                 ]);
                 $import->execute($rows);
+                if ($shouldStop($import)) {
+                    $this->markCancelled($importRun, $import->processedCount, $import);
+
+                    return;
+                }
             } else {
                 $path = Storage::disk('local')->path($importRun->stored_path);
                 $selectedSheet = $import->resolveSelectedSheet($path, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
                 $importRun->update([
+                    'phase' => $isValidationRun ? ImportRun::PHASE_VALIDATING : ImportRun::PHASE_IMPORTING,
                     'total_rows' => (int) ($selectedSheet['row_count'] ?? 0),
                     'processed_rows' => 0,
+                    'heartbeat_at' => now(),
                 ]);
 
-                if ($importRun->mode === ImportRun::MODE_VALIDATE_ONLY || $importRun->run_type === ImportRun::TYPE_VALIDATION) {
-                    $import->validateFileInChunks($path, self::IMPORT_CHUNK_SIZE, $afterChunk, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
+                if ($isValidationRun) {
+                    $import->validateFileInChunks($path, self::VALIDATION_CHUNK_SIZE, $afterChunk, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
                 } else {
                     $import->importInChunks($path, self::IMPORT_CHUNK_SIZE, $afterChunk, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
                 }
@@ -127,26 +173,35 @@ class ProcessProductImportRun implements ShouldQueue
                 return;
             }
 
+            if ($importRun->status === ImportRun::STATUS_CANCEL_REQUESTED || $shouldStop($import)) {
+                $this->markCancelled($importRun, $import->processedCount, $import);
+
+                return;
+            }
+
             $this->persistValidationRows($importRun, $import, $rowService);
 
             $importRun->update([
                 'status' => ImportRun::STATUS_COMPLETED,
+                'phase' => ImportRun::PHASE_FINALIZING,
                 'total_rows' => $import->processedCount,
                 'processed_rows' => $import->processedCount,
                 'success_count' => $import->successCount,
                 'error_count' => $import->errorCount,
-                'results' => array_slice($import->results, -100),
-                'errors' => array_slice($import->errors, -100),
+                'results' => array_slice($import->results, -self::RESULT_LIMIT),
+                'errors' => array_slice($import->errors, -self::RESULT_LIMIT),
                 'failed_rows' => array_values(array_filter($import->errors, fn (array $error): bool => ! empty($error['data']))),
                 'summary' => $this->summaryForImportRun($importRun, $import, array_merge([
-                    'latest_results_limited_to' => 100,
-                    'latest_errors_limited_to' => 100,
+                    'latest_results_limited_to' => self::RESULT_LIMIT,
+                    'latest_errors_limited_to' => self::RESULT_LIMIT,
                     'records' => $importRun->records()->selectRaw('action, count(*) as total')->groupBy('action')->pluck('total', 'action')->all(),
                     'source_file_deleted' => false,
+                    'metrics' => $this->metricsSummary($import, $import->processedCount, $runStartedAt),
                 ], $importRun->rows()->exists()
                     ? array_merge($rowService->summaryCounts($importRun), $rowService->groupingSummary($importRun))
                     : [])),
                 'finished_at' => now(),
+                'heartbeat_at' => now(),
             ]);
             $importRun->refresh();
             $this->recordActivity(
@@ -168,40 +223,90 @@ class ProcessProductImportRun implements ShouldQueue
             && Storage::disk('local')->exists($importRun->stored_path);
     }
 
-    private function markCancelled(ImportRun $importRun, int $processedRows): void
+    private function markCancelled(ImportRun $importRun, int $processedRows, ?ProductImport $import = null): void
     {
         $importRun->update([
             'status' => ImportRun::STATUS_CANCELLED,
+            'phase' => ImportRun::PHASE_FINALIZING,
             'processed_rows' => $processedRows,
-            'summary' => array_merge($importRun->summary ?? [], [
-                'source_file_deleted' => false,
-            ]),
+            'success_count' => $import?->successCount ?? $importRun->success_count,
+            'error_count' => $import?->errorCount ?? $importRun->error_count,
+            'results' => $import === null ? ($importRun->results ?? []) : array_slice($import->results, -self::RESULT_LIMIT),
+            'errors' => $import === null ? ($importRun->errors ?? []) : array_slice($import->errors, -self::RESULT_LIMIT),
+            'summary' => array_merge(
+                $importRun->summary ?? [],
+                $import === null ? [] : $this->validationRowsSummary($importRun, $import),
+                [
+                    'source_file_deleted' => false,
+                    'metrics' => $import === null ? ($importRun->summary['metrics'] ?? []) : $this->metricsSummary($import, $processedRows, (float) ($importRun->started_at?->timestamp ?? time())),
+                ]
+            ),
             'finished_at' => now(),
+            'heartbeat_at' => now(),
         ]);
         $importRun->refresh();
         $this->recordActivity($importRun, 'cancelled', 'Importacion cancelada durante el procesamiento.');
     }
 
+    private function cancellationChecker(ImportRun $importRun): callable
+    {
+        $lastCheckedAt = 0.0;
+        $lastProcessedRows = -self::CANCEL_CHECK_ROWS;
+        $cancelRequested = false;
+
+        return function (ProductImport $import) use ($importRun, &$lastCheckedAt, &$lastProcessedRows, &$cancelRequested): bool {
+            if ($cancelRequested) {
+                return true;
+            }
+
+            $processedRows = $import->processedCount;
+            $now = microtime(true);
+
+            if (
+                $processedRows - $lastProcessedRows < self::CANCEL_CHECK_ROWS
+                && ($now - $lastCheckedAt) < (self::CANCEL_CHECK_MICROSECONDS / 1000000)
+            ) {
+                return false;
+            }
+
+            $lastCheckedAt = $now;
+            $lastProcessedRows = $processedRows;
+
+            $cancelRequested = ImportRun::query()
+                ->whereKey($importRun->id)
+                ->where('status', ImportRun::STATUS_CANCEL_REQUESTED)
+                ->exists();
+
+            return $cancelRequested;
+        };
+    }
+
     private function markFailed(ImportRun $importRun, string $message, ?ProductImport $import = null): void
     {
         $importRun->refresh();
-        if ($import !== null) {
-            app(ProductImportRunRowService::class)->persistValidationRows($importRun, $import);
+        $partialPersistFailureMessage = null;
+        if (
+            $import !== null
+            && ($importRun->mode === ImportRun::MODE_VALIDATE_ONLY || $importRun->run_type === ImportRun::TYPE_VALIDATION)
+            && $import->validationRows !== []
+        ) {
+            try {
+                app(ProductImportRunRowService::class)->persistValidationRowsChunk($importRun, $import->validationRows);
+                $import->validationRows = [];
+            } catch (\Throwable $persistException) {
+                $partialPersistFailureMessage = $persistException->getMessage();
+            }
         }
+        $errors = $this->failureErrors($importRun, $message, $import);
 
         $importRun->update([
             'status' => ImportRun::STATUS_FAILED,
+            'phase' => ImportRun::PHASE_FINALIZING,
             'processed_rows' => $import?->processedCount ?? $importRun->processed_rows,
             'success_count' => $import?->successCount ?? $importRun->success_count,
             'error_count' => $import?->errorCount ?? $importRun->error_count,
-            'results' => $import === null ? ($importRun->results ?? []) : array_slice($import->results, -100),
-            'errors' => $import === null || empty($import->errors)
-                ? [[
-                    'row' => 0,
-                    'label' => $importRun->original_filename,
-                    'error' => $message,
-                ]]
-                : array_slice($import->errors, -100),
+            'results' => $import === null ? ($importRun->results ?? []) : array_slice($import->results, -self::RESULT_LIMIT),
+            'errors' => $errors,
             'failed_rows' => $import === null ? ($importRun->failed_rows ?? []) : array_values(array_filter($import->errors, fn (array $error): bool => ! empty($error['data']))),
             'summary' => array_merge(
                 $importRun->summary ?? [],
@@ -209,9 +314,14 @@ class ProcessProductImportRun implements ShouldQueue
                 [
                     'source_file_deleted' => false,
                     'failure_message' => $message,
-                ]
+                ],
+                $partialPersistFailureMessage === null ? [] : [
+                    'partial_validation_rows_persist_failed' => true,
+                    'partial_validation_rows_persist_failure_message' => $partialPersistFailureMessage,
+                ],
             ),
             'finished_at' => now(),
+            'heartbeat_at' => now(),
         ]);
         $importRun->refresh();
         $this->recordActivity(
@@ -222,6 +332,21 @@ class ProcessProductImportRun implements ShouldQueue
                 : 'Importacion de productos fallida.',
             ['message' => $message]
         );
+    }
+
+    private function failureErrors(ImportRun $importRun, string $message, ?ProductImport $import = null): array
+    {
+        $failureError = [
+            'row' => 0,
+            'label' => $importRun->original_filename,
+            'error' => $message,
+        ];
+
+        if ($import === null || empty($import->errors)) {
+            return [$failureError];
+        }
+
+        return array_slice(array_merge($import->errors, [$failureError]), -self::RESULT_LIMIT);
     }
 
     private function summaryForImportRun(ImportRun $importRun, ProductImport $import, array $summary): array
@@ -240,8 +365,11 @@ class ProcessProductImportRun implements ShouldQueue
             return [];
         }
 
+        $persistedRowsCount = $importRun->rows()->count();
+        $validationRowsCount = $persistedRowsCount + count($import->validationRows);
+
         return [
-            'validation_rows_count' => count($import->validationRows),
+            'validation_rows_count' => $validationRowsCount,
             'validation_rows_limited' => true,
             'rows_revision' => (int) ($importRun->summary['rows_revision'] ?? 0),
             'validated_rows_revision' => (int) ($importRun->summary['rows_revision'] ?? 0),
@@ -256,7 +384,45 @@ class ProcessProductImportRun implements ShouldQueue
             return;
         }
 
+        if ($import->validationRows === []) {
+            return;
+        }
+
+        if ($importRun->rows()->exists()) {
+            $rowService->persistValidationRowsChunk($importRun, $import->validationRows);
+            $import->validationRows = [];
+
+            return;
+        }
+
         $rowService->persistValidationRows($importRun, $import);
+        $import->validationRows = [];
+    }
+
+    private function persistPendingValidationRows(ImportRun $importRun, ProductImport $import, ProductImportRunRowService $rowService): void
+    {
+        if ($import->validationRows === []) {
+            return;
+        }
+
+        $rowService->persistValidationRowsChunk($importRun, $import->validationRows);
+        $import->validationRows = [];
+        $import->results = array_slice($import->results, -self::RESULT_LIMIT);
+        $import->errors = array_slice($import->errors, -self::RESULT_LIMIT);
+    }
+
+    private function metricsSummary(ProductImport $import, int $processedRows, float $startedAt): array
+    {
+        $durationSeconds = max(0.001, microtime(true) - $startedAt);
+
+        return [
+            'duration_seconds' => round($durationSeconds, 3),
+            'rows_per_second' => round($processedRows / $durationSeconds, 2),
+            'memory_peak_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
+            'latest_result_count' => count($import->results),
+            'latest_error_count' => count($import->errors),
+            'last_heartbeat_at' => now()->toISOString(),
+        ];
     }
 
     private function recordActivity(ImportRun $importRun, string $event, string $description, array $properties = []): void

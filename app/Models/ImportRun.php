@@ -26,6 +26,18 @@ class ImportRun extends Model
 
     public const STATUS_PAUSED = 'paused';
 
+    public const WORKER_WAIT_WARNING_SECONDS = 30;
+
+    public const PHASE_QUEUED = 'queued';
+
+    public const PHASE_STAGING = 'staging';
+
+    public const PHASE_VALIDATING = 'validating';
+
+    public const PHASE_IMPORTING = 'importing';
+
+    public const PHASE_FINALIZING = 'finalizing';
+
     public const TERMINAL_STATUSES = [
         self::STATUS_COMPLETED,
         self::STATUS_FAILED,
@@ -67,6 +79,7 @@ class ImportRun extends Model
         'run_type',
         'mode',
         'status',
+        'phase',
         'total_rows',
         'processed_rows',
         'success_count',
@@ -78,6 +91,7 @@ class ImportRun extends Model
         'summary',
         'started_at',
         'finished_at',
+        'heartbeat_at',
     ];
 
     protected $casts = [
@@ -89,6 +103,7 @@ class ImportRun extends Model
         'sheet_index' => 'integer',
         'started_at' => 'datetime',
         'finished_at' => 'datetime',
+        'heartbeat_at' => 'datetime',
     ];
 
     public function user(): BelongsTo
@@ -138,6 +153,19 @@ class ImportRun extends Model
     public function canCancel(): bool
     {
         return in_array($this->status, self::CANCELLABLE_STATUSES, true);
+    }
+
+    public function isWaitingForWorker(): bool
+    {
+        $isQueued = $this->phase === null || $this->phase === self::PHASE_QUEUED;
+        $lastActivityAt = $this->heartbeat_at ?? $this->updated_at ?? $this->created_at;
+
+        return $this->status === self::STATUS_PENDING
+            && $isQueued
+            && $this->started_at === null
+            && $this->heartbeat_at === null
+            && $lastActivityAt?->lt(now()->subSeconds(self::WORKER_WAIT_WARNING_SECONDS))
+            === true;
     }
 
     public function canDeleteFromHistory(): bool

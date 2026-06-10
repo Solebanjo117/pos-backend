@@ -30,6 +30,10 @@ abstract class BaseImport
 
     public int $processedCount = 0;
 
+    protected $shouldStop = null;
+
+    private array $sheetInspectionCache = [];
+
     abstract public function getColumns(): array;
 
     abstract public function getExampleRow(): array;
@@ -39,6 +43,13 @@ abstract class BaseImport
     abstract public function processRow(array $row): mixed;
 
     abstract public function getEntityLabel(): string;
+
+    public function withCancellationCallback(?callable $shouldStop): static
+    {
+        $this->shouldStop = $shouldStop;
+
+        return $this;
+    }
 
     public function preview(UploadedFile $file, int $maxRows = 200, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
     {
@@ -65,6 +76,10 @@ abstract class BaseImport
     public function execute(array $rows): void
     {
         foreach ($rows as $row) {
+            if ($this->shouldStopImport()) {
+                return;
+            }
+
             $this->processedCount++;
             $rowNum = (int) ($row['__row'] ?? 0);
 
@@ -100,6 +115,10 @@ abstract class BaseImport
     public function validateRows(array $rows): void
     {
         foreach ($rows as $row) {
+            if ($this->shouldStopImport()) {
+                return;
+            }
+
             $this->processedCount++;
             $rowNum = (int) ($row['__row'] ?? 0);
 
@@ -156,6 +175,10 @@ abstract class BaseImport
         $chunk = [];
 
         foreach ($this->extractRowsLazy($file, (int) $selectedSheet['index'], (string) $selectedSheet['name'], $mapping) as $row) {
+            if ($this->shouldStopImport()) {
+                return;
+            }
+
             $chunk[] = $row;
 
             if (count($chunk) < $chunkSize) {
@@ -197,6 +220,10 @@ abstract class BaseImport
         $chunk = [];
 
         foreach ($this->extractRowsLazy($file, (int) $selectedSheet['index'], (string) $selectedSheet['name'], $mapping) as $row) {
+            if ($this->shouldStopImport()) {
+                return;
+            }
+
             $chunk[] = $row;
 
             if (count($chunk) < $chunkSize) {
@@ -230,6 +257,11 @@ abstract class BaseImport
         return 'name';
     }
 
+    protected function shouldStopImport(): bool
+    {
+        return is_callable($this->shouldStop) && (bool) call_user_func($this->shouldStop, $this);
+    }
+
     protected function getWarningsForRow(array $row): array
     {
         return [];
@@ -255,6 +287,11 @@ abstract class BaseImport
 
     public function inspectSheets(UploadedFile|string $file, array $mapping = []): array
     {
+        $cacheKey = $this->sheetInspectionCacheKey($file, $mapping);
+        if (isset($this->sheetInspectionCache[$cacheKey])) {
+            return $this->sheetInspectionCache[$cacheKey];
+        }
+
         $sheetInfo = $this->sheetInfo($file);
         $sheets = [];
 
@@ -305,7 +342,17 @@ abstract class BaseImport
             $sheets[$position]['is_recommended'] = $sheet['index'] === $recommendedIndex;
         }
 
-        return $sheets;
+        return $this->sheetInspectionCache[$cacheKey] = $sheets;
+    }
+
+    private function sheetInspectionCacheKey(UploadedFile|string $file, array $mapping): string
+    {
+        $path = $file instanceof UploadedFile ? $file->getRealPath() : $file;
+        $mtime = is_string($path) && $path !== '' && file_exists($path)
+            ? (string) filemtime($path)
+            : '';
+
+        return md5((string) $path.'|'.$mtime.'|'.(json_encode($mapping) ?: ''));
     }
 
     public function resolveSelectedSheet(UploadedFile|string $file, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
@@ -408,7 +455,7 @@ abstract class BaseImport
                 }
             }
 
-            if ($this->hasSingleUnnamedSheet($sheets)) {
+            if ($this->hasSingleSheet($sheets)) {
                 return (int) $sheets[0]['index'];
             }
 
@@ -433,9 +480,9 @@ abstract class BaseImport
      *
      * @param  array<int, array<string, mixed>>  $sheets
      */
-    private function hasSingleUnnamedSheet(array $sheets): bool
+    private function hasSingleSheet(array $sheets): bool
     {
-        return count($sheets) === 1 && trim((string) ($sheets[0]['name'] ?? '')) === '';
+        return count($sheets) === 1;
     }
 
     /**
@@ -447,6 +494,12 @@ abstract class BaseImport
 
         if (! is_string($path) || $path === '') {
             return [];
+        }
+
+        $extension = mb_strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        if (in_array($extension, ['xlsx', 'ods'], true)) {
+            return $this->legacySheetInfo($path);
         }
 
         if (! $this->supportsOpenSpout($path)) {

@@ -16,6 +16,8 @@ class ProductImportRunRowService
 
     private const LEGACY_HIDDEN_MAPPING_TARGETS = ['imagen_url'];
 
+    private const PROCESSING_LEASE_MINUTES = 5;
+
     public function __construct(private readonly ProductService $productService) {}
 
     public function persistValidationRows(ImportRun $importRun, ProductImport $import): void
@@ -128,10 +130,16 @@ class ProductImportRunRowService
                 'sheet_name' => $row->sheet_name,
                 'status' => $row->status,
                 'action_type' => $row->action_type,
+                'execution_status' => $row->execution_status,
                 'label' => $row->label,
                 'search_text' => $row->search_text,
+                'product_group_key' => $row->product_group_key,
+                'variant_key' => $row->variant_key,
+                'conflict_key' => $row->conflict_key,
                 'is_edited' => $row->is_edited,
                 'validated_at' => $row->validated_at,
+                'executed_at' => $row->executed_at,
+                'execution_error' => $row->execution_error,
                 'data' => json_encode($row->data ?? [], JSON_UNESCAPED_UNICODE),
                 'source_data' => json_encode($row->source_data ?? [], JSON_UNESCAPED_UNICODE),
                 'errors' => json_encode($row->errors ?? [], JSON_UNESCAPED_UNICODE),
@@ -188,8 +196,8 @@ class ProductImportRunRowService
         $importRun->rows()
             ->select(['id', 'row_number', 'data', 'source_data'])
             ->orderBy('id')
-            ->chunkById($chunkSize, function (Collection $rows) use ($callback, $importRun): void {
-                $callback($rows
+            ->chunkById($chunkSize, function (Collection $rows) use ($callback, $importRun): bool {
+                $shouldContinue = $callback($rows
                     ->map(fn (ImportRunRow $row): array => array_merge(
                         $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
                         $row->data ?? [],
@@ -199,6 +207,8 @@ class ProductImportRunRowService
                         ]
                     ))
                     ->all());
+
+                return $shouldContinue !== false;
             });
     }
 
@@ -208,8 +218,8 @@ class ProductImportRunRowService
             ->where('status', 'valid')
             ->select(['id', 'row_number', 'data', 'source_data'])
             ->orderBy('id')
-            ->chunkById($chunkSize, function (Collection $rows) use ($callback, $importRun): void {
-                $callback($rows
+            ->chunkById($chunkSize, function (Collection $rows) use ($callback, $importRun): bool {
+                $shouldContinue = $callback($rows
                     ->map(fn (ImportRunRow $row): array => array_merge(
                         $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
                         $row->data ?? [],
@@ -219,6 +229,198 @@ class ProductImportRunRowService
                         ]
                     ))
                     ->all());
+
+                return $shouldContinue !== false;
+            });
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function nextPendingImportableRows(ImportRun $importRun, int $chunkSize): array
+    {
+        return $importRun->rows()
+            ->where('status', 'valid')
+            ->whereNull('execution_status')
+            ->select(['id', 'row_number', 'data', 'source_data'])
+            ->orderBy('id')
+            ->limit($chunkSize)
+            ->get()
+            ->map(fn (ImportRunRow $row): array => array_merge(
+                $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
+                $row->data ?? [],
+                [
+                    '__row' => $row->row_number,
+                    '__source_data' => $row->source_data ?? [],
+                ]
+            ))
+            ->all();
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function claimPendingImportableRows(ImportRun $importRun, int $chunkSize): array
+    {
+        return DB::transaction(function () use ($importRun, $chunkSize): array {
+            $staleBefore = now()->subMinutes(self::PROCESSING_LEASE_MINUTES);
+            $seedRows = $importRun->rows()
+                ->where('status', 'valid')
+                ->where(function ($query) use ($staleBefore): void {
+                    $query->whereNull('execution_status')
+                        ->orWhere(function ($query) use ($staleBefore): void {
+                            $query->where('execution_status', 'processing')
+                                ->where('updated_at', '<', $staleBefore);
+                        });
+                })
+                ->select(['id', 'product_group_key'])
+                ->orderBy('id')
+                ->limit($chunkSize)
+                ->lockForUpdate()
+                ->get();
+
+            if ($seedRows->isEmpty()) {
+                return [];
+            }
+
+            $groupKeys = $seedRows
+                ->pluck('product_group_key')
+                ->filter(fn ($key): bool => is_string($key) && trim($key) !== '')
+                ->unique()
+                ->values()
+                ->all();
+            $ungroupedRowIds = $seedRows
+                ->filter(fn (ImportRunRow $row): bool => ! is_string($row->product_group_key) || trim($row->product_group_key) === '')
+                ->pluck('id')
+                ->all();
+
+            $claimedRows = $importRun->rows()
+                ->where('status', 'valid')
+                ->where(function ($query) use ($staleBefore): void {
+                    $query->whereNull('execution_status')
+                        ->orWhere(function ($query) use ($staleBefore): void {
+                            $query->where('execution_status', 'processing')
+                                ->where('updated_at', '<', $staleBefore);
+                        });
+                })
+                ->where(function ($query) use ($groupKeys, $ungroupedRowIds): void {
+                    if ($groupKeys !== []) {
+                        $query->whereIn('product_group_key', $groupKeys);
+                    }
+
+                    if ($ungroupedRowIds !== []) {
+                        $method = $groupKeys === [] ? 'whereIn' : 'orWhereIn';
+                        $query->{$method}('id', $ungroupedRowIds);
+                    }
+                })
+                ->select(['id', 'row_number', 'data', 'source_data'])
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            if ($claimedRows->isEmpty()) {
+                return [];
+            }
+
+            $now = now();
+            ImportRunRow::query()
+                ->whereKey($claimedRows->pluck('id')->all())
+                ->update([
+                    'execution_status' => 'processing',
+                    'updated_at' => $now,
+                ]);
+
+            return $claimedRows
+                ->map(fn (ImportRunRow $row): array => array_merge(
+                    $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
+                    $row->data ?? [],
+                    [
+                        '__row' => $row->row_number,
+                        '__source_data' => $row->source_data ?? [],
+                    ]
+                ))
+                ->all();
+        });
+    }
+
+    public function hasPendingImportableRows(ImportRun $importRun): bool
+    {
+        $staleBefore = now()->subMinutes(self::PROCESSING_LEASE_MINUTES);
+
+        return $importRun->rows()
+            ->where('status', 'valid')
+            ->where(function ($query) use ($staleBefore): void {
+                $query->whereNull('execution_status')
+                    ->orWhere(function ($query) use ($staleBefore): void {
+                        $query->where('execution_status', 'processing')
+                            ->where('updated_at', '<', $staleBefore);
+                    });
+            })
+            ->exists();
+    }
+
+    public function hasUnfinishedImportableRows(ImportRun $importRun): bool
+    {
+        return $importRun->rows()
+            ->where('status', 'valid')
+            ->where(function ($query): void {
+                $query->whereNull('execution_status')
+                    ->orWhere('execution_status', 'processing');
+            })
+            ->exists();
+    }
+
+    public function executedImportableRowsCount(ImportRun $importRun): int
+    {
+        return $importRun->rows()
+            ->whereIn('execution_status', ['success', 'failed'])
+            ->count();
+    }
+
+    /**
+     * @param  array<int, int>  $rowNumbers
+     */
+    public function synchronizeExecutionResultsForRows(ImportRun $importRun, ProductImport $import, array $rowNumbers): void
+    {
+        if ($rowNumbers === []) {
+            return;
+        }
+
+        $errorsByRow = collect($import->errors)
+            ->whereIn('row', $rowNumbers)
+            ->keyBy('row');
+
+        $importRun->rows()
+            ->whereIn('row_number', $rowNumbers)
+            ->where('status', 'valid')
+            ->update([
+                'execution_status' => 'success',
+                'executed_at' => now(),
+                'execution_error' => null,
+                'errors' => json_encode([], JSON_UNESCAPED_UNICODE),
+                'conflicts' => json_encode([], JSON_UNESCAPED_UNICODE),
+            ]);
+
+        if ($errorsByRow->isEmpty()) {
+            return;
+        }
+
+        $importRun->rows()
+            ->whereIn('row_number', $errorsByRow->keys())
+            ->select(['id', 'row_number', 'change_preview'])
+            ->orderBy('id')
+            ->chunkById(500, function (Collection $rows) use ($errorsByRow): void {
+                foreach ($rows as $row) {
+                    $error = $errorsByRow->get($row->row_number);
+                    $row->update([
+                        'status' => 'error',
+                        'execution_status' => 'failed',
+                        'execution_error' => $error['error'],
+                        'errors' => [$error['error']],
+                        'conflicts' => $error['conflicts'] ?? [],
+                        'change_preview' => $error['change_preview'] ?? $row->change_preview ?? [],
+                    ]);
+                }
             });
     }
 
@@ -319,24 +521,48 @@ class ProductImportRunRowService
 
     public function persistValidationRowsChunk(ImportRun $importRun, array $validationRows, bool $preserveEdited = false): void
     {
+        if ($validationRows === []) {
+            return;
+        }
+
         $editedRows = $preserveEdited
             ? $importRun->rows()->whereIn('row_number', collect($validationRows)->pluck('row'))->pluck('is_edited', 'row_number')
             : collect();
 
-        foreach ($validationRows as $validationRow) {
-            $rowNumber = (int) ($validationRow['row'] ?? 0);
-            $attributes = $this->validationRowModelAttributes(
-                $validationRow,
-                (bool) ($editedRows[$rowNumber] ?? false)
-            );
+        $now = now();
+        $rows = array_map(fn (array $validationRow): array => $this->validationRowAttributes(
+            $importRun,
+            $validationRow,
+            (bool) ($editedRows[(int) ($validationRow['row'] ?? 0)] ?? false),
+            $now
+        ), $validationRows);
 
-            $importRun->rows()->updateOrCreate(
-                ['row_number' => $rowNumber],
-                array_merge($attributes, [
-                    'sheet_name' => $importRun->sheet_name,
-                ])
-            );
-        }
+        ImportRunRow::query()->upsert(
+            $rows,
+            ['import_run_id', 'row_number'],
+            [
+                'sheet_name',
+                'status',
+                'action_type',
+                'execution_status',
+                'label',
+                'search_text',
+                'product_group_key',
+                'variant_key',
+                'conflict_key',
+                'is_edited',
+                'validated_at',
+                'executed_at',
+                'execution_error',
+                'data',
+                'source_data',
+                'errors',
+                'warnings',
+                'conflicts',
+                'change_preview',
+                'updated_at',
+            ]
+        );
     }
 
     public function synchronizeExecutionErrors(ImportRun $importRun, ProductImport $import): void
@@ -345,6 +571,9 @@ class ProductImportRunRowService
 
         $importRun->rows()->where('status', 'valid')->update([
             'status' => 'valid',
+            'execution_status' => 'success',
+            'executed_at' => now(),
+            'execution_error' => null,
             'errors' => json_encode([], JSON_UNESCAPED_UNICODE),
             'conflicts' => json_encode([], JSON_UNESCAPED_UNICODE),
         ]);
@@ -358,6 +587,8 @@ class ProductImportRunRowService
                     $error = $errorsByRow->get($row->row_number);
                     $row->update([
                         'status' => 'error',
+                        'execution_status' => 'failed',
+                        'execution_error' => $error['error'],
                         'errors' => [$error['error']],
                         'conflicts' => $error['conflicts'] ?? [],
                         'change_preview' => $error['change_preview'] ?? $row->change_preview ?? [],
@@ -580,14 +811,21 @@ class ProductImportRunRowService
         $data = $row['data'] ?? [];
         $errors = $row['errors'] ?? [];
         $conflicts = $row['conflicts'] ?? [];
+        $identity = $this->validationIdentityColumns($data);
 
         return [
             'status' => ($row['is_valid'] ?? false) ? 'valid' : 'error',
             'action_type' => $row['action_type'] ?? null,
+            'execution_status' => null,
             'label' => $row['label'] ?? ($data['nombre'] ?? null),
             'search_text' => $this->searchText($data),
+            'product_group_key' => $identity['product_group_key'],
+            'variant_key' => $identity['variant_key'],
+            'conflict_key' => $identity['conflict_key'],
             'is_edited' => $isEdited,
             'validated_at' => now(),
+            'executed_at' => null,
+            'execution_error' => null,
             'data' => json_encode($data, JSON_UNESCAPED_UNICODE),
             'source_data' => json_encode($row['source_data'] ?? null, JSON_UNESCAPED_UNICODE),
             'errors' => json_encode($errors, JSON_UNESCAPED_UNICODE),
@@ -595,6 +833,37 @@ class ProductImportRunRowService
             'conflicts' => json_encode($conflicts, JSON_UNESCAPED_UNICODE),
             'change_preview' => json_encode($row['change_preview'] ?? [], JSON_UNESCAPED_UNICODE),
         ];
+    }
+
+    /**
+     * @return array{product_group_key: ?string, variant_key: ?string, conflict_key: ?string}
+     */
+    private function validationIdentityColumns(array $data): array
+    {
+        $productGroupKey = $this->nonEmptyString($data['__product_group_key'] ?? $data['__product_key'] ?? null);
+        $variantPreview = is_array($data['__variant_preview'] ?? null)
+            ? $data['__variant_preview']
+            : null;
+        $variantKey = $this->nonEmptyString($variantPreview['variant_key'] ?? null)
+            ?? $this->nonEmptyString($this->variantGroupingKey($data, $variantPreview));
+        $conflictKey = $productGroupKey !== null && $variantKey !== null
+            ? $productGroupKey.'|'.$variantKey
+            : null;
+
+        return [
+            'product_group_key' => $this->technicalIdentityKey('pg', $productGroupKey),
+            'variant_key' => $this->technicalIdentityKey('vk', $variantKey),
+            'conflict_key' => $this->technicalIdentityKey('ck', $conflictKey),
+        ];
+    }
+
+    private function technicalIdentityKey(string $prefix, ?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return $prefix.':'.hash('sha256', $value);
     }
 
     private function isEditableValidationRun(ImportRun $importRun): bool
