@@ -1652,6 +1652,35 @@ it('rejects oversized product import metadata files before metadata extraction',
     }
 });
 
+it('returns cors headers for product import metadata preflight requests', function () {
+    $this->withHeaders([
+        'Origin' => 'http://pos-frontend.test',
+        'Access-Control-Request-Method' => 'POST',
+        'Access-Control-Request-Headers' => 'content-type,x-csrf-token',
+    ])->options('/api/v1/products/import/metadata')
+        ->assertHeader('Access-Control-Allow-Origin', 'http://pos-frontend.test');
+});
+
+it('returns cors headers for product import metadata post requests', function () {
+    Storage::fake('local');
+
+    $admin = User::factory()->create([
+        'role' => 'admin',
+        'is_active' => true,
+    ]);
+
+    $this->actingAs($admin)
+        ->withHeader('Origin', 'http://pos-frontend.test')
+        ->postJson('/api/v1/products/import/metadata', [
+            'file' => productImportUploadedCsv([
+                ['Description', 'Category', 'System ID'],
+                ['Aceite CORS', 'Aceites', 'LS-CORS'],
+            ]),
+        ])
+        ->assertOk()
+        ->assertHeader('Access-Control-Allow-Origin', 'http://pos-frontend.test');
+});
+
 it('returns cors headers for product import validation preflight requests', function () {
     $this->withHeaders([
         'Origin' => 'http://pos-frontend.test',

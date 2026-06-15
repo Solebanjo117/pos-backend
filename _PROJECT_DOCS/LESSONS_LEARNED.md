@@ -466,3 +466,36 @@ QuickPurchaseModal sigue siendo la misma UI, pero el endpoint
 cambió de crear una OC nueva a POST /purchase-orders/quick-purchase
 que usa getOrCreateDailyPurchaseOrder() internamente.
 El stock sube inmediatamente al procesar — no espera cierre de la OC.
+
+## LL-023 — Los límites de carga deben superar el máximo funcional del importador
+
+**Área:** Infraestructura / nginx / PHP-FPM / Importación de productos
+**Archivos afectados:** configuración nginx de `api.hermexpos.app`,
+`php.ini` o configuración PHP-FPM del sitio
+
+**Síntoma**
+Las rutas `POST /api/v1/products/import/metadata` y
+`POST /api/v1/products/import/validate` responden `413 Request Entity Too Large`.
+El navegador lo muestra además como CORS porque la respuesta de nginx o PHP
+ocurre antes de que Laravel agregue `Access-Control-Allow-Origin`.
+
+**Fix**
+Mantener el máximo funcional de Laravel y la UI en `100MB`, y configurar
+la infraestructura con margen para el cuerpo multipart:
+
+```nginx
+client_max_body_size 128M;
+```
+
+```ini
+upload_max_filesize = 128M
+post_max_size = 128M
+```
+
+Recargar nginx y reiniciar PHP-FPM después de aplicar los cambios.
+
+**Regla derivada**
+Los tres límites (`client_max_body_size`, `upload_max_filesize` y
+`post_max_size`) deben revisarse como un conjunto. Laravel solo puede devolver
+su validación `422` y sus headers CORS cuando el request supera primero esas
+barreras de infraestructura.
