@@ -10,10 +10,6 @@ use App\Models\ImportRunRecord;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductVariant;
-use App\Models\VehicleChassis;
-use App\Models\VehicleEngine;
-use App\Models\VehicleMake;
-use App\Models\VehicleModel;
 use App\Models\Warehouse;
 use App\Services\ProductImportBulkWriter;
 use App\Services\ProductService;
@@ -46,12 +42,6 @@ class ProductImport extends BaseImport
         'warehouse',
         'categorias_extra',
         'atributos',
-        'make',
-        'model',
-        'year',
-        'code',
-        'engine',
-        'vin',
     ];
 
     private string $mode = 'create_update';
@@ -63,8 +53,6 @@ class ProductImport extends BaseImport
     private array $missingCategories = [];
 
     private array $brandSuggestions = [];
-
-    private array $missingVehicleCandidates = [];
 
     private array $productIdsByImportKey = [];
 
@@ -84,10 +72,6 @@ class ProductImport extends BaseImport
 
     private ?Collection $cachedBrands = null;
 
-    private ?Collection $cachedVehicleCatalog = null;
-
-    private ?Collection $cachedVehicleCatalogByMakeKey = null;
-
     private array $rowContextCache = [];
 
     private array $technicalCategoriesCache = [];
@@ -97,10 +81,6 @@ class ProductImport extends BaseImport
     private array $categorySuggestionsCache = [];
 
     private array $brandSuggestionsCache = [];
-
-    private array $vehicleNameResolutionCache = [];
-
-    private array $vehicleCandidateCache = [];
 
     private array $actionCounts = [];
 
@@ -336,7 +316,7 @@ class ProductImport extends BaseImport
             'nombre', 'name', 'description', 'item', 'producto', 'product' => 'nombre',
             'sku', 'sku_base', 'code', 'codigo', 'custom_sku' => 'sku',
             'system_id', 'systemid', 'id_sistema', 'variant_code', 'variant_id' => 'system_id',
-            'brand', 'marca_producto', 'marca_variante', 'variant', 'variante', 'manufacturer', 'fabricante' => 'brand',
+            'brand', 'marca', 'marca_producto', 'marca_variante', 'variant', 'variante', 'manufacturer', 'fabricante' => 'brand',
             'descripcion', 'product_description', 'detalle' => 'descripcion',
             'categoria', 'category' => 'categoria',
             'costo', 'cost', 'unit_cost', 'default_cost', 'avg_cost' => 'costo',
@@ -346,14 +326,15 @@ class ProductImport extends BaseImport
             'warehouse', 'almacen', 'bodega' => 'warehouse',
             'categorias_extra', 'extra_categories', 'extra_category_ids' => 'categorias_extra',
             'atributos', 'attributes' => 'atributos',
-            'make', 'marca', 'vehicle_make' => 'make',
-            'model', 'modelo', 'vehicle_model' => 'model',
-            'year', 'ano', 'years', 'year_range' => 'year',
-            'code', 'codigo', 'chassis', 'chassis_code' => 'code',
-            'engine', 'motor', 'engine_code' => 'engine',
-            'vin', 'numero_vin', 'vin_number' => 'vin',
             default => $header,
         };
+    }
+
+    protected function applyHeaderMapping(string $mappedHeader, string $sourceHeader, array $mapping): string
+    {
+        $target = parent::applyHeaderMapping($mappedHeader, $sourceHeader, $mapping);
+
+        return $target === '' ? '' : $this->mapHeader($target);
     }
 
     public function validateRow(array $row, ?array $context = null): array
@@ -383,16 +364,6 @@ class ProductImport extends BaseImport
             $this->parseProductAttributes($row['atributos'] ?? null);
         } catch (\RuntimeException $e) {
             $errors[] = $e->getMessage();
-        }
-
-        if (! $context['has_explicit_vehicle_columns'] && $context['vehicle_candidate'] !== null) {
-            $this->rememberMissingVehicleCandidate($context['vehicle_candidate']);
-        }
-
-        foreach ($this->splitDelimitedValues($row['vin'] ?? null) as $vin) {
-            if (mb_strlen($vin) > 40) {
-                $errors[] = "El VIN '{$vin}' no puede tener mas de 40 caracteres.";
-            }
         }
 
         foreach (['costo' => 'costo', 'precio' => 'precio'] as $key => $label) {
@@ -442,21 +413,6 @@ class ProductImport extends BaseImport
 
         if (! empty($extraCategoryIds)) {
             $productData['extra_category_ids'] = $extraCategoryIds;
-        }
-
-        $compatibility = $this->hasExplicitVehicleColumns($row)
-            ? $this->resolveVehicleCompatibility($row)
-            : (is_array($context['vehicle_match'] ?? null)
-                ? ($context['vehicle_match']['compatibility'] ?? [])
-                : []);
-
-        if ($compatibility !== []) {
-            $productData['vehicle_compatibility'] = $compatibility;
-        }
-
-        $vins = $this->splitDelimitedValues($row['vin'] ?? null);
-        if ($vins !== []) {
-            $productData['vins'] = array_map(fn (string $vin): string => strtoupper(trim($vin)), $vins);
         }
 
         $existingProduct = $this->findExistingProduct($productData);
@@ -607,9 +563,6 @@ class ProductImport extends BaseImport
             || ($operation['conflicts'] ?? []) !== []
             || ! empty($row['__variants'])
             || ! empty($previewData['__attributes'])
-            || ! empty($previewData['__vehicle_compatibility'])
-            || ! empty($previewData['__vehicle_creation_candidate'])
-            || $this->hasExplicitVehicleColumns($row)
             || $this->splitDelimitedValues($row['categorias_extra'] ?? null) !== []
             || $this->splitDelimitedValues($row['atributos'] ?? null) !== []
         ) {
@@ -927,6 +880,39 @@ class ProductImport extends BaseImport
         }
     }
 
+    /**
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<int, array<string, mixed>>
+     */
+    public function stagingRowsForValidation(array $rows): array
+    {
+        $rowCollection = collect($rows);
+        $identityIndex = $this->buildRowIdentityIndex($rowCollection);
+        $this->prepareLookupContext($rowCollection, $identityIndex);
+        $identityPosition = 0;
+
+        return $rowCollection
+            ->map(function (array $row) use ($identityIndex, &$identityPosition): array {
+                $context = $this->rowContextAt($row, $identityPosition, $identityIndex);
+                $variantPreview = array_key_exists($identityPosition, $identityIndex['row_variant_previews'] ?? [])
+                    ? $identityIndex['row_variant_previews'][$identityPosition]
+                    : $this->previewVariantDataFromRow($row);
+                $identityPosition++;
+                $warnings = $this->getWarningsForRow($row, $context);
+                $previewData = $this->mapRowToPreview($row, [], $warnings, $context, $variantPreview, true);
+                unset($previewData['imagen_url']);
+
+                return [
+                    'row' => (int) ($row['__row'] ?? 0),
+                    'data' => array_merge($row, $previewData),
+                    'source_data' => $row['__source_data'] ?? null,
+                    'warnings' => $warnings,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
     public function validateFileInChunks(UploadedFile|string $file, int $chunkSize = 500, ?callable $afterChunk = null, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): void
     {
         $this->forMode(ImportRun::MODE_VALIDATE_ONLY);
@@ -975,32 +961,42 @@ class ProductImport extends BaseImport
     }
 
     /**
-     * @return array{rows: array<int, array<string, mixed>>, total_rows: int}
+     * @return array{rows: array<int, array<string, mixed>>, total_rows: int, has_more: bool}
      */
     public function fileRowsChunk(UploadedFile|string $file, int $offset, int $limit, ?int $sheetIndex = null, ?string $sheetName = null, array $mapping = []): array
     {
-        $selectedSheet = $this->resolveSelectedSheet($file, $sheetIndex, $sheetName, $mapping);
+        $resolvedSheetName = $sheetName;
+        if ($resolvedSheetName === null || trim($resolvedSheetName) === '') {
+            $resolvedSheetName = $sheetIndex === null || $sheetIndex === 0
+                ? null
+                : (string) ($this->resolveSelectedSheet($file, $sheetIndex, null, $mapping)['name'] ?? '');
+        }
+
         $rows = [];
         $seenRows = 0;
+        $hasMore = false;
 
-        foreach ($this->extractRowsLazy($file, (int) $selectedSheet['index'], (string) $selectedSheet['name'], $mapping) as $row) {
+        foreach ($this->extractRowsFromResolvedSheetLazy($file, $resolvedSheetName, $mapping) as $row) {
             if ($seenRows < $offset) {
                 $seenRows++;
 
                 continue;
             }
 
-            $rows[] = $row;
-            $seenRows++;
-
             if (count($rows) >= $limit) {
+                $hasMore = true;
+
                 break;
             }
+
+            $rows[] = $row;
+            $seenRows++;
         }
 
         return [
             'rows' => $rows,
-            'total_rows' => (int) ($selectedSheet['row_count'] ?? $seenRows),
+            'total_rows' => $hasMore ? $seenRows + 1 : $seenRows,
+            'has_more' => $hasMore,
         ];
     }
 
@@ -1388,18 +1384,7 @@ class ProductImport extends BaseImport
 
     private function previewCompatibilityCount(array $previewData): int
     {
-        $compatibility = $previewData['__compatibility'] ?? $previewData['__vehicle_compatibility'] ?? [];
-        if (! is_array($compatibility)) {
-            return 0;
-        }
-
-        if (array_is_list($compatibility)) {
-            return count($compatibility);
-        }
-
-        return collect($compatibility)
-            ->filter(fn (mixed $scope): bool => is_array($scope))
-            ->sum(fn (array $scope): int => count($scope));
+        return 0;
     }
 
     private function normalizePreviewValue(mixed $value): string|int|float|null
@@ -1473,7 +1458,6 @@ class ProductImport extends BaseImport
         $detectedAttributes = [];
         $categorySuggestions = [];
         $brandSuggestions = [];
-        $missingVehicleCandidates = [];
         $identityPosition = 0;
 
         foreach ($rows as $row) {
@@ -1544,12 +1528,6 @@ class ProductImport extends BaseImport
                 }
             }
 
-            if (! $context['has_explicit_vehicle_columns']) {
-                if (($context['vehicle_match'] ?? null) === null && ($context['vehicle_candidate'] ?? null) !== null) {
-                    $missingVehicleCandidates[] = $context['vehicle_candidate'];
-                }
-            }
-
             $identityPosition++;
         }
 
@@ -1588,10 +1566,6 @@ class ProductImport extends BaseImport
                 'brands' => array_values(array_unique($missingBrands)),
             ],
             'detected_attributes' => array_values(array_unique($detectedAttributes)),
-            'missing_vehicle_candidates' => collect($missingVehicleCandidates)
-                ->unique(fn (array $candidate): string => $this->vehicleCandidateKey($candidate))
-                ->values()
-                ->all(),
             'suggestions' => [
                 'categories' => collect($categorySuggestions)->unique('value')->values()->all(),
                 'brands' => collect($brandSuggestions)->unique('value')->values()->all(),
@@ -1635,7 +1609,6 @@ class ProductImport extends BaseImport
             'missing_references' => [
                 'brands' => array_values($this->missingBrands),
             ],
-            'missing_vehicle_candidates' => array_values($this->missingVehicleCandidates),
             'suggestions' => [
                 'brands' => array_values($this->brandSuggestions),
             ],
@@ -1652,11 +1625,6 @@ class ProductImport extends BaseImport
         if ($categoryName !== '') {
             $this->missingCategories[$this->attributeNameKey($categoryName)] = $categoryName;
         }
-    }
-
-    private function rememberMissingVehicleCandidate(array $candidate): void
-    {
-        $this->missingVehicleCandidates[$this->vehicleCandidateKey($candidate)] = $candidate;
     }
 
     private function brandNameForRow(array $row): ?string
@@ -1786,10 +1754,7 @@ class ProductImport extends BaseImport
      *     extra_category_ids: array<int, int>,
      *     technical_categories: Collection<int, Category>,
      *     technical_name: array{original_name: string, clean_name: string, attributes: array<int, array<string, mixed>>, warnings: array<int, string>, matched_segments: array<int, array{segment: string, offset: int, length: int}>},
-     *     attributes_fingerprint: string,
-     *     has_explicit_vehicle_columns: bool,
-     *     vehicle_match: ?array{label: string, compatibility: array<string, mixed>},
-     *     vehicle_candidate: ?array<string, mixed>
+     *     attributes_fingerprint: string
      * }
      */
     private function rowContext(array $row): array
@@ -1815,20 +1780,6 @@ class ProductImport extends BaseImport
                 'warnings' => [],
                 'matched_segments' => [],
             ];
-        $hasExplicitVehicleColumns = $this->hasExplicitVehicleColumns($row);
-        $vehicleMatch = null;
-        $vehicleCandidate = null;
-
-        if (! $hasExplicitVehicleColumns && trim((string) ($row['nombre'] ?? '')) !== '') {
-            try {
-                $vehicleMatch = $this->resolveVehicleCompatibilityFromName((string) $row['nombre']);
-                if ($vehicleMatch === null) {
-                    $vehicleCandidate = $this->vehicleCreationCandidateFromName((string) $row['nombre']);
-                }
-            } catch (\RuntimeException) {
-                $vehicleCandidate = $this->vehicleCreationCandidateFromName((string) $row['nombre']);
-            }
-        }
 
         return $this->rowContextCache[$cacheKey] = [
             'key' => $cacheKey,
@@ -1837,9 +1788,6 @@ class ProductImport extends BaseImport
             'technical_categories' => $technicalCategories,
             'technical_name' => $technicalName,
             'attributes_fingerprint' => $this->attributesFingerprint($technicalName['attributes'] ?? []),
-            'has_explicit_vehicle_columns' => $hasExplicitVehicleColumns,
-            'vehicle_match' => $vehicleMatch,
-            'vehicle_candidate' => $vehicleCandidate,
         ];
     }
 
@@ -1850,12 +1798,6 @@ class ProductImport extends BaseImport
             'name='.$this->normalizeImportKey((string) ($row['nombre'] ?? '')),
             'extra='.$this->normalizeImportKey((string) ($row['categorias_extra'] ?? '')),
             'attributes='.$this->normalizeImportKey($this->rowContextAttributesSignature($row['atributos'] ?? null)),
-            'make='.$this->normalizeImportKey((string) ($row['make'] ?? '')),
-            'model='.$this->normalizeImportKey((string) ($row['model'] ?? '')),
-            'year='.$this->normalizeImportKey((string) ($row['year'] ?? '')),
-            'code='.$this->normalizeImportKey((string) ($row['code'] ?? '')),
-            'engine='.$this->normalizeImportKey((string) ($row['engine'] ?? '')),
-            'vin='.$this->normalizeImportKey((string) ($row['vin'] ?? '')),
         ]);
     }
 
@@ -2178,471 +2120,6 @@ class ProductImport extends BaseImport
         return Warehouse::query()->orderBy('id')->value('id');
     }
 
-    private function hasExplicitVehicleColumns(array $row): bool
-    {
-        foreach (['make', 'model', 'code', 'engine', 'vin'] as $key) {
-            if ($this->nullIfEmpty($row[$key] ?? null) !== null) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function resolveVehicleCompatibility(array $row): array
-    {
-        $makeName = $this->nullIfEmpty($row['make'] ?? null);
-        if ($makeName === null) {
-            return [];
-        }
-
-        $makeId = $this->resolveIdOrCreateByName(VehicleMake::class, 'name', $makeName);
-        $compatibility = [
-            'makes' => [['make_id' => $makeId]],
-        ];
-
-        $modelName = $this->nullIfEmpty($row['model'] ?? null);
-        if ($modelName === null) {
-            return $compatibility;
-        }
-
-        [$yearFrom, $yearTo] = $this->parseYearRange($row['year'] ?? null);
-        $generation = $this->nullIfEmpty($row['code'] ?? null);
-        $model = VehicleModel::query()
-            ->where('make_id', $makeId)
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower($modelName)])
-            ->when($generation, fn ($query) => $query->whereRaw('LOWER(generation) = ?', [mb_strtolower($generation)]))
-            ->when(! $generation && $yearFrom !== null, fn ($query) => $query->where('year_from', $yearFrom)->where('year_to', $yearTo ?? $yearFrom))
-            ->first();
-
-        if (! $model) {
-            $model = VehicleModel::create(array_filter([
-                'make_id' => $makeId,
-                'name' => $modelName,
-                'year_from' => $yearFrom,
-                'year_to' => $yearTo ?? $yearFrom,
-                'generation' => $generation,
-            ], fn ($value) => $value !== null));
-        }
-
-        $compatibility['models'] = [['model_id' => $model->id]];
-
-        $chassisCode = $this->nullIfEmpty($row['code'] ?? null);
-        if ($chassisCode !== null) {
-            $chassis = VehicleChassis::query()
-                ->where(function ($query) use ($model) {
-                    $query->where('model_id', $model->id)
-                        ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('vehicle_models.id', $model->id));
-                })
-                ->whereRaw('LOWER(code) = ?', [mb_strtolower($chassisCode)])
-                ->first();
-
-            if (! $chassis) {
-                $chassis = VehicleChassis::create(array_filter([
-                    'code' => strtoupper(trim($chassisCode)),
-                    'name' => strtoupper(trim($chassisCode)),
-                    'model_id' => $model->id,
-                    'year_from' => $yearFrom,
-                    'year_to' => $yearTo ?? $yearFrom,
-                ], fn ($value) => $value !== null));
-            }
-
-            $model->chassis()->syncWithoutDetaching([$chassis->id]);
-            $compatibility['chassis'] = [['chassis_id' => $chassis->id]];
-        }
-
-        $engineCode = $this->nullIfEmpty($row['engine'] ?? null);
-        if ($engineCode !== null) {
-            $engine = VehicleEngine::query()
-                ->where(function ($query) use ($model) {
-                    $query->where('model_id', $model->id)
-                        ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('vehicle_models.id', $model->id));
-                })
-                ->whereRaw('LOWER(engine_code) = ?', [mb_strtolower($engineCode)])
-                ->first();
-
-            if (! $engine) {
-                $engine = VehicleEngine::create([
-                    'model_id' => $model->id,
-                    'engine_code' => strtoupper(trim($engineCode)),
-                ]);
-            }
-
-            $engine->models()->syncWithoutDetaching([$model->id]);
-            $compatibility['engines'] = [['engine_id' => $engine->id]];
-        }
-
-        return $compatibility;
-    }
-
-    private function parseYearRange(mixed $yearValue): array
-    {
-        $yearStr = trim((string) ($yearValue ?? ''));
-        if ($yearStr === '') {
-            return [null, null];
-        }
-
-        if (preg_match('/^(\d{4})\s*(?:-|\x{2013})\s*(\d{4})$/u', $yearStr, $matches) === 1) {
-            return [(int) $matches[1], (int) $matches[2]];
-        }
-
-        if (preg_match('/^(\d{4})$/', $yearStr, $matches) === 1) {
-            $year = (int) $matches[1];
-
-            return [$year, $year];
-        }
-
-        return [null, null];
-    }
-
-    private function resolveVehicleCompatibilityFromName(string $name): ?array
-    {
-        $normalizedName = $this->vehicleNameKey($name);
-        if ($normalizedName === '') {
-            return null;
-        }
-
-        if (array_key_exists($normalizedName, $this->vehicleNameResolutionCache)) {
-            $cached = $this->vehicleNameResolutionCache[$normalizedName];
-            if (is_array($cached) && ($cached['__error'] ?? null)) {
-                throw new \RuntimeException((string) $cached['__error']);
-            }
-
-            return $cached;
-        }
-
-        $modelSignalFound = false;
-        $matches = [];
-
-        $this->vehicleCatalogCandidates($normalizedName)
-            ->each(function (array $entry) use ($normalizedName, &$modelSignalFound, &$matches): void {
-                /** @var VehicleModel $model */
-                $model = $entry['model'];
-                $make = $entry['make'];
-                $makeKey = (string) ($entry['make_key'] ?? '');
-                $modelKey = (string) ($entry['model_key'] ?? '');
-
-                if (! $make) {
-                    return;
-                }
-
-                if ($makeKey === '' || $modelKey === '') {
-                    return;
-                }
-
-                if (! $this->vehicleTextContainsKey($normalizedName, $makeKey) || ! $this->vehicleTextContainsKey($normalizedName, $modelKey)) {
-                    return;
-                }
-
-                $modelSignalFound = true;
-
-                foreach ($entry['chassis'] as $chassis) {
-                    if (! $chassis instanceof VehicleChassis) {
-                        continue;
-                    }
-
-                    foreach ($entry['engines'] as $engine) {
-                        if (! $engine instanceof VehicleEngine) {
-                            continue;
-                        }
-
-                        $offset = $this->vehicleCandidateOffset($normalizedName, [
-                            [$make->name, $model->name, $chassis->code, $engine->engine_code],
-                            [$make->name, $model->name, $engine->engine_code, $chassis->code],
-                            [$engine->engine_code, $make->name, $model->name, $chassis->code],
-                        ]);
-
-                        if ($offset === null) {
-                            continue;
-                        }
-
-                        $matches[] = [
-                            'key' => "{$make->id}:{$model->id}:{$chassis->id}:{$engine->id}",
-                            'offset' => $offset,
-                            'make_id' => (int) $make->id,
-                            'model_id' => (int) $model->id,
-                            'chassis_id' => (int) $chassis->id,
-                            'engine_id' => (int) $engine->id,
-                            'label' => "{$make->name} {$model->name} {$chassis->code} {$engine->engine_code}",
-                        ];
-                    }
-                }
-            });
-
-        $matches = collect($matches)
-            ->unique('key')
-            ->sortBy('offset')
-            ->values();
-
-        if ($matches->count() > 1) {
-            $this->vehicleNameResolutionCache[$normalizedName] = [
-                '__error' => 'Se detecto mas de un vehiculo completo en el nombre del producto. Usa las columnas de vehiculo para importar una compatibilidad especifica.',
-            ];
-
-            throw new \RuntimeException('Se detecto mas de un vehiculo completo en el nombre del producto. Usa las columnas de vehiculo para importar una compatibilidad especifica.');
-        }
-
-        if ($matches->isEmpty()) {
-            if ($modelSignalFound) {
-                $this->vehicleNameResolutionCache[$normalizedName] = [
-                    '__error' => 'No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.',
-                ];
-
-                throw new \RuntimeException('No se pudo resolver el vehiculo completo del nombre. Verifica que marca, modelo, chasis y motor existan en el catalogo.');
-            }
-
-            return $this->vehicleNameResolutionCache[$normalizedName] = null;
-        }
-
-        $match = $matches->first();
-
-        return $this->vehicleNameResolutionCache[$normalizedName] = [
-            'label' => $match['label'],
-            'compatibility' => [
-                'makes' => [['make_id' => $match['make_id']]],
-                'models' => [['model_id' => $match['model_id']]],
-                'chassis' => [['chassis_id' => $match['chassis_id']]],
-                'engines' => [['engine_id' => $match['engine_id']]],
-            ],
-        ];
-    }
-
-    private function optionalVehicleCompatibilityFromName(string $name): array
-    {
-        try {
-            return $this->resolveVehicleCompatibilityFromName($name)['compatibility'] ?? [];
-        } catch (\RuntimeException) {
-            return [];
-        }
-    }
-
-    private function vehicleCreationCandidateFromName(string $name): ?array
-    {
-        $normalizedName = $this->vehicleNameKey($name);
-        if ($normalizedName === '') {
-            return null;
-        }
-
-        if (array_key_exists($normalizedName, $this->vehicleCandidateCache)) {
-            return $this->vehicleCandidateCache[$normalizedName];
-        }
-
-        $candidates = [];
-
-        $this->vehicleCatalogCandidates($normalizedName)
-            ->each(function (array $entry) use ($normalizedName, &$candidates): void {
-                /** @var VehicleModel $model */
-                $model = $entry['model'];
-                $make = $entry['make'];
-                $makeKey = (string) ($entry['make_key'] ?? '');
-                $modelKey = (string) ($entry['model_key'] ?? '');
-
-                if (! $make) {
-                    return;
-                }
-
-                if ($makeKey === '' || $modelKey === '') {
-                    return;
-                }
-
-                if (! $this->vehicleTextContainsKey($normalizedName, $makeKey) || ! $this->vehicleTextContainsKey($normalizedName, $modelKey)) {
-                    return;
-                }
-
-                $tailTokens = $this->vehicleTailTokensAfterModel($normalizedName, $makeKey, $modelKey);
-
-                $candidates[] = [
-                    'make_id' => (int) $make->id,
-                    'make' => $make->name,
-                    'model_id' => (int) $model->id,
-                    'model' => $model->name,
-                    'chassis' => $tailTokens[0] ?? null,
-                    'engine' => $tailTokens[1] ?? null,
-                    'source' => 'nombre',
-                    'can_create' => true,
-                    'label' => trim(implode(' ', array_filter([
-                        $make->name,
-                        $model->name,
-                        $tailTokens[0] ?? null,
-                        $tailTokens[1] ?? null,
-                    ]))),
-                ];
-            });
-
-        return $this->vehicleCandidateCache[$normalizedName] = collect($candidates)
-            ->sortBy(fn (array $candidate): string => $candidate['label'])
-            ->first() ?? $this->heuristicVehicleCreationCandidateFromName($normalizedName);
-    }
-
-    private function vehicleCatalog(): Collection
-    {
-        if ($this->cachedVehicleCatalog !== null) {
-            return $this->cachedVehicleCatalog;
-        }
-
-        $directChassisByModel = VehicleChassis::query()
-            ->whereNotNull('model_id')
-            ->get()
-            ->groupBy('model_id');
-
-        $this->cachedVehicleCatalog = VehicleModel::query()
-            ->with(['make', 'chassis', 'engines', 'enginesMany'])
-            ->get()
-            ->map(function (VehicleModel $model) use ($directChassisByModel): array {
-                return [
-                    'model' => $model,
-                    'make' => $model->make,
-                    'make_key' => $model->make instanceof VehicleMake ? $this->vehicleNameKey($model->make->name) : '',
-                    'model_key' => $this->vehicleNameKey($model->name),
-                    'chassis' => $model->chassis
-                        ->concat($directChassisByModel->get($model->id, collect()))
-                        ->unique('id')
-                        ->values(),
-                    'engines' => $model->engines
-                        ->concat($model->enginesMany)
-                        ->unique('id')
-                        ->values(),
-                ];
-            })
-            ->values();
-
-        return $this->cachedVehicleCatalog;
-    }
-
-    private function vehicleCatalogCandidates(string $normalizedName): Collection
-    {
-        if ($this->cachedVehicleCatalogByMakeKey === null) {
-            $this->cachedVehicleCatalogByMakeKey = $this->vehicleCatalog()
-                ->filter(fn (array $entry): bool => (string) ($entry['make_key'] ?? '') !== '')
-                ->groupBy(fn (array $entry): string => (string) $entry['make_key']);
-        }
-
-        return $this->cachedVehicleCatalogByMakeKey
-            ->filter(fn (Collection $entries, string $makeKey): bool => $this->vehicleTextContainsKey($normalizedName, $makeKey))
-            ->flatten(1)
-            ->values();
-    }
-
-    private function heuristicVehicleCreationCandidateFromName(string $normalizedName): ?array
-    {
-        $tokens = collect(explode(' ', $normalizedName))
-            ->map(fn (string $token): string => strtoupper(trim($token)))
-            ->filter(fn (string $token): bool => $token !== '')
-            ->values();
-
-        if ($tokens->count() < 4) {
-            return null;
-        }
-
-        $tail = $tokens->slice(-4)->values();
-        $make = (string) $tail[0];
-        $model = (string) $tail[1];
-        $chassis = (string) $tail[2];
-        $engine = (string) $tail[3];
-
-        if (
-            preg_match('/^[A-Z]{2,}$/', $make) !== 1
-            || preg_match('/^[A-Z][A-Z0-9]{1,}$/', $model) !== 1
-            || ! $this->looksLikeVehicleCode($chassis)
-            || ! $this->looksLikeVehicleCode($engine)
-        ) {
-            return null;
-        }
-
-        return [
-            'make_id' => null,
-            'make' => $make,
-            'model_id' => null,
-            'model' => $model,
-            'chassis' => $chassis,
-            'engine' => $engine,
-            'source' => 'nombre',
-            'can_create' => true,
-            'label' => $tail->implode(' '),
-        ];
-    }
-
-    private function looksLikeVehicleCode(string $value): bool
-    {
-        return preg_match('/^(?=.*[A-Z])(?=.*\d)[A-Z0-9]{2,12}$/', $value) === 1;
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function vehicleTailTokensAfterModel(string $normalizedName, string $makeKey, string $modelKey): array
-    {
-        $makeModel = trim($makeKey.' '.$modelKey);
-        if ($makeModel === '') {
-            return [];
-        }
-
-        if (preg_match('/(?:^| )'.preg_quote($makeModel, '/').'(?: |$)(.*)$/', $normalizedName, $matches) !== 1) {
-            return [];
-        }
-
-        return collect(explode(' ', trim((string) ($matches[1] ?? ''))))
-            ->map(fn (string $token): string => strtoupper($token))
-            ->filter(fn (string $token): bool => $token !== '')
-            ->take(2)
-            ->values()
-            ->all();
-    }
-
-    private function vehicleCandidateKey(array $candidate): string
-    {
-        return mb_strtolower(implode('|', [
-            $candidate['make_id'] ?? '',
-            $candidate['model_id'] ?? '',
-            $candidate['chassis'] ?? '',
-            $candidate['engine'] ?? '',
-        ]));
-    }
-
-    private function vehicleCandidateOffset(string $normalizedName, array $candidateSequences): ?int
-    {
-        $offsets = [];
-
-        foreach ($candidateSequences as $sequence) {
-            $phrase = $this->vehicleNameKey(implode(' ', array_filter($sequence)));
-            if ($phrase === '') {
-                continue;
-            }
-
-            if (preg_match('/(?:^| )'.preg_quote($phrase, '/').'(?: |$)/', $normalizedName, $matches, PREG_OFFSET_CAPTURE) === 1) {
-                $offsets[] = (int) $matches[0][1];
-            }
-        }
-
-        if ($offsets === []) {
-            return null;
-        }
-
-        return min($offsets);
-    }
-
-    private function vehicleTextContains(string $normalizedText, string $value): bool
-    {
-        return $this->vehicleTextContainsKey($normalizedText, $this->vehicleNameKey($value));
-    }
-
-    private function vehicleTextContainsKey(string $normalizedText, string $needle): bool
-    {
-        if ($needle === '') {
-            return false;
-        }
-
-        return preg_match('/(?:^| )'.preg_quote($needle, '/').'(?: |$)/', $normalizedText) === 1;
-    }
-
-    private function vehicleNameKey(string $value): string
-    {
-        $normalized = Str::ascii(mb_strtolower(trim($value)));
-        $normalized = preg_replace('/[^a-z0-9]+/', ' ', $normalized) ?? $normalized;
-
-        return trim((string) preg_replace('/\s+/', ' ', $normalized));
-    }
-
     private function resolveExtraCategoryIds(mixed $value, int $primaryCategoryId): array
     {
         return collect($this->splitDelimitedValues($value))
@@ -2773,13 +2250,6 @@ class ProductImport extends BaseImport
             $mapped['__clean_name'] = $context['technical_name']['clean_name'];
             $mapped['__attributes_fingerprint'] = $context['attributes_fingerprint'];
             $mapped['__attributes'] = $this->previewAttributes($row, $context['technical_name']);
-        }
-
-        if (! $context['has_explicit_vehicle_columns']) {
-            $vehicleMatch = is_array($context['vehicle_match'] ?? null) ? $context['vehicle_match'] : null;
-            $mapped['__vehicle_compatibility'] = $vehicleMatch['compatibility'] ?? null;
-            $mapped['__vehicle_label'] = $vehicleMatch['label'] ?? null;
-            $mapped['__vehicle_creation_candidate'] = $context['vehicle_candidate'];
         }
 
         $mapped['__product_group_key'] = $this->productGroupingKey($row);

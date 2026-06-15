@@ -5,10 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Exports\ProductImportTemplate;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\BatchProductImportReferencesRequest;
-use App\Http\Requests\BatchProductImportVehicleCandidatesRequest;
 use App\Http\Requests\ExecuteImportRequest;
 use App\Http\Requests\ExportProductImportPreviewRequest;
 use App\Http\Requests\PreviewImportRequest;
+use App\Http\Requests\RevalidateProductImportRunRowsRequest;
 use App\Http\Requests\StoreImportProfileRequest;
 use App\Http\Requests\StoreProductImportRequest;
 use App\Http\Requests\UpdateProductImportRunMappingRequest;
@@ -63,6 +63,38 @@ class ProductImportController extends Controller
     public function template(): BinaryFileResponse
     {
         return Excel::download(new ProductImportTemplate, 'plantilla_productos.xlsx');
+    }
+
+    public function metadata(PreviewImportRequest $request): JsonResponse
+    {
+        $import = new ProductImport($this->productService);
+
+        try {
+            $metadata = $import->previewMetadata(
+                $request->file('file'),
+                $request->has('sheet_index') ? $request->integer('sheet_index') : null,
+                $request->input('sheet_name'),
+                $request->input('mapping', [])
+            );
+        } catch (\RuntimeException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'sheets' => $metadata['sheets'] ?? [],
+                'selected_sheet' => $metadata['selected_sheet'] ?? null,
+                'recommended_sheet' => $metadata['recommended_sheet'] ?? null,
+                'detected_columns' => $metadata['detected_columns'] ?? [],
+                'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
+                'required_fields' => $metadata['required_fields'] ?? [],
+                'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+            ],
+        ]);
     }
 
     public function preview(PreviewImportRequest $request): JsonResponse
@@ -241,28 +273,6 @@ class ProductImportController extends Controller
         ], $data['summary']['error_count'] > 0 ? 207 : 201);
     }
 
-    public function batchVehicleCandidates(BatchProductImportVehicleCandidatesRequest $request, ProductImportReferenceBatchService $batchService): JsonResponse
-    {
-        $data = $batchService->createVehicleCandidates($request->validated('candidates'));
-
-        activity('product_import')
-            ->causedBy($request->user())
-            ->event('vehicle_candidates_batch_created')
-            ->withProperties([
-                'entity' => 'products',
-                'source' => 'vehicle_candidates_batch',
-                'candidates_count' => count($request->validated('candidates')),
-                'created_count' => (int) ($data['summary']['created_count'] ?? 0),
-                'error_count' => (int) ($data['summary']['error_count'] ?? 0),
-            ])
-            ->log('Candidatos vehiculares de importacion creados en lote.');
-
-        return response()->json([
-            'success' => true,
-            'data' => $data,
-        ], $data['summary']['error_count'] > 0 ? 207 : ($data['summary']['created_count'] > 0 ? 201 : 200));
-    }
-
     public function import(StoreProductImportRequest $request): JsonResponse
     {
         if ($request->filled('validated_import_run_id')) {
@@ -351,7 +361,7 @@ class ProductImportController extends Controller
             $mode = $request->input('mode', $profile->mode ?? $mode);
         }
 
-        if ($metadata === null) {
+        if ($metadata === null && ! $this->shouldDeferValidationMetadata($runType, $mode)) {
             try {
                 $metadata = (new ProductImport($this->productService))->previewMetadata(
                     $file,
@@ -367,7 +377,7 @@ class ProductImportController extends Controller
             }
         }
 
-        if ($sheetName === null || trim((string) $sheetName) === '') {
+        if ($metadata !== null && ($sheetName === null || trim((string) $sheetName) === '')) {
             try {
                 $selectedSheet = $metadata['selected_sheet']
                     ?? (new ProductImport($this->productService))->resolveSelectedSheet($file, $sheetIndex, null, $mapping);
@@ -429,7 +439,7 @@ class ProductImportController extends Controller
             'errors' => [],
             'summary' => array_merge($metadataSummary, $asyncPreview ? [
                 'preview_async' => true,
-            ] : [], $summaryOverrides),
+            ] : [], $this->initialChunkValidationSummary($runType, $mode), $summaryOverrides),
         ]);
 
         if (($summaryOverrides['force_without_preview'] ?? false) === true) {
@@ -469,9 +479,38 @@ class ProductImportController extends Controller
                 'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
                 'required_fields' => $metadata['required_fields'] ?? [],
                 'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+                'summary' => $importRun->summary ?? [],
             ],
             'message' => $this->startFileRunMessage($runType, $asyncPreview),
         ]);
+    }
+
+    private function shouldDeferValidationMetadata(string $runType, string $mode): bool
+    {
+        return $runType === ImportRun::TYPE_VALIDATION
+            && $mode === ImportRun::MODE_VALIDATE_ONLY;
+    }
+
+    private function initialChunkValidationSummary(string $runType, string $mode): array
+    {
+        if (! $this->shouldDeferValidationMetadata($runType, $mode)) {
+            return [];
+        }
+
+        return [
+            'chunk_processing' => true,
+            'parallel_validation' => true,
+            'use_persisted_rows_snapshot' => true,
+            'chunk_size' => ProductImportRunChunkProcessor::CHUNK_SIZE,
+            'staging_status' => 'pending',
+            'staged_rows_count' => 0,
+            'validation_rows_count' => 0,
+            'validation_rows_limited' => true,
+            'rows_revision' => 0,
+            'validated_rows_revision' => 0,
+            'rows_dirty' => false,
+            'full_revalidation_status' => 'pending',
+        ];
     }
 
     private function startFileRunMessage(string $runType, bool $asyncPreview): string
@@ -560,7 +599,7 @@ class ProductImportController extends Controller
             ], 500);
         }
 
-        $importRun = DB::transaction(function () use ($request, $validationRun, $storedPath, $summary): ImportRun {
+        $importRun = DB::transaction(function () use ($request, $validationRun, $storedPath, $summary, $validRowsCount): ImportRun {
             $importRun = ImportRun::query()->create([
                 'user_id' => $request->user()?->id,
                 'entity' => 'products',
@@ -572,7 +611,7 @@ class ProductImportController extends Controller
                 'sheet_name' => $validationRun->sheet_name,
                 'run_type' => ImportRun::TYPE_IMPORT,
                 'mode' => $request->input('mode', ImportRun::MODE_CREATE_UPDATE),
-                'total_rows' => $validationRun->total_rows,
+                'total_rows' => $validRowsCount,
                 'mapping' => $validationRun->mapping ?? [],
                 'status' => ImportRun::STATUS_PENDING,
                 'phase' => ImportRun::PHASE_QUEUED,
@@ -692,7 +731,7 @@ class ProductImportController extends Controller
                     'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
                     'required_fields' => $metadata['required_fields'] ?? [],
                     'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
-                ]),
+                ], $this->initialChunkValidationSummary(ImportRun::TYPE_VALIDATION, ImportRun::MODE_VALIDATE_ONLY)),
                 'started_at' => null,
                 'finished_at' => null,
             ]);
@@ -728,6 +767,7 @@ class ProductImportController extends Controller
                 'suggested_mapping' => $metadata['suggested_mapping'] ?? [],
                 'required_fields' => $metadata['required_fields'] ?? [],
                 'sheet_detection_warning' => $metadata['sheet_detection_warning'] ?? null,
+                'summary' => $importRun->refresh()->summary ?? [],
             ],
             'message' => $asyncPreview
                 ? 'Previsualizacion actualizada y lista para procesar por lotes desde esta pantalla.'
@@ -1059,7 +1099,7 @@ class ProductImportController extends Controller
         ]);
     }
 
-    public function revalidateRows(Request $request, ImportRun $importRun): JsonResponse
+    public function revalidateRows(RevalidateProductImportRunRowsRequest $request, ImportRun $importRun): JsonResponse
     {
         $this->abortUnlessVisibleImportRun($importRun, $request->user());
 
@@ -1089,6 +1129,78 @@ class ProductImportController extends Controller
             return $response;
         }
 
+        $scope = (string) $request->validated('scope', 'full');
+
+        if ($scope === 'references') {
+            $import = (new ProductImport($this->productService))->forMode(ImportRun::MODE_VALIDATE_ONLY);
+            $result = $this->rowService->revalidateReferenceRows(
+                $importRun,
+                $import,
+                $request->validated('brands') ?? [],
+                $request->validated('categories') ?? []
+            );
+
+            if (! $result['fallback_full_revalidation']) {
+                $importRun->refresh();
+                $mergedErrors = $this->mergeImportErrors(
+                    $importRun->errors ?? [],
+                    $import->errors
+                );
+                $mergedFailedRows = array_values(array_filter(
+                    $mergedErrors,
+                    fn (array $error): bool => ! empty($error['data'])
+                ));
+                $summary = $this->selectiveRevalidationSummary(
+                    $importRun->summary ?? $summary,
+                    $import->referenceSummary(),
+                    $result['counts'],
+                    $request->validated('brands') ?? [],
+                    $request->validated('categories') ?? []
+                );
+
+                $importRun->update([
+                    'total_rows' => (int) ($result['counts']['validation_rows_count'] ?? $importRun->total_rows),
+                    'processed_rows' => (int) ($result['counts']['validation_rows_count'] ?? $importRun->processed_rows),
+                    'success_count' => (int) ($result['counts']['row_status_counts']['valid'] ?? 0),
+                    'error_count' => (int) ($result['counts']['row_status_counts']['error'] ?? 0),
+                    'errors' => array_slice($mergedErrors, -100),
+                    'failed_rows' => $mergedFailedRows,
+                    'summary' => $summary,
+                ]);
+
+                $this->recordImportRunActivity($importRun->refresh(), $request, 'rows_reference_revalidated', 'Filas afectadas por referencias revalidadas.');
+
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'full_revalidation_status' => 'completed',
+                        'scope' => 'references',
+                        'affected_rows_count' => $result['affected_rows_count'],
+                        'fallback_full_revalidation' => false,
+                    ],
+                ]);
+            }
+
+            $summary = array_merge($summary, [
+                'full_revalidation_status' => 'pending',
+                'revalidation_requested_by_user_id' => $request->user()?->id,
+                'reference_revalidation_fallback' => true,
+            ]);
+            $importRun->update(['summary' => $summary]);
+            RevalidateProductImportRunRows::dispatch($importRun->id, $request->user()?->id);
+            $this->recordImportRunActivity($importRun, $request, 'rows_revalidation_requested', 'Revalidacion completa de filas solicitada por fallback de referencias.');
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'full_revalidation_status' => 'pending',
+                    'scope' => 'references',
+                    'affected_rows_count' => 0,
+                    'fallback_full_revalidation' => true,
+                ],
+            ]);
+        }
+
         $importRun->update(['summary' => array_merge($summary, [
             'full_revalidation_status' => 'pending',
             'revalidation_requested_by_user_id' => $request->user()?->id,
@@ -1100,6 +1212,79 @@ class ProductImportController extends Controller
             'success' => true,
             'data' => ['full_revalidation_status' => 'pending'],
         ]);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $existingErrors
+     * @param  array<int, array<string, mixed>>  $newErrors
+     * @return array<int, array<string, mixed>>
+     */
+    private function mergeImportErrors(array $existingErrors, array $newErrors): array
+    {
+        $merged = [];
+
+        foreach (array_merge($existingErrors, $newErrors) as $error) {
+            if (! is_array($error)) {
+                continue;
+            }
+
+            $row = (int) ($error['row'] ?? 0);
+            $merged[$row > 0 ? $row : count($merged) + 1] = $error;
+        }
+
+        return array_values($merged);
+    }
+
+    private function selectiveRevalidationSummary(ImportRun|array $summarySource, array $referenceSummary, array $counts, array $brands, array $categories): array
+    {
+        $summary = $summarySource instanceof ImportRun ? ($summarySource->summary ?? []) : $summarySource;
+        $rowsRevision = (int) ($summary['rows_revision'] ?? 0);
+
+        return array_merge($summary, $counts, [
+            'missing_categories' => $this->remainingReferenceValues(
+                $summary['missing_categories'] ?? [],
+                $referenceSummary['missing_categories'] ?? [],
+                $categories
+            ),
+            'missing_references' => array_merge($summary['missing_references'] ?? [], [
+                'brands' => $this->remainingReferenceValues(
+                    $summary['missing_references']['brands'] ?? [],
+                    $referenceSummary['missing_references']['brands'] ?? [],
+                    $brands
+                ),
+            ]),
+            'suggestions' => [
+                'brands' => $referenceSummary['suggestions']['brands'] ?? [],
+            ],
+            'action_counts' => $counts['action_counts'] ?? [],
+            'conflict_count' => (int) ($counts['conflict_count'] ?? 0),
+            'rows_dirty' => false,
+            'validated_rows_revision' => $rowsRevision,
+            'full_revalidation_status' => 'completed',
+            'revalidation_progress' => [
+                'status' => 'completed',
+                'processed_rows' => (int) ($counts['validation_rows_count'] ?? 0),
+                'total_rows' => (int) ($counts['validation_rows_count'] ?? 0),
+                'rows_revision' => $rowsRevision,
+                'validated_rows_revision' => $rowsRevision,
+            ],
+        ]);
+    }
+
+    private function remainingReferenceValues(array $existingMissing, array $newMissing, array $requested): array
+    {
+        $requestedKeys = collect($requested)
+            ->map(fn (mixed $value): string => mb_strtolower(trim((string) $value)))
+            ->filter(fn (string $value): bool => $value !== '')
+            ->flip();
+
+        return collect($existingMissing)
+            ->reject(fn (mixed $value): bool => $requestedKeys->has(mb_strtolower(trim((string) $value))))
+            ->merge($newMissing)
+            ->filter(fn (mixed $value): bool => trim((string) $value) !== '')
+            ->unique(fn (mixed $value): string => mb_strtolower(trim((string) $value)))
+            ->values()
+            ->all();
     }
 
     public function errorRows(Request $request, ImportRun $importRun): JsonResponse
@@ -1544,6 +1729,22 @@ class ProductImportController extends Controller
 
     private function progressPercent(ImportRun $importRun): int
     {
+        $summary = $importRun->summary ?? [];
+        if (
+            $importRun->phase === ImportRun::PHASE_STAGING
+            && in_array((string) ($summary['staging_status'] ?? 'pending'), ['pending', 'running'], true)
+        ) {
+            $totalRows = max((int) $importRun->total_rows, (int) ($summary['staged_rows_count'] ?? 0));
+            if ($totalRows <= 0) {
+                return 0;
+            }
+
+            return (int) min(
+                100,
+                max(0, round(((int) ($summary['staged_rows_count'] ?? 0) / $totalRows) * 100))
+            );
+        }
+
         if ($importRun->total_rows <= 0) {
             return $importRun->isTerminal() ? 100 : 0;
         }

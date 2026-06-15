@@ -4,13 +4,18 @@ namespace App\Services;
 
 use App\Imports\ProductImport;
 use App\Models\ImportRun;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 class ProductImportRunChunkProcessor
 {
-    private const CHUNK_SIZE = 500;
+    public const CHUNK_SIZE = 500;
+
+    private const PERSISTED_IMPORT_CHUNK_SIZE = 100;
 
     private const RESULT_LIMIT = 100;
+
+    private const DETAILED_GROUPING_ROW_LIMIT = 5000;
 
     public function __construct(
         private readonly ProductService $productService,
@@ -113,6 +118,21 @@ class ProductImportRunChunkProcessor
     {
         $isValidationRun = $this->isValidationRun($importRun);
 
+        if ($isValidationRun && ($importRun->summary['parallel_validation'] ?? false) === true) {
+            if (($importRun->summary['staging_status'] ?? 'pending') !== 'completed') {
+                return $this->processValidationStagingChunk($importRun, $import, $chunkSize, $runStartedAt);
+            }
+
+            if (! $importRun->rows()->exists()) {
+                return [
+                    'processed_rows' => 0,
+                    'has_more' => false,
+                ];
+            }
+
+            return $this->processPersistedValidationChunk($importRun, $import, $chunkSize, $runStartedAt);
+        }
+
         if (($importRun->summary['use_persisted_rows_snapshot'] ?? false) === true && $importRun->rows()->exists()) {
             return $this->processPersistedImportChunk($importRun, $import, $chunkSize, $runStartedAt);
         }
@@ -169,8 +189,106 @@ class ProductImportRunChunkProcessor
     /**
      * @return array{processed_rows: int, has_more: bool}
      */
+    private function processValidationStagingChunk(ImportRun $importRun, ProductImport $import, int $chunkSize, float $runStartedAt): array
+    {
+        return DB::transaction(function () use ($importRun, $import, $chunkSize, $runStartedAt): array {
+            $lockedRun = ImportRun::query()->lockForUpdate()->findOrFail($importRun->id);
+
+            if ($lockedRun->isTerminal() || $lockedRun->status === ImportRun::STATUS_CANCEL_REQUESTED) {
+                return [
+                    'processed_rows' => 0,
+                    'has_more' => false,
+                ];
+            }
+
+            if (($lockedRun->summary['staging_status'] ?? 'pending') === 'completed') {
+                return [
+                    'processed_rows' => 0,
+                    'has_more' => $lockedRun->rows()->exists(),
+                ];
+            }
+
+            $path = Storage::disk('local')->path((string) $lockedRun->stored_path);
+            $summary = $lockedRun->summary ?? [];
+            $offset = max(
+                (int) ($summary['staged_rows_count'] ?? 0),
+                $this->rowService->totalRowsCount($lockedRun)
+            );
+            $chunk = $import->fileRowsChunk(
+                $path,
+                $offset,
+                $chunkSize,
+                $lockedRun->sheet_index,
+                $lockedRun->sheet_name,
+                $lockedRun->mapping ?? []
+            );
+
+            if ($chunk['rows'] === []) {
+                $this->markValidationStagingCompleted($lockedRun, $offset, $runStartedAt);
+
+                return [
+                    'processed_rows' => 0,
+                    'has_more' => $lockedRun->rows()->exists(),
+                ];
+            }
+
+            $this->rowService->appendPendingValidationRows(
+                $lockedRun,
+                $import->stagingRowsForValidation($chunk['rows'])
+            );
+
+            $stagedRows = $offset + count($chunk['rows']);
+            $hasMoreStagingRows = (bool) ($chunk['has_more'] ?? false);
+            $this->updateValidationStagingProgress($lockedRun, $import, $stagedRows, max((int) ($chunk['total_rows'] ?? 0), $stagedRows), $hasMoreStagingRows, $runStartedAt);
+
+            return [
+                'processed_rows' => count($chunk['rows']),
+                'has_more' => true,
+            ];
+        });
+    }
+
+    /**
+     * @return array{processed_rows: int, has_more: bool}
+     */
+    private function processPersistedValidationChunk(ImportRun $importRun, ProductImport $import, int $chunkSize, float $runStartedAt): array
+    {
+        $rows = $this->rowService->claimPendingValidationRows($importRun, $chunkSize);
+        if ($rows === []) {
+            $hasMore = $this->rowService->hasUnfinishedValidationRows($importRun);
+            if ($hasMore) {
+                $this->updatePersistedValidationProgress($importRun, $import, (int) $importRun->processed_rows, $runStartedAt);
+            }
+
+            return [
+                'processed_rows' => 0,
+                'has_more' => $hasMore,
+            ];
+        }
+
+        $import->forMode(ImportRun::MODE_VALIDATE_ONLY);
+        $import->validateRowsWithDuplicateKeys($rows, $this->rowService->duplicateValidationConflictCountsForRows($importRun, $rows));
+        $this->rowService->synchronizeValidationResultsForRows($importRun, $import);
+        $import->validationRows = [];
+
+        $processedRows = count($rows);
+        $newProcessedRows = $this->rowService->validatedRowsCount($importRun);
+        $hasMore = $this->rowService->hasUnfinishedValidationRows($importRun->refresh());
+
+        $this->updatePersistedValidationProgress($importRun, $import, $newProcessedRows, $runStartedAt);
+
+        return [
+            'processed_rows' => $processedRows,
+            'has_more' => $hasMore,
+        ];
+    }
+
+    /**
+     * @return array{processed_rows: int, has_more: bool}
+     */
     private function processPersistedImportChunk(ImportRun $importRun, ProductImport $import, int $chunkSize, float $runStartedAt): array
     {
+        $chunkSize = min($chunkSize, self::PERSISTED_IMPORT_CHUNK_SIZE);
         $rows = $this->rowService->claimPendingImportableRows($importRun, $chunkSize);
         if ($rows === []) {
             return [
@@ -188,7 +306,7 @@ class ProductImportRunChunkProcessor
         $totalRows = max((int) $importRun->total_rows, $importRun->rows()->where('status', 'valid')->count());
         $hasMore = $this->rowService->hasUnfinishedImportableRows($importRun->refresh());
 
-        $this->updateProgress($importRun, $import, $newProcessedRows, $totalRows, $runStartedAt);
+        $this->updateProgress($importRun, $import, $newProcessedRows, $totalRows, $runStartedAt, $chunkSize);
 
         return [
             'processed_rows' => $processedRows,
@@ -255,7 +373,7 @@ class ProductImportRunChunkProcessor
         );
     }
 
-    private function updateProgress(ImportRun $importRun, ProductImport $import, int $processedRows, int $totalRows, float $runStartedAt): void
+    private function updateProgress(ImportRun $importRun, ProductImport $import, int $processedRows, int $totalRows, float $runStartedAt, int $chunkSize = self::CHUNK_SIZE): void
     {
         $summary = array_merge(
             $importRun->summary ?? [],
@@ -263,14 +381,14 @@ class ProductImportRunChunkProcessor
             $this->validationRowsSummary($importRun),
             [
                 'chunk_processing' => true,
-                'chunk_size' => self::CHUNK_SIZE,
+                'chunk_size' => $chunkSize,
                 'latest_results_limited_to' => self::RESULT_LIMIT,
                 'latest_errors_limited_to' => self::RESULT_LIMIT,
                 'source_file_deleted' => false,
                 'metrics' => $this->metricsSummary($import, $processedRows, $runStartedAt),
             ],
             $importRun->rows()->exists()
-                ? array_merge($this->rowService->summaryCounts($importRun), $this->rowService->groupingSummary($importRun))
+                ? $this->persistedRowsSummary($importRun, false)
                 : []
         );
 
@@ -289,6 +407,96 @@ class ProductImportRunChunkProcessor
         ]);
     }
 
+    private function updateValidationStagingProgress(ImportRun $importRun, ProductImport $import, int $stagedRows, int $totalRows, bool $hasMoreStagingRows, float $runStartedAt): void
+    {
+        $summary = array_merge(
+            $importRun->summary ?? [],
+            $this->persistedRowsSummary($importRun, false),
+            [
+                'chunk_processing' => true,
+                'parallel_validation' => true,
+                'use_persisted_rows_snapshot' => true,
+                'chunk_size' => self::CHUNK_SIZE,
+                'staging_status' => $hasMoreStagingRows ? 'running' : 'completed',
+                'staged_rows_count' => $stagedRows,
+                'validation_rows_count' => $this->rowService->totalRowsCount($importRun),
+                'validation_rows_limited' => true,
+                'full_revalidation_status' => $hasMoreStagingRows ? 'pending' : 'running',
+                'source_file_deleted' => false,
+                'metrics' => $this->metricsSummary($import, $stagedRows, $runStartedAt),
+            ],
+        );
+
+        $importRun->update([
+            'status' => ImportRun::STATUS_RUNNING,
+            'phase' => $hasMoreStagingRows ? ImportRun::PHASE_STAGING : ImportRun::PHASE_VALIDATING,
+            'total_rows' => max($totalRows, $stagedRows),
+            'processed_rows' => 0,
+            'success_count' => 0,
+            'error_count' => 0,
+            'summary' => $summary,
+            'heartbeat_at' => now(),
+        ]);
+    }
+
+    private function markValidationStagingCompleted(ImportRun $importRun, int $stagedRows, float $runStartedAt): void
+    {
+        $import = $this->newImport($importRun);
+        $this->updateValidationStagingProgress($importRun, $import, $stagedRows, $stagedRows, false, $runStartedAt);
+    }
+
+    private function updatePersistedValidationProgress(ImportRun $importRun, ProductImport $import, int $processedRows, float $runStartedAt): void
+    {
+        $totalRows = $this->rowService->totalRowsCount($importRun);
+        $hasUnfinishedRows = $this->rowService->hasUnfinishedValidationRows($importRun);
+        $successCount = $this->rowService->validationSuccessRowsCount($importRun);
+        $errorCount = $this->rowService->validationErrorRowsCount($importRun);
+        $rowsRevision = (int) ($importRun->summary['rows_revision'] ?? 0);
+        $summary = array_merge(
+            $importRun->summary ?? [],
+            $import->referenceSummary(),
+            [
+                'chunk_processing' => true,
+                'parallel_validation' => true,
+                'use_persisted_rows_snapshot' => true,
+                'chunk_size' => self::CHUNK_SIZE,
+                'latest_results_limited_to' => self::RESULT_LIMIT,
+                'latest_errors_limited_to' => self::RESULT_LIMIT,
+                'source_file_deleted' => false,
+                'validation_rows_count' => $totalRows,
+                'validation_rows_limited' => true,
+                'rows_revision' => $rowsRevision,
+                'validated_rows_revision' => $rowsRevision,
+                'rows_dirty' => false,
+                'staging_status' => 'completed',
+                'staged_rows_count' => $totalRows,
+                'full_revalidation_status' => $hasUnfinishedRows ? 'running' : 'completed',
+                'metrics' => $this->metricsSummary($import, $processedRows, $runStartedAt),
+            ],
+            [
+                'row_status_counts' => [
+                    'valid' => $successCount,
+                    'error' => $errorCount,
+                    'pending_validation' => max(0, $totalRows - $successCount - $errorCount),
+                ],
+            ],
+        );
+
+        $importRun->update([
+            'status' => ImportRun::STATUS_RUNNING,
+            'phase' => ImportRun::PHASE_VALIDATING,
+            'total_rows' => $totalRows,
+            'processed_rows' => $processedRows,
+            'success_count' => $successCount,
+            'error_count' => $errorCount,
+            'results' => array_slice($import->results, -self::RESULT_LIMIT),
+            'errors' => array_slice($import->errors, -self::RESULT_LIMIT),
+            'failed_rows' => array_values(array_filter($import->errors, fn (array $error): bool => ! empty($error['data']))),
+            'summary' => $summary,
+            'heartbeat_at' => now(),
+        ]);
+    }
+
     private function markCompleted(ImportRun $importRun, ProductImport $import, float $runStartedAt): void
     {
         $summary = array_merge(
@@ -297,21 +505,23 @@ class ProductImportRunChunkProcessor
             $this->validationRowsSummary($importRun),
             [
                 'chunk_processing' => true,
+                'staging_status' => 'completed',
+                'staged_rows_count' => $this->isValidationRun($importRun) && $importRun->rows()->exists() ? $this->rowService->totalRowsCount($importRun) : ($importRun->summary['staged_rows_count'] ?? 0),
                 'source_file_deleted' => false,
                 'metrics' => $this->metricsSummary($import, (int) $importRun->processed_rows, $runStartedAt),
             ],
             $importRun->rows()->exists()
-                ? array_merge($this->rowService->summaryCounts($importRun), $this->rowService->groupingSummary($importRun))
+                ? $this->persistedRowsSummary($importRun, true)
                 : []
         );
 
         $importRun->update([
             'status' => ImportRun::STATUS_COMPLETED,
             'phase' => ImportRun::PHASE_FINALIZING,
-            'processed_rows' => (int) $importRun->processed_rows,
-            'total_rows' => (int) $importRun->processed_rows,
-            'success_count' => $import->successCount,
-            'error_count' => $import->errorCount,
+            'processed_rows' => $this->isValidationRun($importRun) && $importRun->rows()->exists() ? $this->rowService->validatedRowsCount($importRun) : (int) $importRun->processed_rows,
+            'total_rows' => $this->isValidationRun($importRun) && $importRun->rows()->exists() ? $this->rowService->totalRowsCount($importRun) : (int) $importRun->processed_rows,
+            'success_count' => $this->isValidationRun($importRun) && $importRun->rows()->exists() ? $this->rowService->validationSuccessRowsCount($importRun) : $import->successCount,
+            'error_count' => $this->isValidationRun($importRun) && $importRun->rows()->exists() ? $this->rowService->validationErrorRowsCount($importRun) : $import->errorCount,
             'results' => array_slice($import->results, -self::RESULT_LIMIT),
             'errors' => array_slice($import->errors, -self::RESULT_LIMIT),
             'failed_rows' => array_values(array_filter($import->errors, fn (array $error): bool => ! empty($error['data']))),
@@ -333,6 +543,7 @@ class ProductImportRunChunkProcessor
             'errors' => $import === null ? ($importRun->errors ?? []) : array_slice($import->errors, -self::RESULT_LIMIT),
             'summary' => array_merge($importRun->summary ?? [], [
                 'chunk_processing' => true,
+                'staging_status' => 'cancelled',
                 'source_file_deleted' => false,
             ]),
             'finished_at' => now(),
@@ -387,6 +598,23 @@ class ProductImportRunChunkProcessor
             'rows_dirty' => false,
             'full_revalidation_status' => 'completed',
         ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function persistedRowsSummary(ImportRun $importRun, bool $allowDetailedGrouping): array
+    {
+        $summary = array_merge(
+            $this->rowService->summaryCounts($importRun),
+            $this->rowService->estimatedGroupingCounts($importRun),
+        );
+
+        if ($allowDetailedGrouping && $this->rowService->totalRowsCount($importRun) <= self::DETAILED_GROUPING_ROW_LIMIT) {
+            return array_merge($summary, $this->rowService->groupingSummary($importRun));
+        }
+
+        return $summary;
     }
 
     private function metricsSummary(ProductImport $import, int $processedRows, float $startedAt): array

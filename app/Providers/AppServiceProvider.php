@@ -26,11 +26,12 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        $listener = new LogAuthenticationEvents();
+        $listener = new LogAuthenticationEvents;
         Event::listen(Login::class, [$listener, 'handleLogin']);
         Event::listen(Logout::class, [$listener, 'handleLogout']);
 
         RateLimiter::for('product-import-heavy', fn (Request $request): Limit => Limit::perMinute(6)->by($this->rateLimitKey($request, 'product-import-heavy')));
+        RateLimiter::for('product-import-chunk', fn (Request $request): Limit => Limit::perMinute(120)->by($this->chunkRateLimitKey($request, 'product-import-chunk')));
         RateLimiter::for('product-import-export', fn (Request $request): Limit => Limit::perMinute(10)->by($this->rateLimitKey($request, 'product-import-export')));
         RateLimiter::for('product-import-mutation', fn (Request $request): Limit => Limit::perMinute(30)->by($this->rateLimitKey($request, 'product-import-mutation')));
     }
@@ -38,5 +39,15 @@ class AppServiceProvider extends ServiceProvider
     private function rateLimitKey(Request $request, string $scope): string
     {
         return $scope.'|'.($request->user()?->id ?: $request->ip());
+    }
+
+    private function chunkRateLimitKey(Request $request, string $scope): string
+    {
+        $importRun = $request->route('importRun');
+        $importRunKey = is_object($importRun) && method_exists($importRun, 'getKey')
+            ? $importRun->getKey()
+            : $importRun;
+
+        return $this->rateLimitKey($request, $scope).'|'.($importRunKey ?: 'unknown');
     }
 }

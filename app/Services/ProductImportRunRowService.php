@@ -25,6 +25,19 @@ class ProductImportRunRowService
         $this->replaceRows($importRun, $import->validationRows);
     }
 
+    /**
+     * @param  array<int, array<string, mixed>>  $stagingRows
+     */
+    public function appendPendingValidationRows(ImportRun $importRun, array $stagingRows): void
+    {
+        foreach (array_chunk($stagingRows, 500) as $chunk) {
+            $now = now();
+            $rows = array_map(fn (array $row): array => $this->pendingValidationRowAttributes($importRun, $row, $now), $chunk);
+
+            ImportRunRow::query()->insert($rows);
+        }
+    }
+
     public function replaceRows(ImportRun $importRun, array $validationRows, bool $preserveEdited = false): void
     {
         $editedRows = $preserveEdited
@@ -122,34 +135,48 @@ class ProductImportRunRowService
 
     public function createSnapshot(ImportRun $sourceRun, ImportRun $targetRun): void
     {
-        $sourceRun->rows()->orderBy('id')->chunkById(500, function ($rows) use ($targetRun): void {
-            $now = now();
-            ImportRunRow::query()->insert($rows->map(fn (ImportRunRow $row): array => [
-                'import_run_id' => $targetRun->id,
-                'row_number' => $row->row_number,
-                'sheet_name' => $row->sheet_name,
-                'status' => $row->status,
-                'action_type' => $row->action_type,
-                'execution_status' => $row->execution_status,
-                'label' => $row->label,
-                'search_text' => $row->search_text,
-                'product_group_key' => $row->product_group_key,
-                'variant_key' => $row->variant_key,
-                'conflict_key' => $row->conflict_key,
-                'is_edited' => $row->is_edited,
-                'validated_at' => $row->validated_at,
-                'executed_at' => $row->executed_at,
-                'execution_error' => $row->execution_error,
-                'data' => json_encode($row->data ?? [], JSON_UNESCAPED_UNICODE),
-                'source_data' => json_encode($row->source_data ?? [], JSON_UNESCAPED_UNICODE),
-                'errors' => json_encode($row->errors ?? [], JSON_UNESCAPED_UNICODE),
-                'warnings' => json_encode($row->warnings ?? [], JSON_UNESCAPED_UNICODE),
-                'conflicts' => json_encode($row->conflicts ?? [], JSON_UNESCAPED_UNICODE),
-                'change_preview' => json_encode($row->change_preview ?? [], JSON_UNESCAPED_UNICODE),
-                'created_at' => $now,
-                'updated_at' => $now,
-            ])->all());
-        });
+        $sourceRun->rows()
+            ->where('status', 'valid')
+            ->orderBy('id')
+            ->chunkById(100, function (Collection $rows) use ($targetRun): void {
+                $now = now();
+                ImportRunRow::query()->insert($rows->map(fn (ImportRunRow $row): array => [
+                    'import_run_id' => $targetRun->id,
+                    'row_number' => $row->row_number,
+                    'sheet_name' => $row->sheet_name,
+                    'status' => $row->status,
+                    'action_type' => $row->action_type,
+                    'execution_status' => $row->execution_status,
+                    'label' => $row->label,
+                    'search_text' => $row->search_text,
+                    'product_group_key' => $row->product_group_key,
+                    'variant_key' => $row->variant_key,
+                    'conflict_key' => $row->conflict_key,
+                    'brand_key' => $row->brand_key,
+                    'category_key' => $row->category_key,
+                    'is_edited' => $row->is_edited,
+                    'validated_at' => $row->validated_at,
+                    'executed_at' => $row->executed_at,
+                    'execution_error' => $row->execution_error,
+                    'data' => $this->rawJsonAttribute($row, 'data'),
+                    'source_data' => $this->rawJsonAttribute($row, 'source_data'),
+                    'errors' => $this->rawJsonAttribute($row, 'errors'),
+                    'warnings' => $this->rawJsonAttribute($row, 'warnings'),
+                    'conflicts' => $this->rawJsonAttribute($row, 'conflicts'),
+                    'change_preview' => $this->rawJsonAttribute($row, 'change_preview'),
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ])->all());
+            });
+    }
+
+    private function rawJsonAttribute(ImportRunRow $row, string $attribute): string
+    {
+        $value = $row->getRawOriginal($attribute);
+
+        return is_string($value)
+            ? $value
+            : json_encode($value ?? [], JSON_UNESCAPED_UNICODE);
     }
 
     public function executableRows(ImportRun $importRun): array
@@ -189,6 +216,123 @@ class ProductImportRunRowService
                 $afterChunk($import);
             }
         });
+    }
+
+    /**
+     * @return array{affected_rows_count: int, fallback_full_revalidation: bool, counts: array<string, mixed>}
+     */
+    public function revalidateReferenceRows(ImportRun $importRun, ProductImport $import, array $brands = [], array $categories = []): array
+    {
+        $keys = $this->referenceHashKeys($brands, $categories);
+
+        if ($keys['brands'] === [] && $keys['categories'] === []) {
+            return [
+                'affected_rows_count' => 0,
+                'fallback_full_revalidation' => false,
+                'counts' => $this->summaryCounts($importRun),
+            ];
+        }
+
+        if ($this->requiresReferenceRevalidationFallback($importRun, $keys)) {
+            return [
+                'affected_rows_count' => 0,
+                'fallback_full_revalidation' => true,
+                'counts' => $this->summaryCounts($importRun),
+            ];
+        }
+
+        $rows = $importRun->rows()
+            ->where(function ($query) use ($keys): void {
+                if ($keys['brands'] !== []) {
+                    $query->whereIn('brand_key', $keys['brands']);
+                }
+
+                if ($keys['categories'] !== []) {
+                    $method = $keys['brands'] === [] ? 'whereIn' : 'orWhereIn';
+                    $query->{$method}('category_key', $keys['categories']);
+                }
+            })
+            ->select(['id', 'row_number', 'data', 'source_data'])
+            ->orderBy('id')
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return [
+                'affected_rows_count' => 0,
+                'fallback_full_revalidation' => false,
+                'counts' => $this->summaryCounts($importRun),
+            ];
+        }
+
+        $payloads = $rows
+            ->map(fn (ImportRunRow $row): array => array_merge(
+                $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
+                $row->data ?? [],
+                [
+                    '__row' => $row->row_number,
+                    '__source_data' => $row->source_data ?? [],
+                ]
+            ))
+            ->all();
+
+        $import->validateRowsWithDuplicateKeys($payloads, $import->duplicateRowKeysForRows($payloads));
+        $this->persistValidationRowsChunk($importRun, $import->validationRows, true);
+        $import->validationRows = [];
+
+        return [
+            'affected_rows_count' => $rows->count(),
+            'fallback_full_revalidation' => false,
+            'counts' => $this->summaryCounts($importRun->refresh()),
+        ];
+    }
+
+    /**
+     * @param  array{brands: array<int, string>, categories: array<int, string>}  $keys
+     */
+    private function requiresReferenceRevalidationFallback(ImportRun $importRun, array $keys): bool
+    {
+        if (
+            $keys['brands'] !== []
+            && $this->rowsWithoutReferenceKeyMatch($importRun, 'brand_key', 'br', $keys['brands'])
+        ) {
+            return true;
+        }
+
+        return $keys['categories'] !== []
+            && $this->rowsWithoutReferenceKeyMatch($importRun, 'category_key', 'cat', $keys['categories']);
+    }
+
+    /**
+     * @param  array<int, string>  $requestedKeys
+     */
+    private function rowsWithoutReferenceKeyMatch(ImportRun $importRun, string $column, string $prefix, array $requestedKeys): bool
+    {
+        $matched = false;
+        $requested = array_flip($requestedKeys);
+
+        $importRun->rows()
+            ->whereNull($column)
+            ->select(['id', 'data'])
+            ->orderBy('id')
+            ->chunkById(500, function (Collection $rows) use (&$matched, $prefix, $requested): bool {
+                foreach ($rows as $row) {
+                    $data = $row->data ?? [];
+                    $value = $prefix === 'br'
+                        ? $this->brandReferenceValue($data)
+                        : $this->categoryReferenceValue($data);
+                    $key = $this->referenceHashKey($prefix, $value);
+
+                    if ($key !== null && isset($requested[$key])) {
+                        $matched = true;
+
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+
+        return $matched;
     }
 
     public function eachExecutableRowChunk(ImportRun $importRun, int $chunkSize, callable $callback): void
@@ -343,6 +487,91 @@ class ProductImportRunRowService
         });
     }
 
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function claimPendingValidationRows(ImportRun $importRun, int $chunkSize): array
+    {
+        return DB::transaction(function () use ($importRun, $chunkSize): array {
+            $staleBefore = now()->subMinutes(self::PROCESSING_LEASE_MINUTES);
+            $seedRows = $importRun->rows()
+                ->where(function ($query) use ($staleBefore): void {
+                    $query->where('status', 'pending_validation')
+                        ->orWhere(function ($query) use ($staleBefore): void {
+                            $query->where('status', 'validation_processing')
+                                ->where('updated_at', '<', $staleBefore);
+                        });
+                })
+                ->select(['id', 'product_group_key'])
+                ->orderBy('id')
+                ->limit($chunkSize)
+                ->lockForUpdate()
+                ->get();
+
+            if ($seedRows->isEmpty()) {
+                return [];
+            }
+
+            $groupKeys = $seedRows
+                ->pluck('product_group_key')
+                ->filter(fn ($key): bool => is_string($key) && trim($key) !== '')
+                ->unique()
+                ->values()
+                ->all();
+            $ungroupedRowIds = $seedRows
+                ->filter(fn (ImportRunRow $row): bool => ! is_string($row->product_group_key) || trim($row->product_group_key) === '')
+                ->pluck('id')
+                ->all();
+
+            $claimedRows = $importRun->rows()
+                ->where(function ($query) use ($staleBefore): void {
+                    $query->where('status', 'pending_validation')
+                        ->orWhere(function ($query) use ($staleBefore): void {
+                            $query->where('status', 'validation_processing')
+                                ->where('updated_at', '<', $staleBefore);
+                        });
+                })
+                ->where(function ($query) use ($groupKeys, $ungroupedRowIds): void {
+                    if ($groupKeys !== []) {
+                        $query->whereIn('product_group_key', $groupKeys);
+                    }
+
+                    if ($ungroupedRowIds !== []) {
+                        $method = $groupKeys === [] ? 'whereIn' : 'orWhereIn';
+                        $query->{$method}('id', $ungroupedRowIds);
+                    }
+                })
+                ->select(['id', 'row_number', 'data', 'source_data', 'conflict_key'])
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            if ($claimedRows->isEmpty()) {
+                return [];
+            }
+
+            $now = now();
+            ImportRunRow::query()
+                ->whereKey($claimedRows->pluck('id')->all())
+                ->update([
+                    'status' => 'validation_processing',
+                    'updated_at' => $now,
+                ]);
+
+            return $claimedRows
+                ->map(fn (ImportRunRow $row): array => array_merge(
+                    $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
+                    $row->data ?? [],
+                    [
+                        '__row' => $row->row_number,
+                        '__source_data' => $row->source_data ?? [],
+                        '__import_run_row_conflict_key' => $row->conflict_key,
+                    ]
+                ))
+                ->all();
+        });
+    }
+
     public function hasPendingImportableRows(ImportRun $importRun): bool
     {
         $staleBefore = now()->subMinutes(self::PROCESSING_LEASE_MINUTES);
@@ -368,6 +597,39 @@ class ProductImportRunRowService
                     ->orWhere('execution_status', 'processing');
             })
             ->exists();
+    }
+
+    public function hasUnfinishedValidationRows(ImportRun $importRun): bool
+    {
+        return $importRun->rows()
+            ->whereIn('status', ['pending_validation', 'validation_processing'])
+            ->exists();
+    }
+
+    public function validatedRowsCount(ImportRun $importRun): int
+    {
+        return $importRun->rows()
+            ->whereIn('status', ['valid', 'error'])
+            ->count();
+    }
+
+    public function totalRowsCount(ImportRun $importRun): int
+    {
+        return $importRun->rows()->count();
+    }
+
+    public function validationErrorRowsCount(ImportRun $importRun): int
+    {
+        return $importRun->rows()
+            ->where('status', 'error')
+            ->count();
+    }
+
+    public function validationSuccessRowsCount(ImportRun $importRun): int
+    {
+        return $importRun->rows()
+            ->where('status', 'valid')
+            ->count();
     }
 
     public function executedImportableRowsCount(ImportRun $importRun): int
@@ -422,6 +684,157 @@ class ProductImportRunRowService
                     ]);
                 }
             });
+    }
+
+    public function synchronizeValidationResultsForRows(ImportRun $importRun, ProductImport $import): void
+    {
+        if ($import->validationRows === []) {
+            return;
+        }
+
+        $rowNumbers = collect($import->validationRows)
+            ->map(fn (array $validationRow): int => (int) ($validationRow['row'] ?? 0))
+            ->filter(fn (int $rowNumber): bool => $rowNumber > 0)
+            ->unique()
+            ->values();
+
+        if ($rowNumbers->isEmpty()) {
+            return;
+        }
+
+        $existingRows = $importRun->rows()
+            ->whereIn('row_number', $rowNumbers)
+            ->get(['row_number', 'source_data', 'is_edited'])
+            ->keyBy('row_number');
+
+        $now = now();
+        $rows = [];
+        foreach ($import->validationRows as $validationRow) {
+            $rowNumber = (int) ($validationRow['row'] ?? 0);
+            $existingRow = $existingRows->get($rowNumber);
+
+            if (! $existingRow instanceof ImportRunRow) {
+                continue;
+            }
+
+            if (($validationRow['source_data'] ?? null) === null && $existingRow->source_data !== null) {
+                $validationRow['source_data'] = $existingRow->source_data;
+            }
+
+            $rows[] = $this->validationRowAttributes($importRun, $validationRow, (bool) $existingRow->is_edited, $now);
+        }
+
+        if ($rows === []) {
+            return;
+        }
+
+        ImportRunRow::query()->upsert(
+            $rows,
+            ['import_run_id', 'row_number'],
+            [
+                'sheet_name',
+                'status',
+                'action_type',
+                'execution_status',
+                'label',
+                'search_text',
+                'product_group_key',
+                'variant_key',
+                'conflict_key',
+                'brand_key',
+                'category_key',
+                'is_edited',
+                'validated_at',
+                'executed_at',
+                'execution_error',
+                'data',
+                'source_data',
+                'errors',
+                'warnings',
+                'conflicts',
+                'change_preview',
+                'updated_at',
+            ]
+        );
+    }
+
+    public function duplicateValidationConflictCounts(ImportRun $importRun): array
+    {
+        $counts = [];
+
+        $importRun->rows()
+            ->select(['id', 'data'])
+            ->orderBy('id')
+            ->chunkById(500, function (Collection $rows) use (&$counts): void {
+                foreach ($rows as $row) {
+                    $data = $row->data ?? [];
+                    $category = $this->normalizeImportKey((string) ($data['categoria'] ?? ''));
+                    $name = $this->normalizeImportKey((string) ($data['nombre'] ?? ''));
+
+                    if ($category === '' || $name === '') {
+                        continue;
+                    }
+
+                    $productKey = $category.'|'.$name;
+                    $variantPreview = is_array($data['__variant_preview'] ?? null)
+                        ? $data['__variant_preview']
+                        : null;
+                    $variantKey = $this->variantGroupingKey($data, $variantPreview);
+                    $conflictKey = $productKey.'|'.$variantKey;
+                    $counts[$conflictKey] = (int) ($counts[$conflictKey] ?? 0) + 1;
+                }
+            });
+
+        return $counts;
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<string, int>
+     */
+    public function duplicateValidationConflictCountsForRows(ImportRun $importRun, array $rows): array
+    {
+        $targetConflictKeys = collect($rows)
+            ->map(fn (array $row): string => $this->validationConflictKeyFromData($row))
+            ->filter(fn (string $key): bool => $key !== '')
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($targetConflictKeys === []) {
+            return [];
+        }
+
+        $targetLookup = array_fill_keys($targetConflictKeys, true);
+        $counts = [];
+        $storedConflictKeys = collect($rows)
+            ->pluck('__import_run_row_conflict_key')
+            ->filter(fn ($key): bool => is_string($key) && trim($key) !== '')
+            ->unique()
+            ->values()
+            ->all();
+
+        $query = $importRun->rows()
+            ->select(['id', 'data'])
+            ->orderBy('id');
+
+        if ($storedConflictKeys !== []) {
+            $query->whereIn('conflict_key', $storedConflictKeys);
+        }
+
+        $query->chunkById(500, function (Collection $rows) use (&$counts, $targetLookup): void {
+            foreach ($rows as $row) {
+                $conflictKey = $this->validationConflictKeyFromData($row->data ?? []);
+
+                if ($conflictKey === '' || ! isset($targetLookup[$conflictKey])) {
+                    continue;
+                }
+
+                $counts[$conflictKey] = (int) ($counts[$conflictKey] ?? 0) + 1;
+            }
+        });
+
+        return $counts;
     }
 
     public function applyOperationalMapping(ImportRun $importRun, array $mapping, array $visibleRowIds, int $rowsRevision): array
@@ -550,6 +963,8 @@ class ProductImportRunRowService
                 'product_group_key',
                 'variant_key',
                 'conflict_key',
+                'brand_key',
+                'category_key',
                 'is_edited',
                 'validated_at',
                 'executed_at',
@@ -711,6 +1126,34 @@ class ProductImportRunRowService
         ];
     }
 
+    /**
+     * @return array{productos_estimados: int, variantes_estimadas: int}
+     */
+    public function estimatedGroupingCounts(ImportRun $importRun): array
+    {
+        $productCount = $importRun->rows()
+            ->whereNotNull('product_group_key')
+            ->distinct()
+            ->count('product_group_key');
+
+        $variantCount = $importRun->rows()
+            ->whereNotNull('conflict_key')
+            ->distinct()
+            ->count('conflict_key');
+
+        if ($variantCount === 0) {
+            $variantCount = $importRun->rows()
+                ->whereNotNull('variant_key')
+                ->distinct()
+                ->count('variant_key');
+        }
+
+        return [
+            'productos_estimados' => $productCount,
+            'variantes_estimadas' => $variantCount,
+        ];
+    }
+
     public function retryableFailedRowsCount(ImportRun $importRun): int
     {
         $persistedFailedRows = $importRun->rows()
@@ -763,6 +1206,22 @@ class ProductImportRunRowService
         return 'brand:'.$brand.'|name:'.$name;
     }
 
+    private function validationConflictKeyFromData(array $data): string
+    {
+        $category = $this->normalizeImportKey((string) ($data['categoria'] ?? ''));
+        $name = $this->normalizeImportKey((string) ($data['nombre'] ?? ''));
+
+        if ($category === '' || $name === '') {
+            return '';
+        }
+
+        $variantPreview = is_array($data['__variant_preview'] ?? null)
+            ? $data['__variant_preview']
+            : null;
+
+        return $category.'|'.$name.'|'.$this->variantGroupingKey($data, $variantPreview);
+    }
+
     private function nonEmptyString(mixed $value): ?string
     {
         $string = trim((string) ($value ?? ''));
@@ -784,6 +1243,40 @@ class ProductImportRunRowService
             'created_at' => $now,
             'updated_at' => $now,
         ], $this->validationRowDatabaseAttributes($row, $isEdited));
+    }
+
+    private function pendingValidationRowAttributes(ImportRun $importRun, array $row, Carbon $now): array
+    {
+        $data = $row['data'] ?? [];
+        $identity = $this->validationIdentityColumns($data);
+
+        return [
+            'import_run_id' => $importRun->id,
+            'row_number' => (int) ($row['row'] ?? 0),
+            'sheet_name' => $importRun->sheet_name,
+            'status' => 'pending_validation',
+            'action_type' => null,
+            'execution_status' => null,
+            'label' => $data['nombre'] ?? null,
+            'search_text' => $this->searchText($data),
+            'product_group_key' => $identity['product_group_key'],
+            'variant_key' => $identity['variant_key'],
+            'conflict_key' => $identity['conflict_key'],
+            'brand_key' => $identity['brand_key'],
+            'category_key' => $identity['category_key'],
+            'is_edited' => false,
+            'validated_at' => null,
+            'executed_at' => null,
+            'execution_error' => null,
+            'data' => json_encode($data, JSON_UNESCAPED_UNICODE),
+            'source_data' => json_encode($row['source_data'] ?? null, JSON_UNESCAPED_UNICODE),
+            'errors' => json_encode([], JSON_UNESCAPED_UNICODE),
+            'warnings' => json_encode($row['warnings'] ?? [], JSON_UNESCAPED_UNICODE),
+            'conflicts' => json_encode([], JSON_UNESCAPED_UNICODE),
+            'change_preview' => json_encode([], JSON_UNESCAPED_UNICODE),
+            'created_at' => $now,
+            'updated_at' => $now,
+        ];
     }
 
     private function validationRowModelAttributes(array $row, bool $isEdited): array
@@ -822,6 +1315,8 @@ class ProductImportRunRowService
             'product_group_key' => $identity['product_group_key'],
             'variant_key' => $identity['variant_key'],
             'conflict_key' => $identity['conflict_key'],
+            'brand_key' => $identity['brand_key'],
+            'category_key' => $identity['category_key'],
             'is_edited' => $isEdited,
             'validated_at' => now(),
             'executed_at' => null,
@@ -836,7 +1331,7 @@ class ProductImportRunRowService
     }
 
     /**
-     * @return array{product_group_key: ?string, variant_key: ?string, conflict_key: ?string}
+     * @return array{product_group_key: ?string, variant_key: ?string, conflict_key: ?string, brand_key: ?string, category_key: ?string}
      */
     private function validationIdentityColumns(array $data): array
     {
@@ -854,7 +1349,67 @@ class ProductImportRunRowService
             'product_group_key' => $this->technicalIdentityKey('pg', $productGroupKey),
             'variant_key' => $this->technicalIdentityKey('vk', $variantKey),
             'conflict_key' => $this->technicalIdentityKey('ck', $conflictKey),
+            'brand_key' => $this->referenceHashKey('br', $this->brandReferenceValue($data)),
+            'category_key' => $this->referenceHashKey('cat', $this->categoryReferenceValue($data)),
         ];
+    }
+
+    /**
+     * @return array{brands: array<int, string>, categories: array<int, string>}
+     */
+    public function referenceHashKeys(array $brands = [], array $categories = []): array
+    {
+        return [
+            'brands' => collect($brands)
+                ->map(fn (mixed $brand): ?string => $this->referenceHashKey('br', $this->nonEmptyString($brand)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all(),
+            'categories' => collect($categories)
+                ->map(fn (mixed $category): ?string => $this->referenceHashKey('cat', $this->nonEmptyString($category)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all(),
+        ];
+    }
+
+    private function referenceHashKey(string $prefix, ?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return $prefix.':'.hash('sha256', $this->normalizeImportKey($value));
+    }
+
+    private function brandReferenceValue(array $data): ?string
+    {
+        $brand = $this->nonEmptyString($data['brand'] ?? null);
+
+        if ($brand !== null) {
+            return $brand;
+        }
+
+        return $this->rowHasVariantPayload($data) ? 'Generica' : null;
+    }
+
+    private function categoryReferenceValue(array $data): ?string
+    {
+        return $this->nonEmptyString($data['__category_label'] ?? null)
+            ?? $this->nonEmptyString($data['categoria'] ?? null);
+    }
+
+    private function rowHasVariantPayload(array $data): bool
+    {
+        foreach (['system_id', 'costo', 'precio', 'cantidad'] as $key) {
+            if ($this->nonEmptyString($data[$key] ?? null) !== null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function technicalIdentityKey(string $prefix, ?string $value): ?string

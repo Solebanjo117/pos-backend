@@ -22,6 +22,8 @@ class ImportRunRow extends Model
         'product_group_key',
         'variant_key',
         'conflict_key',
+        'brand_key',
+        'category_key',
         'is_edited',
         'validated_at',
         'executed_at',

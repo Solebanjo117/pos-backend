@@ -376,6 +376,16 @@ abstract class BaseImport
         $sheets = $this->inspectSheets($file, $mapping);
         $resolvedIndex = $this->resolveSheetIndex($sheets, $sheetIndex, $sheetName);
         $resolvedSheetName = (string) ($sheets[$resolvedIndex]['name'] ?? '');
+
+        yield from $this->extractRowsFromResolvedSheetLazy($file, $resolvedSheetName, $mapping, $maxRows);
+    }
+
+    /**
+     * @return Generator<int, array<string, mixed>>
+     */
+    protected function extractRowsFromResolvedSheetLazy(UploadedFile|string $file, ?string $sheetName = null, array $mapping = [], ?int $maxRows = null): Generator
+    {
+        $resolvedSheetName = (string) ($sheetName ?? '');
         $headers = null;
         $sourceHeaders = null;
         $yielded = 0;
