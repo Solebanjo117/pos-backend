@@ -7,6 +7,8 @@ use App\Http\Requests\FinancialPositionReportRequest;
 use App\Http\Requests\IncomeStatementReportRequest;
 use App\Http\Requests\LedgerTrialBalanceReportRequest;
 use App\Http\Requests\SalesByClientReportRequest;
+use App\Http\Requests\StoreFinancialAdjustmentRequest;
+use App\Services\FinancialSnapshotService;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,9 +18,12 @@ class ReportController extends Controller
 {
     protected ReportService $reportService;
 
-    public function __construct(ReportService $reportService)
+    protected FinancialSnapshotService $financialSnapshotService;
+
+    public function __construct(ReportService $reportService, FinancialSnapshotService $financialSnapshotService)
     {
         $this->reportService = $reportService;
+        $this->financialSnapshotService = $financialSnapshotService;
     }
 
     /**
@@ -317,5 +322,138 @@ class ReportController extends Controller
         $pdf->loadHTML('<h1>Cierre de Caja (Z-Report) - '.$date.'</h1><pre>'.print_r($report, true).'</pre>');
 
         return $pdf->download('z-report-'.$date.'.pdf');
+    }
+
+    public function dailySummary(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date_from' => 'required|date',
+            'date_to' => 'required|date|after_or_equal:date_from',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'rebuild' => 'nullable|boolean',
+        ]);
+
+        $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
+
+        return response()->json(
+            $this->financialSnapshotService->rangeSummary($filters, $request->boolean('rebuild')),
+        );
+    }
+
+    public function financialSnapshots(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date_from' => 'required|date',
+            'date_to' => 'required|date|after_or_equal:date_from',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'rebuild' => 'nullable|boolean',
+        ]);
+
+        $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
+
+        return response()->json(
+            $this->financialSnapshotService->rangeSummary($filters, $request->boolean('rebuild')),
+        );
+    }
+
+    public function financialWeekly(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date' => 'nullable|date',
+            'week_start' => 'nullable|date',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'rebuild' => 'nullable|boolean',
+        ]);
+
+        return response()->json(
+            $this->financialSnapshotService->weeklySummary($request->only(['date', 'week_start', 'warehouse_id']), $request->boolean('rebuild')),
+        );
+    }
+
+    public function balanceSheet(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date_from' => 'nullable|date',
+            'date_to' => 'nullable|date',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+        ]);
+
+        $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
+
+        return response()->json(
+            $this->financialSnapshotService->balanceSheet($filters),
+        );
+    }
+
+    public function storeCapitalMovement(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'movement_type' => 'required|in:in,out',
+            'amount' => 'required|numeric|min:0.01',
+            'reason' => 'required|string|max:255',
+            'movement_date' => 'required|date',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'notes' => 'nullable|string|max:1000',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->financialSnapshotService->storeCapitalMovement(
+                $validated,
+                $request->user()?->id,
+            ),
+        ], 201);
+    }
+
+    public function capitalMovements(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date_from' => 'nullable|date',
+            'date_to' => 'nullable|date|after_or_equal:date_from',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->financialSnapshotService->listCapitalMovements(
+                $request->only(['date_from', 'date_to', 'warehouse_id']),
+            ),
+        ]);
+    }
+
+    public function storeAdjustment(StoreFinancialAdjustmentRequest $request): JsonResponse
+    {
+        $validated = $request->validated();
+        $adjustment = $this->reportService->storeFinancialAdjustment(
+            $validated,
+            $request->user()?->id,
+        );
+        $this->financialSnapshotService->rebuildRange(
+            $validated['adjustment_date'],
+            now()->toDateString(),
+            $validated['warehouse_id'] ?? null,
+            true,
+        );
+
+        return response()->json([
+            'success' => true,
+            'data' => $adjustment,
+        ], 201);
+    }
+
+    public function adjustments(Request $request): JsonResponse
+    {
+        $request->validate([
+            'date_from' => 'nullable|date',
+            'date_to' => 'nullable|date',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+        ]);
+
+        $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->reportService->listFinancialAdjustments($filters),
+        ]);
     }
 }

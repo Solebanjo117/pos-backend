@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
 use App\Models\Customer;
+use App\Models\FinancialAdjustment;
 use App\Models\InventoryLot;
 use App\Models\InventoryMovement;
 use App\Models\JournalLine;
@@ -1131,6 +1132,7 @@ class ReportService
             ],
             'timeline' => $financialReport['timeline'],
             'operational_expenses' => $expenses,
+            'expense_breakdown' => $this->generateExpenseBreakdown($filters),
             'credit_balances' => $creditBalances,
             'comparison' => ($filters['compare'] ?? 'none') === 'previous_period'
                 ? $this->previousPeriodComparison($filters, $basis)
@@ -2186,5 +2188,325 @@ class ReportService
         }
 
         return $summary;
+    }
+
+    public function generateDailyFinancialSummary(array $filters): array
+    {
+        return app(FinancialSnapshotService::class)->rangeSummary($filters);
+    }
+
+    public function generateBalanceSheet(array $filters): array
+    {
+        return app(FinancialSnapshotService::class)->balanceSheet($filters);
+    }
+
+    public function generateExpenseBreakdown(array $filters): array
+    {
+        $expenses = $this->financialOperationalExpenses($filters);
+        $byCategory = collect($expenses['by_category'])->keyBy('category');
+
+        $rent = (float) ($byCategory['rent']['amount'] ?? 0);
+        $salary = (float) ($byCategory['payroll']['amount'] ?? 0);
+        $electricity = (float) ($byCategory['electricity']['amount'] ?? 0);
+        $utilities = (float) ($byCategory['utilities']['amount'] ?? 0);
+        $internet = (float) ($byCategory['software']['amount'] ?? 0);
+
+        $mapped = [
+            'rent' => ['label' => 'Rent', 'amount' => round($rent, 2)],
+            'salary' => ['label' => 'Salary', 'amount' => round($salary, 2)],
+            'electricity' => ['label' => 'Electricity', 'amount' => round($electricity, 2)],
+            'utilities' => ['label' => 'Utilities', 'amount' => round($utilities, 2)],
+            'internet' => ['label' => 'Internet', 'amount' => round($internet, 2)],
+        ];
+
+        $mappedKeys = ['rent', 'payroll', 'electricity', 'utilities', 'software'];
+        $others = $byCategory->filter(fn ($item, $key) => ! in_array($key, $mappedKeys, true));
+        $otherTotal = round((float) $others->sum('amount'), 2);
+
+        return [
+            'items' => array_values($mapped),
+            'other' => ['label' => 'Otros', 'amount' => $otherTotal],
+            'total' => round($rent + $salary + $electricity + $utilities + $internet + $otherTotal, 2),
+        ];
+    }
+
+    public function storeFinancialAdjustment(array $data, ?int $userId = null): array
+    {
+        $adjustment = FinancialAdjustment::create([
+            'warehouse_id' => $data['warehouse_id'] ?? null,
+            'user_id' => $userId,
+            'type' => $data['type'],
+            'amount' => (float) $data['amount'],
+            'reason' => $data['reason'],
+            'adjustment_date' => $data['adjustment_date'],
+            'notes' => $data['notes'] ?? null,
+        ]);
+
+        return $adjustment->toArray();
+    }
+
+    public function listFinancialAdjustments(array $filters): array
+    {
+        $warehouseId = $filters['warehouse_id'] ?? null;
+        $dateFrom = $filters['date_from'] ?? null;
+        $dateTo = $filters['date_to'] ?? null;
+
+        $query = FinancialAdjustment::query()
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->when($dateFrom, fn ($q) => $q->whereDate('adjustment_date', '>=', $dateFrom))
+            ->when($dateTo, fn ($q) => $q->whereDate('adjustment_date', '<=', $dateTo))
+            ->orderByDesc('adjustment_date')
+            ->orderByDesc('id');
+
+        return $query->get()->map(fn (FinancialAdjustment $adj): array => [
+            'id' => $adj->id,
+            'type' => $adj->type,
+            'type_label' => $adj->type_label,
+            'amount' => (float) $adj->amount,
+            'reason' => $adj->reason,
+            'adjustment_date' => $adj->adjustment_date?->toDateString(),
+            'notes' => $adj->notes,
+            'warehouse_id' => $adj->warehouse_id,
+        ])->all();
+    }
+
+    private function emptyDailyRow(string $date): array
+    {
+        return [
+            'date' => $date,
+            'cash' => 0.0,
+            'inventory' => 0.0,
+            'purchase' => 0.0,
+            'expenses' => 0.0,
+            'sales' => 0.0,
+            'cogs' => 0.0,
+            'profit' => 0.0,
+            'credit_payable' => 0.0,
+            'credit_receivable' => 0.0,
+            'cogs_credit' => 0.0,
+            'investment' => 0.0,
+        ];
+    }
+
+    private function fillDailySales(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $payments = SalesOrderPayment::query()
+            ->whereBetween('paid_at', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->whereHas('salesOrder.items', fn ($q) => $q->where('warehouse_id', $warehouseId)))
+            ->get();
+
+        foreach ($payments as $payment) {
+            $date = $payment->paid_at?->format('Y-m-d');
+            if (isset($days[$date])) {
+                $days[$date]['sales'] = round($days[$date]['sales'] + (float) $payment->amount, 2);
+            }
+        }
+    }
+
+    private function fillDailyCogs(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $orders = SalesOrder::with(['items'])
+            ->whereIn('status', ['confirmed', 'processing', 'completed'])
+            ->whereBetween('date', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->whereHas('items', fn ($q) => $q->where('warehouse_id', $warehouseId)))
+            ->get();
+
+        foreach ($orders as $order) {
+            $date = $order->date?->format('Y-m-d');
+            if (! isset($days[$date])) {
+                continue;
+            }
+
+            $items = $warehouseId
+                ? $order->items->where('warehouse_id', $warehouseId)
+                : $order->items;
+
+            $cogs = $items->sum(fn ($item): float => (float) $item->unit_cost * (int) $item->quantity);
+            $days[$date]['cogs'] = round($days[$date]['cogs'] + $cogs, 2);
+        }
+    }
+
+    private function fillDailyPurchases(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $purchases = PurchaseOrder::query()
+            ->whereNotIn('status', ['cancelled', 'draft'])
+            ->whereBetween('order_date', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->get(['order_date', 'total']);
+
+        foreach ($purchases as $purchase) {
+            $date = $purchase->order_date?->format('Y-m-d');
+            if (isset($days[$date])) {
+                $days[$date]['purchase'] = round($days[$date]['purchase'] + (float) $purchase->total, 2);
+            }
+        }
+    }
+
+    private function fillDailyExpenses(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $expenses = OperationalExpense::query()
+            ->whereBetween('expense_date', [$from->toDateString(), $to->toDateString()])
+            ->when($warehouseId, fn ($q) => $q->where(fn ($q) => $q->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->get(['expense_date', 'amount']);
+
+        foreach ($expenses as $expense) {
+            $date = $expense->expense_date?->format('Y-m-d');
+            if (isset($days[$date])) {
+                $days[$date]['expenses'] = round($days[$date]['expenses'] + (float) $expense->amount, 2);
+            }
+        }
+    }
+
+    private function fillDailyCash(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $sessionIds = PosSession::query()
+            ->whereBetween('opened_at', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->pluck('id');
+
+        $movements = CashMovement::query()
+            ->whereIn('pos_session_id', $sessionIds)
+            ->whereBetween('created_at', [$from, $to])
+            ->get();
+
+        foreach ($movements as $movement) {
+            $date = $movement->created_at?->format('Y-m-d');
+            if (! isset($days[$date])) {
+                continue;
+            }
+
+            $amount = (float) $movement->amount;
+            $days[$date]['cash'] = round($days[$date]['cash'] + ($movement->type === 'in' ? $amount : -$amount), 2);
+        }
+
+        $openingTotal = (float) PosSession::query()
+            ->whereBetween('opened_at', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->sum('opening_amount');
+
+        if ($openingTotal > 0) {
+            $firstDate = $from->toDateString();
+            if (isset($days[$firstDate])) {
+                $days[$firstDate]['cash'] = round($days[$firstDate]['cash'] + $openingTotal, 2);
+            }
+        }
+    }
+
+    private function fillDailyInventory(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        foreach ($days as $date => &$row) {
+            $row['inventory'] = $this->inventoryValueAsOf($date, $warehouseId);
+        }
+    }
+
+    private function fillDailyCredits(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $payableOrders = PurchaseOrder::query()
+            ->whereNotIn('status', ['cancelled'])
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->whereDate('order_date', '<=', $to->toDateString())
+            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
+            ->with('payments')
+            ->get();
+
+        $receivableOrders = SalesOrder::query()
+            ->whereNotIn('status', ['cancelled'])
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->whereDate('date', '<=', $to->toDateString())
+            ->when($warehouseId, fn ($q) => $q->whereHas('items', fn ($q) => $q->where('warehouse_id', $warehouseId)))
+            ->with('payments')
+            ->get();
+
+        foreach ($days as $date => &$row) {
+            $asOf = Carbon::parse($date)->endOfDay();
+            $row['credit_payable'] = round((float) $payableOrders
+                ->filter(fn ($order) => $order->order_date?->lte($asOf))
+                ->sum(fn ($order) => max(0, (float) $order->total - (float) $order->payments->where('paid_at', '<=', $asOf)->sum('amount'))), 2);
+            $row['credit_receivable'] = round((float) $receivableOrders
+                ->filter(fn ($order) => $order->date?->lte($asOf))
+                ->sum(fn ($order) => max(0, (float) $order->total - (float) $order->payments->where('paid_at', '<=', $asOf)->sum('amount'))), 2);
+        }
+    }
+
+    private function fillDailyCogsCredit(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $creditOrders = SalesOrder::with(['items', 'payments'])
+            ->whereIn('status', ['confirmed', 'processing', 'completed'])
+            ->whereBetween('date', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->whereHas('items', fn ($q) => $q->where('warehouse_id', $warehouseId)))
+            ->get();
+
+        foreach ($creditOrders as $order) {
+            $hasCredit = $order->payments->contains('method', 'credit');
+            if (! $hasCredit) {
+                continue;
+            }
+
+            $date = $order->date?->format('Y-m-d');
+            if (! isset($days[$date])) {
+                continue;
+            }
+
+            $items = $warehouseId
+                ? $order->items->where('warehouse_id', $warehouseId)
+                : $order->items;
+
+            $cogs = $items->sum(fn ($item): float => (float) $item->unit_cost * (int) $item->quantity);
+            $days[$date]['cogs_credit'] = round($days[$date]['cogs_credit'] + $cogs, 2);
+        }
+    }
+
+    private function fillDailyInvestment(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $investments = CashMovement::query()
+            ->where('type', 'investment')
+            ->whereBetween('created_at', [$from, $to])
+            ->when($warehouseId, fn ($q) => $q->whereHas('posSession', fn ($q) => $q->where('warehouse_id', $warehouseId)))
+            ->get();
+
+        foreach ($investments as $investment) {
+            $date = $investment->created_at?->format('Y-m-d');
+            if (isset($days[$date])) {
+                $days[$date]['investment'] = round($days[$date]['investment'] + (float) $investment->amount, 2);
+            }
+        }
+    }
+
+    private function fillDailyAdjustments(array &$days, Carbon $from, Carbon $to, ?int $warehouseId): void
+    {
+        $adjustments = FinancialAdjustment::query()
+            ->whereBetween('adjustment_date', [$from->toDateString(), $to->toDateString()])
+            ->when($warehouseId, fn ($q) => $q->where(fn ($q) => $q->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->get();
+
+        foreach ($adjustments as $adjustment) {
+            $date = $adjustment->adjustment_date?->format('Y-m-d');
+            if (! isset($days[$date])) {
+                continue;
+            }
+
+            if ($adjustment->type === 'cash') {
+                $days[$date]['cash'] = round($days[$date]['cash'] + (float) $adjustment->amount, 2);
+            } elseif ($adjustment->type === 'inventory') {
+                $days[$date]['inventory'] = round($days[$date]['inventory'] + (float) $adjustment->amount, 2);
+            }
+        }
+    }
+
+    private function dailyTotals(array $days): array
+    {
+        $keys = ['cash', 'inventory', 'purchase', 'expenses', 'sales', 'cogs', 'profit', 'credit_payable', 'credit_receivable', 'cogs_credit', 'investment'];
+
+        return collect($keys)->mapWithKeys(fn (string $key): array => [
+            $key => round(collect($days)->sum($key), 2),
+        ])->all();
+    }
+
+    private function adjustmentsTotal(string $type, ?int $warehouseId = null): float
+    {
+        return round((float) FinancialAdjustment::query()
+            ->where('type', $type)
+            ->when($warehouseId, fn ($q) => $q->where(fn ($q) => $q->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->sum('amount'), 2);
     }
 }

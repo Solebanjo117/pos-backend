@@ -8,7 +8,11 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
-Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(function () {
+Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class, 'throttle:120,1'])->prefix('v1')->group(function () {
+    require __DIR__.'/api_store_settings.php';
+});
+
+Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class.':required', 'throttle:120,1'])->prefix('v1')->group(function () {
 
     // ---------------------------------------------------------------
     // Public to all authenticated users
@@ -89,7 +93,6 @@ Route::middleware(['web', 'auth', 'throttle:120,1'])->prefix('v1')->group(functi
     // ---------------------------------------------------------------
     // Store Settings: admin and managers
     // ---------------------------------------------------------------
-    require __DIR__.'/api_store_settings.php';
     require __DIR__.'/api_pricing_formulas.php';
 
     // ---------------------------------------------------------------
