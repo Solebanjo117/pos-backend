@@ -19,6 +19,15 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/z-report', [ReportController::class, 'zReport']);
     Route::get('/z-report/export', [ReportController::class, 'exportZReport']);
 
+    Route::get('/daily-summary', [ReportController::class, 'dailySummary']);
+    Route::get('/financial-snapshots', [ReportController::class, 'financialSnapshots']);
+    Route::get('/financial-weekly', [ReportController::class, 'financialWeekly']);
+    Route::get('/balance-sheet', [ReportController::class, 'balanceSheet']);
+    Route::post('/capital-movements', [ReportController::class, 'storeCapitalMovement'])->middleware('throttle:60,1');
+    Route::get('/capital-movements', [ReportController::class, 'capitalMovements']);
+    Route::post('/adjustments', [ReportController::class, 'storeAdjustment'])->middleware('throttle:60,1');
+    Route::get('/adjustments', [ReportController::class, 'adjustments']);
+
     Route::get('/stock-levels/export/{format}', [ReportController::class, 'exportStockLevels']);
     Route::get('/movement-history/export/{format}', [ReportController::class, 'exportMovementHistory']);
 });

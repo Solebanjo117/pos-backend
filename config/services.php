@@ -35,4 +35,8 @@ return [
         ],
     ],
 
+    'frontend_proxy' => [
+        'secret' => env('FRONTEND_PROXY_SECRET', 'local-frontend-backend-proxy-secret'),
+    ],
+
 ];

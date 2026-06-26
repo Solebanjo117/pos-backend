@@ -29,21 +29,18 @@ class DatabaseSeeder extends Seeder
             CategorySeeder::class,
             DefaultSettingsSeeder::class,
             PaymentMethodSeeder::class,
-            DemoDataSeeder::class,
-            InventoryMovementSeeder::class,
-            ProductInventorySeeder::class,
             ProductSeeder::class,
             UserSeeder::class,
             VehicleSeeder::class,
+            DemoDataSeeder::class,
+            InventoryMovementSeeder::class,
+            ProductInventorySeeder::class,
         ]);
 
         $this->command->info('Datos base creados');
         $this->command->info('Vehiculos creados');
-
-        $this->call(ProductSeeder::class);
         $this->command->info('Productos con relaciones creados');
 
-        $this->call(DemoDataSeeder::class);
         $this->call(InventoryFifoDemoSeeder::class);
 
         $this->command->info('Seeders completados exitosamente!');
