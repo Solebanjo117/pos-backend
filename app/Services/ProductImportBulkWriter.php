@@ -51,7 +51,7 @@ class ProductImportBulkWriter
                     'product_line_id' => null,
                     'category_id' => $product['category_id'],
                     'name' => $product['name'],
-                    'description' => $product['description'],
+                    'description' => $product['description'] ?: $product['name'],
                     'image_url' => $product['image_url'],
                     'status' => 'active',
                     'batch_tracking' => false,

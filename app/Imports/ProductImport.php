@@ -23,7 +23,7 @@ class ProductImport extends BaseImport
 {
     public const FIELD_IGNORE = 'ignore';
 
-    public const REQUIRED_FIELDS = ['nombre', 'categoria'];
+    public const REQUIRED_FIELDS = ['nombre'];
 
     private const ACTION_CREATE = 'create';
 
@@ -120,7 +120,7 @@ class ProductImport extends BaseImport
             ['key' => 'sku', 'label' => 'SKU', 'type' => 'text'],
             ['key' => 'system_id', 'label' => 'System ID', 'type' => 'text'],
             ['key' => 'brand', 'label' => 'Marca / Variante', 'type' => 'text'],
-            ['key' => 'categoria', 'label' => 'Categoria', 'type' => 'searchable', 'required' => true, 'endpoint' => '/categories/all'],
+            ['key' => 'categoria', 'label' => 'Categoria', 'type' => 'searchable', 'endpoint' => '/categories/all'],
             ['key' => 'costo', 'label' => 'Costo', 'type' => 'number'],
             ['key' => 'precio', 'label' => 'Precio', 'type' => 'number'],
             ['key' => 'cantidad', 'label' => 'Cantidad', 'type' => 'number'],
@@ -267,32 +267,17 @@ class ProductImport extends BaseImport
         }
 
         $hasName = $headerSet->has('nombre');
-        $hasCategory = $headerSet->has('categoria');
-        $hasIdentityOrOperationalData = $headerSet->has('system_id')
-            || $headerSet->has('sku')
-            || $headerSet->has('brand')
-            || $headerSet->has('costo')
-            || $headerSet->has('precio')
-            || $headerSet->has('cantidad');
         $missingRequiredHeaders = [];
 
         if (! $hasName) {
             $missingRequiredHeaders[] = 'nombre';
         }
 
-        if (! $hasCategory) {
-            $missingRequiredHeaders[] = 'categoria';
-        }
-
-        if (! $hasIdentityOrOperationalData) {
-            $missingRequiredHeaders[] = 'system_id/sku/brand/costo/precio/cantidad';
-        }
-
         return [
             'matched_headers' => $matchedHeaders,
             'missing_required_headers' => $missingRequiredHeaders,
             'score' => $rowCount > 0 ? $score : 0,
-            'is_compatible' => $rowCount > 0 && $hasCategory && $hasIdentityOrOperationalData,
+            'is_compatible' => $rowCount > 0 && $hasName,
         ];
     }
 
@@ -341,23 +326,9 @@ class ProductImport extends BaseImport
     {
         $context ??= $this->rowContext($row);
         $errors = [];
-        $category = $context['category'];
 
         if (trim((string) ($row['nombre'] ?? '')) === '') {
             $errors[] = 'El campo nombre es obligatorio.';
-        }
-
-        if (trim((string) ($row['categoria'] ?? '')) === '') {
-            $errors[] = 'El campo categoria es obligatorio.';
-        } elseif ($category === null) {
-            $this->rememberMissingCategory((string) $row['categoria']);
-            $errors[] = "La categoria '{$row['categoria']}' no existe. Creala primero para evitar duplicados.";
-        }
-
-        $brandName = $this->brandNameForRow($row);
-        if ($brandName !== null && ! $this->brandExists($brandName)) {
-            $this->rememberMissingBrand($brandName);
-            $errors[] = "La marca \"{$brandName}\" no existe. Creala antes de importar.";
         }
 
         try {
@@ -376,8 +347,14 @@ class ProductImport extends BaseImport
             $errors[] = 'El campo cantidad debe ser numerico.';
         }
 
-        if (($row['imagen_url'] ?? null) !== null && trim((string) $row['imagen_url']) !== '' && $this->imageUrlForRow($row) === null) {
-            $errors[] = 'La URL de imagen debe ser una URL valida.';
+        $quantity = $this->parseInteger($row['cantidad'] ?? null);
+        $warehouseName = $this->nullIfEmpty($row['warehouse'] ?? null);
+        if ($quantity !== null && $quantity > 0 && $warehouseName !== null) {
+            try {
+                $this->resolveWarehouseId($warehouseName);
+            } catch (\RuntimeException) {
+                $errors[] = "El almacen '{$warehouseName}' no existe.";
+            }
         }
 
         return $errors;
@@ -390,25 +367,24 @@ class ProductImport extends BaseImport
         }
 
         $context ??= $this->rowContext($row);
-        $category = $context['category'];
-        if (! $category) {
-            throw new \RuntimeException("La categoria '{$row['categoria']}' no existe. Creala primero para evitar duplicados.");
-        }
-        $categoryId = (int) $category->id;
+        $category = $this->resolveCategoryForImport($row, true);
+        $context = $this->buildRowContextForCategory($row, $category, $context['key'] ?? $this->rowContextKey($row), true);
+        $categoryId = $category?->id;
         $extraCategoryIds = $context['extra_category_ids'];
 
         $technicalName = $context['technical_name'];
         $attributes = $this->resolveAttributes($row, $technicalName);
+        $productName = $this->nullIfEmpty($technicalName['clean_name'] ?? null) ?? trim((string) ($row['nombre'] ?? ''));
 
         $productData = [
-            'name' => $technicalName['clean_name'],
+            'name' => $productName,
             'sku_base' => $this->nullIfEmpty($row['sku'] ?? null),
-            'description' => $this->nullIfEmpty($row['descripcion'] ?? null),
+            'description' => $this->descriptionForRow($row, $productName),
             'image_url' => $this->imageUrlForRow($row),
             'category_id' => $categoryId,
             'status' => 'active',
             'attributes' => $attributes,
-            '__import_product_key' => $this->productImportKey($categoryId, (string) ($row['nombre'] ?? '')),
+            '__import_product_key' => $this->productImportKey((int) ($categoryId ?? 0), (string) ($row['nombre'] ?? '')),
         ];
 
         if (! empty($extraCategoryIds)) {
@@ -571,7 +547,7 @@ class ProductImport extends BaseImport
 
         $category = $context['category'];
         $brandName = $this->brandNameForRow($row);
-        $brand = $brandName === null ? null : $this->brandByName($brandName);
+        $brand = $brandName === null ? null : $this->resolveBrandForImport($brandName, false, false);
         $sku = $this->nullIfEmpty($row['sku'] ?? null);
         $cleanName = $this->nullIfEmpty($previewData['nombre'] ?? null);
 
@@ -600,7 +576,7 @@ class ProductImport extends BaseImport
             'product' => [
                 'sku_base' => $sku,
                 'name' => $cleanName,
-                'description' => $this->nullIfEmpty($row['descripcion'] ?? null),
+                'description' => $this->descriptionForRow($row, $cleanName),
                 'image_url' => $this->imageUrlForRow($row),
                 'category_id' => (int) $category->id,
             ],
@@ -1036,7 +1012,7 @@ class ProductImport extends BaseImport
         }
 
         $brandName = $this->nullIfEmpty($row['brand'] ?? null) ?? 'Generica';
-        $brand = $this->brandByName($brandName);
+        $brand = $this->resolveBrandForImport($brandName, false, false);
 
         if (! $brand) {
             return false;
@@ -1251,7 +1227,7 @@ class ProductImport extends BaseImport
         $variant = null;
         $systemId = $this->nullIfEmpty($row['system_id'] ?? null);
         $brandName = $this->brandNameForRow($row);
-        $brand = $brandName !== null ? $this->brandByName($brandName) : null;
+        $brand = $brandName !== null ? $this->resolveBrandForImport($brandName, false, false) : null;
         $sku = $this->nullIfEmpty($row['sku'] ?? null);
 
         if ($systemId !== null) {
@@ -1311,11 +1287,7 @@ class ProductImport extends BaseImport
     {
         $context ??= $this->rowContext($row);
         $category = $context['category'];
-        if ($category === null) {
-            return null;
-        }
-
-        $categoryId = (int) $category->id;
+        $categoryId = $category instanceof Category ? (int) $category->id : null;
         $technicalName = $context['technical_name'];
 
         return [
@@ -1324,7 +1296,7 @@ class ProductImport extends BaseImport
             'category_id' => $categoryId,
             'image_url' => $this->imageUrlForRow($row),
             'attributes' => $this->previewAttributes($row, $technicalName),
-            '__import_product_key' => $this->productImportKey($categoryId, (string) ($row['nombre'] ?? '')),
+            '__import_product_key' => $this->productImportKey((int) ($categoryId ?? 0), (string) ($row['nombre'] ?? '')),
         ];
     }
 
@@ -1640,7 +1612,8 @@ class ProductImport extends BaseImport
 
     private function rowHasVariantPayload(array $row): bool
     {
-        return $this->nullIfEmpty($row['system_id'] ?? null) !== null
+        return $this->nullIfEmpty($row['brand'] ?? null) !== null
+            || $this->nullIfEmpty($row['system_id'] ?? null) !== null
             || $this->parseMoney($row['costo'] ?? null) !== null
             || $this->parseMoney($row['precio'] ?? null) !== null
             || $this->parseInteger($row['cantidad'] ?? null) !== null;
@@ -1648,7 +1621,7 @@ class ProductImport extends BaseImport
 
     private function brandExists(string $brandName): bool
     {
-        return $this->brandByName($brandName) !== null;
+        return $this->resolveBrandForImport($brandName, false, false) !== null;
     }
 
     private function rememberMissingBrand(string $brandName): void
@@ -1735,12 +1708,76 @@ class ProductImport extends BaseImport
             ->first(fn (Brand $brand): bool => $this->attributeNameKey($brand->name) === $normalized);
     }
 
+    private function resolveBrandForImport(mixed $value, bool $createMissing, bool $allowGenericFallback): ?Brand
+    {
+        $brandName = $this->cleanReferenceName($value);
+        if ($brandName === null) {
+            return $allowGenericFallback ? $this->ensureGenericBrand() : null;
+        }
+
+        $brand = $this->brandByName($brandName);
+        if ($brand instanceof Brand) {
+            return $brand;
+        }
+
+        if (! $this->isSafeReferenceName($brandName, 255)) {
+            return $allowGenericFallback ? $this->ensureGenericBrand() : null;
+        }
+
+        $suggestion = $this->suggestBrand($brandName);
+        if ($this->shouldUseSuggestedReference($suggestion)) {
+            $suggestedBrand = $this->brandByName((string) ($suggestion['name'] ?? ''));
+            if ($suggestedBrand instanceof Brand) {
+                return $suggestedBrand;
+            }
+        }
+
+        if ($this->isAmbiguousReferenceSuggestion($suggestion)) {
+            return $allowGenericFallback ? $this->ensureGenericBrand() : null;
+        }
+
+        if (! $createMissing) {
+            return null;
+        }
+
+        $brand = Brand::query()->create([
+            'name' => $brandName,
+            'status' => 'active',
+        ]);
+        $this->cachedBrands = null;
+        $this->brandSuggestionsCache = [];
+        $this->recordImportModel(Brand::class, $brand->id, 'created', ['name' => $brand->name]);
+
+        return $brand;
+    }
+
+    private function ensureGenericBrand(): Brand
+    {
+        $brand = $this->brandByName('Generica');
+        if ($brand instanceof Brand) {
+            return $brand;
+        }
+
+        $brand = Brand::query()->create([
+            'name' => 'Generica',
+            'status' => 'active',
+        ]);
+        $this->cachedBrands = null;
+        $this->brandSuggestionsCache = [];
+        $this->recordImportModel(Brand::class, $brand->id, 'created', ['name' => $brand->name]);
+
+        return $brand;
+    }
+
     private function productGroupingKey(array $row): string
     {
         $category = $this->normalizeImportKey((string) ($row['categoria'] ?? ''));
+        if ($category === '') {
+            $category = 'uncategorized';
+        }
         $name = $this->normalizeImportKey($this->originalProductName($row));
 
-        if ($category === '' || $name === '') {
+        if ($name === '') {
             return '';
         }
 
@@ -1764,9 +1801,15 @@ class ProductImport extends BaseImport
             return $this->rowContextCache[$cacheKey];
         }
 
-        $category = $this->findCategoryByNameOrCode($row['categoria'] ?? null);
+        $category = $this->resolveCategoryForImport($row, false);
+
+        return $this->rowContextCache[$cacheKey] = $this->buildRowContextForCategory($row, $category, $cacheKey, false);
+    }
+
+    private function buildRowContextForCategory(array $row, ?Category $category, string $cacheKey, bool $createExtraCategories): array
+    {
         $extraCategoryIds = $category !== null
-            ? $this->safeResolveExtraCategoryIds($row['categorias_extra'] ?? null, (int) $category->id)
+            ? $this->safeResolveExtraCategoryIds($row['categorias_extra'] ?? null, (int) $category->id, $createExtraCategories)
             : [];
         $technicalCategories = $category !== null
             ? $this->categoriesForTechnicalExtractionCached($category, $extraCategoryIds)
@@ -1781,7 +1824,7 @@ class ProductImport extends BaseImport
                 'matched_segments' => [],
             ];
 
-        return $this->rowContextCache[$cacheKey] = [
+        return [
             'key' => $cacheKey,
             'category' => $category,
             'extra_category_ids' => $extraCategoryIds,
@@ -1819,10 +1862,10 @@ class ProductImport extends BaseImport
 
         $sku = $this->nullIfEmpty($row['sku'] ?? null);
         if ($sku !== null) {
-            return 'sku:'.$sku;
+            return 'brand:'.$this->normalizeImportKey($this->brandNameForRow($row) ?? 'Sin marca').'|sku:'.$this->normalizeImportKey($sku);
         }
 
-        return 'brand:'.$this->normalizeImportKey((string) ($row['brand'] ?? 'Generica')).'|name:'.$this->normalizeImportKey($this->originalProductName($row));
+        return 'brand:'.$this->normalizeImportKey($this->brandNameForRow($row) ?? 'Sin marca').'|name:'.$this->normalizeImportKey($this->originalProductName($row));
     }
 
     private function productNameForGrouping(array $row, ?array $context = null): string
@@ -1867,7 +1910,7 @@ class ProductImport extends BaseImport
 
             $sku = $this->nullIfEmpty($row['sku'] ?? null);
             $brandName = $this->brandNameForRow($row);
-            $brand = $brandName !== null ? $this->brandByName($brandName) : null;
+            $brand = $brandName !== null ? $this->resolveBrandForImport($brandName, false, false) : null;
 
             if ($brand !== null && $sku !== null) {
                 $brandSkuKey = $this->brandSkuKey((int) $brand->id, $sku);
@@ -2120,27 +2163,25 @@ class ProductImport extends BaseImport
         return Warehouse::query()->orderBy('id')->value('id');
     }
 
-    private function resolveExtraCategoryIds(mixed $value, int $primaryCategoryId): array
+    private function resolveExtraCategoryIds(mixed $value, int $primaryCategoryId, bool $createMissing = false): array
     {
         return collect($this->splitDelimitedValues($value))
-            ->map(function ($categoryName): int {
-                $category = $this->findCategoryByNameOrCode($categoryName);
-                if (! $category) {
-                    throw new \RuntimeException("No se encontro el registro '{$categoryName}'.");
-                }
+            ->map(function ($categoryName) use ($createMissing): ?int {
+                $category = $this->resolveCategoryNameForImport($categoryName, $createMissing);
 
-                return (int) $category->id;
+                return $category instanceof Category ? (int) $category->id : null;
             })
+            ->filter()
             ->reject(fn (int $categoryId) => $categoryId === $primaryCategoryId)
             ->unique()
             ->values()
             ->all();
     }
 
-    private function safeResolveExtraCategoryIds(mixed $value, int $primaryCategoryId): array
+    private function safeResolveExtraCategoryIds(mixed $value, int $primaryCategoryId, bool $createMissing = false): array
     {
         try {
-            return $this->resolveExtraCategoryIds($value, $primaryCategoryId);
+            return $this->resolveExtraCategoryIds($value, $primaryCategoryId, $createMissing);
         } catch (\RuntimeException) {
             return [];
         }
@@ -2204,12 +2245,71 @@ class ProductImport extends BaseImport
     protected function getWarningsForRow(array $row, ?array $context = null): array
     {
         $context ??= $this->rowContext($row);
+        $warnings = [];
         $category = $context['category'];
-        if (! $category instanceof Category) {
-            return [];
+        $categoryName = $this->cleanReferenceName($row['categoria'] ?? null);
+
+        if ($category instanceof Category) {
+            if ($categoryName !== null && ! ($this->findCategoryByNameOrCode($categoryName) instanceof Category)) {
+                $suggestion = $this->suggestCategory($categoryName);
+                if ($this->shouldUseSuggestedReference($suggestion)) {
+                    $warnings[] = "Categoria '{$categoryName}' se asociara con '{$suggestion['name']}' por coincidencia normalizada.";
+                }
+            }
+            $warnings = array_merge($warnings, $context['technical_name']['warnings']);
+        } elseif ($categoryName === null) {
+            $warnings[] = 'Categoria pendiente de clasificar; el producto se importara sin categoria.';
+        } elseif (! $this->isSafeReferenceName($categoryName, 100) || preg_match('/^\d+$/', $categoryName) === 1) {
+            $warnings[] = "Categoria '{$categoryName}' no es valida; el producto quedara pendiente de clasificar.";
+        } else {
+            $suggestion = $this->suggestCategory($categoryName);
+            if ($this->shouldUseSuggestedReference($suggestion)) {
+                $warnings[] = "Categoria '{$categoryName}' se asociara con '{$suggestion['name']}' por coincidencia normalizada.";
+            } elseif ($this->isAmbiguousReferenceSuggestion($suggestion)) {
+                $warnings[] = "Categoria '{$categoryName}' se parece a '{$suggestion['name']}'; se dejara pendiente para evitar duplicados.";
+            } else {
+                $warnings[] = "Categoria '{$categoryName}' se creara automaticamente.";
+            }
         }
 
-        return $context['technical_name']['warnings'];
+        foreach ($this->splitDelimitedValues($row['categorias_extra'] ?? null) as $extraCategoryName) {
+            $extraName = $this->cleanReferenceName($extraCategoryName);
+            if ($extraName === null) {
+                continue;
+            }
+            if (! $this->isSafeReferenceName($extraName, 100)) {
+                $warnings[] = "Categoria extra '{$extraName}' no es valida y se omitira.";
+            } elseif ($this->resolveCategoryNameForImport($extraName, false) === null) {
+                $warnings[] = "Categoria extra '{$extraName}' se creara automaticamente si la categoria principal se resuelve.";
+            }
+        }
+
+        $rawBrandName = $this->cleanReferenceName($row['brand'] ?? null);
+        $brandName = $this->brandNameForRow($row);
+        if ($rawBrandName === null && $this->rowHasVariantPayload($row)) {
+            $warnings[] = 'Marca vacia; la variante se asignara a Generica.';
+        } elseif ($rawBrandName !== null && $this->brandByName($rawBrandName) === null) {
+            $suggestion = $this->suggestBrand($rawBrandName);
+            if ($this->shouldUseSuggestedReference($suggestion)) {
+                $warnings[] = "Marca '{$rawBrandName}' se asociara con '{$suggestion['name']}' por coincidencia normalizada.";
+            } elseif ($this->isAmbiguousReferenceSuggestion($suggestion)) {
+                $warnings[] = "Marca '{$rawBrandName}' se parece a '{$suggestion['name']}'; la variante se asignara a Generica para evitar duplicados.";
+            } elseif ($brandName !== null && ! $this->isSafeReferenceName($brandName, 255)) {
+                $warnings[] = "Marca '{$brandName}' no es valida; la variante se asignara a Generica.";
+            } else {
+                $warnings[] = "Marca '{$rawBrandName}' se creara automaticamente.";
+            }
+        }
+
+        if (($row['imagen_url'] ?? null) !== null && trim((string) $row['imagen_url']) !== '' && $this->imageUrlForRow($row) === null) {
+            $warnings[] = 'URL de imagen invalida; se guardara sin imagen.';
+        }
+
+        if (! empty($row['__compatibility']) || ! empty($row['__vehicle_creation_candidate'])) {
+            $warnings[] = 'Compatibilidad vehicular pendiente; el producto se importara sin compatibilidad para completarla despues.';
+        }
+
+        return array_values(array_unique($warnings));
     }
 
     private function findCategoryByNameOrCode(mixed $value): ?Category
@@ -2227,6 +2327,81 @@ class ProductImport extends BaseImport
 
         return $this->categories()
             ->first(fn (Category $category): bool => $this->attributeNameKey($category->name) === $key || $this->attributeNameKey((string) $category->slug) === $key);
+    }
+
+    private function resolveCategoryForImport(array $row, bool $createMissing): ?Category
+    {
+        return $this->resolveCategoryNameForImport($row['categoria'] ?? null, $createMissing);
+    }
+
+    private function resolveCategoryNameForImport(mixed $value, bool $createMissing): ?Category
+    {
+        $categoryName = $this->cleanReferenceName($value);
+        if ($categoryName === null) {
+            return null;
+        }
+
+        $category = $this->findCategoryByNameOrCode($categoryName);
+        if ($category instanceof Category) {
+            return $category;
+        }
+
+        if (preg_match('/^\d+$/', $categoryName) === 1 || ! $this->isSafeReferenceName($categoryName, 100)) {
+            return null;
+        }
+
+        $suggestion = $this->suggestCategory($categoryName);
+        if ($this->shouldUseSuggestedReference($suggestion)) {
+            $suggestedCategory = $this->findCategoryByNameOrCode($suggestion['name'] ?? null);
+            if ($suggestedCategory instanceof Category) {
+                return $suggestedCategory;
+            }
+        }
+
+        if ($this->isAmbiguousReferenceSuggestion($suggestion) || ! $createMissing) {
+            return null;
+        }
+
+        $category = Category::query()->create(['name' => $categoryName]);
+        $this->cachedCategories = null;
+        $this->categorySuggestionsCache = [];
+        $this->recordImportModel(Category::class, $category->id, 'created', ['name' => $category->name]);
+
+        return $category;
+    }
+
+    private function cleanReferenceName(mixed $value): ?string
+    {
+        $name = trim((string) ($value ?? ''));
+        $name = preg_replace('/\s+/u', ' ', $name) ?? $name;
+
+        return $name === '' ? null : $name;
+    }
+
+    private function isSafeReferenceName(string $name, int $maxLength): bool
+    {
+        if (mb_strlen($name) > $maxLength) {
+            return false;
+        }
+
+        return preg_match('/[A-Za-z0-9]/', Str::ascii($name)) === 1;
+    }
+
+    private function shouldUseSuggestedReference(?array $suggestion): bool
+    {
+        return $suggestion !== null && (float) ($suggestion['score'] ?? 0) >= 92;
+    }
+
+    private function isAmbiguousReferenceSuggestion(?array $suggestion): bool
+    {
+        $score = (float) ($suggestion['score'] ?? 0);
+
+        return $score >= 70 && $score < 92;
+    }
+
+    private function descriptionForRow(array $row, string $fallbackName): ?string
+    {
+        return $this->nullIfEmpty($row['descripcion'] ?? null) ?? $fallbackName;
     }
 
     protected function mapRowToPreview(array $row, ?array $errors = null, ?array $warnings = null, ?array $context = null, ?array $variantPreview = null, bool $variantPreviewPrecomputed = false): array
@@ -2597,15 +2772,10 @@ class ProductImport extends BaseImport
 
     private function resolveExistingBrandId(mixed $value): int
     {
-        $brandName = trim((string) $value);
-        if ($brandName === '') {
-            throw new \RuntimeException('La marca seleccionada no existe.');
-        }
-
-        $brand = $this->brandByName($brandName);
+        $brand = $this->resolveBrandForImport($value, true, true);
 
         if (! $brand) {
-            throw new \RuntimeException("La marca \"{$brandName}\" no existe. Creala antes de importar.");
+            throw new \RuntimeException('La marca seleccionada no se pudo resolver.');
         }
 
         return $brand->id;
