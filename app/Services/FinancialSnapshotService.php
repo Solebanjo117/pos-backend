@@ -2,10 +2,10 @@
 
 namespace App\Services;
 
-use App\Models\AccountPaymentBatch;
 use App\Models\CapitalMovement;
 use App\Models\FinancialAdjustment;
 use App\Models\FinancialDailySnapshot;
+use App\Models\InventoryLot;
 use App\Models\OperationalExpense;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
@@ -23,6 +23,10 @@ class FinancialSnapshotService
 
     private const NON_CASH_METHODS = ['credit', 'store_credit', 'supplier_credit'];
 
+    private const CASH_METHOD = 'cash';
+
+    private const CURRENT_VERSION = 3;
+
     public function computeDay(string|Carbon $date, ?int $warehouseId = null, bool $force = false): FinancialDailySnapshot
     {
         $day = Carbon::parse($date)->startOfDay();
@@ -35,17 +39,10 @@ class FinancialSnapshotService
             return $existing;
         }
 
-        // Reuse cached snapshots for closed past days to avoid recomputing the
-        // whole history on every request. Past days are immutable in normal
-        // operation; backdated writes (adjustments, capital movements, etc.)
-        // force a rebuild from their date forward, so correctness is preserved.
-        // Today (and any future day) is always recomputed because new
-        // transactions can still land in it.
         if (
             $existing
             && ! $force
-            && $existing->computed_at !== null
-            && $day->lt(Carbon::today())
+            && $this->snapshotIsFresh($existing, $day, $warehouseId)
         ) {
             return $existing;
         }
@@ -97,6 +94,7 @@ class FinancialSnapshotService
         return [
             'rows' => $rows,
             'totals' => $this->rangeTotals($snapshots),
+            'warnings' => $this->rangeWarnings($snapshots),
             'period' => [
                 'date_from' => $from->toDateString(),
                 'date_to' => $to->toDateString(),
@@ -138,16 +136,19 @@ class FinancialSnapshotService
 
         $snapshot = $this->computeDay($dateTo, $warehouseId);
         $cash = $this->money($snapshot->closing_cash);
+        $bank = $this->money($snapshot->closing_bank ?? 0);
         $inventory = $this->money($snapshot->closing_inventory);
         $accountsReceivable = $this->money($snapshot->accounts_receivable);
         $accountsPayable = $this->money($snapshot->accounts_payable);
-        $totalAssets = $this->money($cash + $inventory + $accountsReceivable);
+        $totalAssets = $this->money($cash + $bank + $inventory + $accountsReceivable);
         $totalLiabilities = $this->money($accountsPayable);
 
         return [
             'assets' => [
                 'cash' => $cash,
                 'cash_initial' => $this->money($snapshot->opening_cash),
+                'bank' => $bank,
+                'bank_initial' => $this->money($snapshot->opening_bank ?? 0),
                 'inventory' => $inventory,
                 'inventory_initial' => $this->money($snapshot->opening_inventory),
             ],
@@ -162,6 +163,7 @@ class FinancialSnapshotService
             ],
             'as_of' => $dateTo->toDateString(),
             'warehouse_id' => $warehouseId,
+            'warnings' => $snapshot->validation_warnings ?? [],
         ];
     }
 
@@ -231,7 +233,8 @@ class FinancialSnapshotService
         if ($previous) {
             return [
                 'cash' => $this->money($previous->closing_cash),
-                'inventory' => $this->money($previous->closing_inventory),
+                'bank' => $this->money($previous->closing_bank ?? 0),
+                'inventory' => $this->inventoryValueForDate($day->copy()->subDay(), $warehouseId),
                 'accounts_receivable' => $this->money($previous->accounts_receivable),
                 'accounts_payable' => $this->money($previous->accounts_payable),
             ];
@@ -243,22 +246,24 @@ class FinancialSnapshotService
             'cash' => $this->money(
                 $flows['cash_sales']
                 - $flows['cash_purchases']
-                - $flows['expenses']
+                - $flows['cash_expenses']
                 + $flows['investment_in']
                 - $flows['investment_out']
                 + $flows['customer_payments']
                 - $flows['supplier_payments']
                 + $flows['cash_adjustments']
             ),
-            'inventory' => $this->money(
-                $flows['cash_purchases']
-                + $flows['credit_purchases']
-                - $flows['cogs_cash_sales']
-                - $flows['cogs_credit_sales']
-                + $flows['inventory_adjustments']
+            'bank' => $this->money(
+                $flows['bank_sales']
+                - $flows['bank_purchases']
+                - $flows['bank_expenses']
+                + $flows['customer_bank_payments']
+                - $flows['supplier_bank_payments']
+                + $flows['bank_adjustments']
             ),
-            'accounts_receivable' => $this->money($flows['credit_sales'] - $flows['customer_payments']),
-            'accounts_payable' => $this->money($flows['credit_purchases'] - $flows['supplier_payments']),
+            'inventory' => $this->inventoryValueForDate($day->copy()->subDay(), $warehouseId),
+            'accounts_receivable' => $this->money($flows['credit_sales'] - $flows['customer_payments'] - $flows['customer_bank_payments'] + $flows['accounts_receivable_adjustments']),
+            'accounts_payable' => $this->money($flows['credit_purchases'] - $flows['supplier_payments'] - $flows['supplier_bank_payments'] + $flows['accounts_payable_adjustments']),
         ];
     }
 
@@ -310,26 +315,35 @@ class FinancialSnapshotService
             }
 
             $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $scopedTotal);
-            $sameDayRealPayments = $order->payments
-                ->filter(fn (SalesOrderPayment $payment): bool => $this->isRealPaymentMethod($payment->method)
+            $sameDayCashPayments = $order->payments
+                ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
+                    && $payment->paid_at?->toDateString() === $orderDate)
+                ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
+            $sameDayBankPayments = $order->payments
+                ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
                     && $payment->paid_at?->toDateString() === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $creditMarkers = $order->payments
-                ->filter(fn (SalesOrderPayment $payment): bool => $payment->method === 'credit')
+                ->filter(fn (SalesOrderPayment $payment): bool => in_array($payment->method, self::NON_CASH_METHODS, true))
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
 
-            $cashSales = min($scopedTotal, $sameDayRealPayments);
+            $cashSales = min($scopedTotal, $sameDayCashPayments);
+            $bankSales = min(max($scopedTotal - $cashSales, 0), $sameDayBankPayments);
             $creditSales = $creditMarkers > 0
-                ? min(max($scopedTotal - $cashSales, 0), $creditMarkers)
-                : max($scopedTotal - $cashSales, 0);
+                ? min(max($scopedTotal - $cashSales - $bankSales, 0), $creditMarkers)
+                : max($scopedTotal - $cashSales - $bankSales, 0);
             $cogs = $this->salesOrderScopedCogs($order, $warehouseId);
             $creditRatio = $scopedTotal > 0 ? min(1, $creditSales / $scopedTotal) : 0;
+            $bankRatio = $scopedTotal > 0 ? min(1, $bankSales / $scopedTotal) : 0;
             $cogsCredit = $this->money($cogs * $creditRatio);
+            $cogsBank = $this->money($cogs * $bankRatio);
 
             $flows['cash_sales'] = $this->money($flows['cash_sales'] + $cashSales);
+            $flows['bank_sales'] = $this->money($flows['bank_sales'] + $bankSales);
             $flows['credit_sales'] = $this->money($flows['credit_sales'] + $creditSales);
             $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] + $cogsCredit);
-            $flows['cogs_cash_sales'] = $this->money($flows['cogs_cash_sales'] + max(0, $cogs - $cogsCredit));
+            $flows['cogs_bank_sales'] = $this->money($flows['cogs_bank_sales'] + $cogsBank);
+            $flows['cogs_cash_sales'] = $this->money($flows['cogs_cash_sales'] + max(0, $cogs - $cogsCredit - $cogsBank));
         }
 
         return $flows;
@@ -353,14 +367,20 @@ class FinancialSnapshotService
             }
 
             $total = $this->money($order->total);
-            $sameDayRealPayments = $order->payments
-                ->filter(fn (PurchaseOrderPayment $payment): bool => $this->isRealPaymentMethod($payment->method)
+            $sameDayCashPayments = $order->payments
+                ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
                     && $payment->paid_at?->toDateString() === $orderDate)
                 ->sum(fn (PurchaseOrderPayment $payment): float => (float) $payment->amount);
-            $cashPurchases = min($total, $sameDayRealPayments);
+            $sameDayBankPayments = $order->payments
+                ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
+                    && $payment->paid_at?->toDateString() === $orderDate)
+                ->sum(fn (PurchaseOrderPayment $payment): float => (float) $payment->amount);
+            $cashPurchases = min($total, $sameDayCashPayments);
+            $bankPurchases = min(max($total - $cashPurchases, 0), $sameDayBankPayments);
 
             $flows['cash_purchases'] = $this->money($flows['cash_purchases'] + $cashPurchases);
-            $flows['credit_purchases'] = $this->money($flows['credit_purchases'] + max(0, $total - $cashPurchases));
+            $flows['bank_purchases'] = $this->money($flows['bank_purchases'] + $bankPurchases);
+            $flows['credit_purchases'] = $this->money($flows['credit_purchases'] + max(0, $total - $cashPurchases - $bankPurchases));
         }
 
         return $flows;
@@ -369,15 +389,25 @@ class FinancialSnapshotService
     private function expenseFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
     {
         $flows = $this->emptyFlows();
-        $flows['expenses'] = $this->money(
-            OperationalExpense::query()
-                ->whereDate('expense_date', '<=', $to->toDateString())
-                ->when($from, fn (Builder $query) => $query->whereDate('expense_date', '>=', $from->toDateString()))
-                ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope
-                    ->whereNull('warehouse_id')
-                    ->orWhere('warehouse_id', $warehouseId)))
-                ->sum('amount')
-        );
+        $expenses = OperationalExpense::query()
+            ->whereDate('expense_date', '<=', $to->toDateString())
+            ->when($from, fn (Builder $query) => $query->whereDate('expense_date', '>=', $from->toDateString()))
+            ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope
+                ->whereNull('warehouse_id')
+                ->orWhere('warehouse_id', $warehouseId)))
+            ->get();
+
+        foreach ($expenses as $expense) {
+            $amount = $this->money($expense->amount);
+            $flows['expenses'] = $this->money($flows['expenses'] + $amount);
+
+            $bucket = $this->paymentBucket($expense->payment_method);
+            if ($bucket === 'cash') {
+                $flows['cash_expenses'] = $this->money($flows['cash_expenses'] + $amount);
+            } elseif ($bucket === 'bank') {
+                $flows['bank_expenses'] = $this->money($flows['bank_expenses'] + $amount);
+            }
+        }
 
         return $flows;
     }
@@ -385,48 +415,37 @@ class FinancialSnapshotService
     private function customerPaymentFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
     {
         $flows = $this->emptyFlows();
-        $batches = AccountPaymentBatch::query()
-            ->with('applications')
-            ->where('account_type', 'customer')
-            ->where('direction', 'incoming')
+        $payments = SalesOrderPayment::query()
+            ->with('salesOrder.items')
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
             ->whereNotIn('method', self::NON_CASH_METHODS)
             ->get();
 
-        foreach ($batches as $batch) {
-            $paidDate = $batch->paid_at?->toDateString();
-            $applied = 0.0;
-
-            foreach ($batch->applications as $application) {
-                if ($application->document_type !== 'sales_order') {
-                    continue;
-                }
-
-                $order = SalesOrder::query()->with('items')->find($application->document_id);
-                if (! $order || $order->date?->toDateString() === $paidDate) {
-                    continue;
-                }
-
-                $scopedTotal = $this->salesOrderScopedTotal($order, $warehouseId);
-                if ($scopedTotal <= 0) {
-                    continue;
-                }
-
-                $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $scopedTotal);
-                $applied += (float) $application->amount * $ratio;
+        foreach ($payments as $payment) {
+            $order = $payment->salesOrder;
+            if (! $order || ! in_array($order->status, self::SALES_STATUSES, true)) {
+                continue;
             }
 
-            if ($batch->applications->isEmpty() && $this->batchBelongsToWarehouse($batch, $warehouseId)) {
-                $applied += (float) $batch->amount;
+            if ($payment->paid_at?->toDateString() === $order->date?->toDateString()) {
+                continue;
             }
 
-            $flows['customer_payments'] = $this->money($flows['customer_payments'] + $applied);
+            $scopedTotal = $this->salesOrderScopedTotal($order, $warehouseId);
+            if ($scopedTotal <= 0) {
+                continue;
+            }
+
+            $amount = $this->money((float) $payment->amount * $this->salesOrderWarehouseRatio($order, $warehouseId, $scopedTotal));
+            $bucket = $this->paymentBucket($payment->method);
+
+            if ($bucket === 'cash') {
+                $flows['customer_payments'] = $this->money($flows['customer_payments'] + $amount);
+            } elseif ($bucket === 'bank') {
+                $flows['customer_bank_payments'] = $this->money($flows['customer_bank_payments'] + $amount);
+            }
         }
-
-        $flows['customer_payments'] = $this->money(
-            $flows['customer_payments'] + $this->directCustomerlessPayments($from, $to, $warehouseId)
-        );
 
         return $flows;
     }
@@ -434,46 +453,36 @@ class FinancialSnapshotService
     private function supplierPaymentFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
     {
         $flows = $this->emptyFlows();
-        $batches = AccountPaymentBatch::query()
-            ->with('applications')
-            ->where('account_type', 'supplier')
-            ->where('direction', 'outgoing')
+        $payments = PurchaseOrderPayment::query()
+            ->with('purchaseOrder')
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
             ->whereNotIn('method', self::NON_CASH_METHODS)
             ->get();
 
-        foreach ($batches as $batch) {
-            $paidDate = $batch->paid_at?->toDateString();
-            $applied = 0.0;
-
-            foreach ($batch->applications as $application) {
-                if ($application->document_type !== 'purchase_order') {
-                    continue;
-                }
-
-                $order = PurchaseOrder::query()->find($application->document_id);
-                if (! $order || $order->order_date?->toDateString() === $paidDate) {
-                    continue;
-                }
-
-                if ($warehouseId && (int) $order->warehouse_id !== $warehouseId) {
-                    continue;
-                }
-
-                $applied += (float) $application->amount;
+        foreach ($payments as $payment) {
+            $order = $payment->purchaseOrder;
+            if (! $order || in_array($order->status, self::PURCHASE_EXCLUDED_STATUSES, true)) {
+                continue;
             }
 
-            if ($batch->applications->isEmpty() && $this->batchBelongsToWarehouse($batch, $warehouseId)) {
-                $applied += (float) $batch->amount;
+            if ($payment->paid_at?->toDateString() === $order->order_date?->toDateString()) {
+                continue;
             }
 
-            $flows['supplier_payments'] = $this->money($flows['supplier_payments'] + $applied);
+            if ($warehouseId && (int) $order->warehouse_id !== $warehouseId) {
+                continue;
+            }
+
+            $amount = $this->money($payment->amount);
+            $bucket = $this->paymentBucket($payment->method);
+
+            if ($bucket === 'cash') {
+                $flows['supplier_payments'] = $this->money($flows['supplier_payments'] + $amount);
+            } elseif ($bucket === 'bank') {
+                $flows['supplier_bank_payments'] = $this->money($flows['supplier_bank_payments'] + $amount);
+            }
         }
-
-        $flows['supplier_payments'] = $this->money(
-            $flows['supplier_payments'] + $this->directSupplierlessPayments($from, $to, $warehouseId)
-        );
 
         return $flows;
     }
@@ -509,65 +518,13 @@ class FinancialSnapshotService
             ->get();
 
         foreach ($adjustments as $adjustment) {
-            $key = $adjustment->type === FinancialAdjustment::TYPE_CASH ? 'cash_adjustments' : 'inventory_adjustments';
-            $flows[$key] = $this->money($flows[$key] + (float) $adjustment->amount);
+            $key = FinancialAdjustment::flowKeyForType((string) $adjustment->type);
+            if ($key !== null && array_key_exists($key, $flows)) {
+                $flows[$key] = $this->money($flows[$key] + (float) $adjustment->amount);
+            }
         }
 
         return $flows;
-    }
-
-    private function directCustomerlessPayments(?Carbon $from, Carbon $to, ?int $warehouseId): float
-    {
-        $payments = SalesOrderPayment::query()
-            ->with('salesOrder.items')
-            ->whereDate('paid_at', '<=', $to->toDateString())
-            ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
-            ->whereNotIn('method', self::NON_CASH_METHODS)
-            ->whereHas('salesOrder', fn (Builder $query) => $query->whereNull('customer_id'))
-            ->get();
-        $total = 0.0;
-
-        foreach ($payments as $payment) {
-            $order = $payment->salesOrder;
-            if (! $order || $payment->paid_at?->toDateString() === $order->date?->toDateString()) {
-                continue;
-            }
-
-            $scopedTotal = $this->salesOrderScopedTotal($order, $warehouseId);
-            if ($scopedTotal <= 0) {
-                continue;
-            }
-
-            $total += (float) $payment->amount * $this->salesOrderWarehouseRatio($order, $warehouseId, $scopedTotal);
-        }
-
-        return $this->money($total);
-    }
-
-    private function directSupplierlessPayments(?Carbon $from, Carbon $to, ?int $warehouseId): float
-    {
-        $payments = PurchaseOrderPayment::query()
-            ->with('purchaseOrder')
-            ->whereDate('paid_at', '<=', $to->toDateString())
-            ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
-            ->whereNotIn('method', self::NON_CASH_METHODS)
-            ->whereHas('purchaseOrder', function (Builder $query) use ($warehouseId): void {
-                $query->whereNull('supplier_id')
-                    ->when($warehouseId, fn (Builder $scope) => $scope->where('warehouse_id', $warehouseId));
-            })
-            ->get();
-        $total = 0.0;
-
-        foreach ($payments as $payment) {
-            $order = $payment->purchaseOrder;
-            if (! $order || $payment->paid_at?->toDateString() === $order->order_date?->toDateString()) {
-                continue;
-            }
-
-            $total += (float) $payment->amount;
-        }
-
-        return $this->money($total);
     }
 
     private function snapshotPayload(string $date, ?int $warehouseId, array $opening, array $flows): array
@@ -576,58 +533,81 @@ class FinancialSnapshotService
             $opening['cash']
             + $flows['cash_sales']
             - $flows['cash_purchases']
-            - $flows['expenses']
+            - $flows['cash_expenses']
             + $flows['investment_in']
             - $flows['investment_out']
             + $flows['customer_payments']
             - $flows['supplier_payments']
             + $flows['cash_adjustments']
         );
-        $closingInventory = $this->money(
-            $opening['inventory']
-            + $flows['cash_purchases']
-            + $flows['credit_purchases']
-            - $flows['cogs_cash_sales']
-            - $flows['cogs_credit_sales']
-            + $flows['inventory_adjustments']
+        $closingBank = $this->money(
+            $opening['bank']
+            + $flows['bank_sales']
+            - $flows['bank_purchases']
+            - $flows['bank_expenses']
+            + $flows['customer_bank_payments']
+            - $flows['supplier_bank_payments']
+            + $flows['bank_adjustments']
         );
-        $accountsPayable = $this->money($opening['accounts_payable'] + $flows['credit_purchases'] - $flows['supplier_payments']);
-        $accountsReceivable = $this->money($opening['accounts_receivable'] + $flows['credit_sales'] - $flows['customer_payments']);
-        $grossProfit = $this->money($flows['cash_sales'] + $flows['credit_sales'] - $flows['cogs_cash_sales'] - $flows['cogs_credit_sales']);
+        $closingInventory = $this->inventoryValueForDate(Carbon::parse($date), $warehouseId);
+        $accountsPayable = $this->money($opening['accounts_payable'] + $flows['credit_purchases'] - $flows['supplier_payments'] - $flows['supplier_bank_payments'] + $flows['accounts_payable_adjustments']);
+        $accountsReceivable = $this->money($opening['accounts_receivable'] + $flows['credit_sales'] - $flows['customer_payments'] - $flows['customer_bank_payments'] + $flows['accounts_receivable_adjustments']);
+        $grossProfit = $this->money(
+            $flows['cash_sales']
+            + $flows['bank_sales']
+            + $flows['credit_sales']
+            + $flows['sales_adjustments']
+            - $flows['cogs_cash_sales']
+            - $flows['cogs_bank_sales']
+            - $flows['cogs_credit_sales']
+        );
+        $expenses = $this->money($flows['expenses'] + $flows['expense_adjustments']);
 
         return array_merge($flows, [
             'warehouse_id' => $warehouseId,
             'date' => $date,
             'opening_cash' => $opening['cash'],
+            'opening_bank' => $opening['bank'],
             'opening_inventory' => $opening['inventory'],
             'opening_accounts_receivable' => $opening['accounts_receivable'],
             'opening_accounts_payable' => $opening['accounts_payable'],
             'closing_cash' => $closingCash,
+            'closing_bank' => $closingBank,
             'closing_inventory' => $closingInventory,
             'accounts_receivable' => $accountsReceivable,
             'accounts_payable' => $accountsPayable,
             'gross_profit' => $grossProfit,
-            'net_profit' => $this->money($grossProfit - $flows['expenses']),
-            'net_investment' => $this->money($flows['investment_in'] - $flows['investment_out']),
+            'net_profit' => $this->money($grossProfit - $expenses),
+            'net_investment' => $this->money($flows['investment_in'] - $flows['investment_out'] + $flows['investment_adjustments']),
             'computed_at' => now(),
-            'version' => 1,
-            'validation_warnings' => [],
+            'version' => self::CURRENT_VERSION,
+            'validation_warnings' => $this->snapshotWarnings(Carbon::parse($date), $warehouseId),
         ]);
     }
 
     private function dailyRow(FinancialDailySnapshot $snapshot): array
     {
-        $sales = $this->money($snapshot->cash_sales + $snapshot->credit_sales);
-        $purchases = $this->money($snapshot->cash_purchases + $snapshot->credit_purchases);
-        $cogs = $this->money($snapshot->cogs_cash_sales + $snapshot->cogs_credit_sales);
+        $salesCollected = $this->money($snapshot->cash_sales + ($snapshot->bank_sales ?? 0) + $snapshot->customer_payments + ($snapshot->customer_bank_payments ?? 0));
+        $sales = $this->money($snapshot->cash_sales + ($snapshot->bank_sales ?? 0) + $snapshot->credit_sales + ($snapshot->sales_adjustments ?? 0));
+        $purchasesPaid = $this->money($snapshot->cash_purchases + ($snapshot->bank_purchases ?? 0) + $snapshot->supplier_payments + ($snapshot->supplier_bank_payments ?? 0));
+        $purchases = $this->money($snapshot->cash_purchases + ($snapshot->bank_purchases ?? 0) + $snapshot->credit_purchases + ($snapshot->purchase_adjustments ?? 0));
+        $expenses = $this->money($snapshot->expenses + ($snapshot->expense_adjustments ?? 0));
+        $cogs = $this->money($snapshot->cogs_cash_sales + ($snapshot->cogs_bank_sales ?? 0) + $snapshot->cogs_credit_sales);
 
         return [
             'date' => $snapshot->date?->toDateString(),
             'cash' => $this->money($snapshot->closing_cash),
+            'bank' => $this->money($snapshot->closing_bank ?? 0),
+            'liquid_assets' => $this->money($snapshot->closing_cash + ($snapshot->closing_bank ?? 0)),
             'inventory' => $this->money($snapshot->closing_inventory),
             'purchase' => $purchases,
-            'expenses' => $this->money($snapshot->expenses),
+            'purchase_paid' => $purchasesPaid,
+            'purchase_pending' => $this->money($snapshot->accounts_payable),
+            'expenses' => $expenses,
             'sales' => $sales,
+            'sales_total' => $sales,
+            'sales_collected' => $salesCollected,
+            'sales_pending' => $this->money($snapshot->accounts_receivable),
             'cogs' => $cogs,
             'profit' => $this->money($snapshot->net_profit),
             'credit_payable' => $this->money($snapshot->accounts_payable),
@@ -635,28 +615,46 @@ class FinancialSnapshotService
             'cogs_credit' => $this->money($snapshot->cogs_credit_sales),
             'investment' => $this->money($snapshot->net_investment),
             'opening_cash' => $this->money($snapshot->opening_cash),
+            'opening_bank' => $this->money($snapshot->opening_bank ?? 0),
             'opening_inventory' => $this->money($snapshot->opening_inventory),
             'opening_accounts_receivable' => $this->money($snapshot->opening_accounts_receivable),
             'opening_accounts_payable' => $this->money($snapshot->opening_accounts_payable),
             'cash_sales' => $this->money($snapshot->cash_sales),
+            'bank_sales' => $this->money($snapshot->bank_sales ?? 0),
             'credit_sales' => $this->money($snapshot->credit_sales),
             'cash_purchases' => $this->money($snapshot->cash_purchases),
+            'bank_purchases' => $this->money($snapshot->bank_purchases ?? 0),
             'credit_purchases' => $this->money($snapshot->credit_purchases),
             'customer_payments' => $this->money($snapshot->customer_payments),
+            'customer_bank_payments' => $this->money($snapshot->customer_bank_payments ?? 0),
             'supplier_payments' => $this->money($snapshot->supplier_payments),
+            'supplier_bank_payments' => $this->money($snapshot->supplier_bank_payments ?? 0),
+            'cash_expenses' => $this->money($snapshot->cash_expenses ?? 0),
+            'bank_expenses' => $this->money($snapshot->bank_expenses ?? 0),
             'cogs_cash_sales' => $this->money($snapshot->cogs_cash_sales),
+            'cogs_bank_sales' => $this->money($snapshot->cogs_bank_sales ?? 0),
             'cogs_credit_sales' => $this->money($snapshot->cogs_credit_sales),
             'investment_in' => $this->money($snapshot->investment_in),
             'investment_out' => $this->money($snapshot->investment_out),
             'cash_adjustments' => $this->money($snapshot->cash_adjustments),
+            'bank_adjustments' => $this->money($snapshot->bank_adjustments ?? 0),
             'inventory_adjustments' => $this->money($snapshot->inventory_adjustments),
+            'sales_adjustments' => $this->money($snapshot->sales_adjustments ?? 0),
+            'purchase_adjustments' => $this->money($snapshot->purchase_adjustments ?? 0),
+            'expense_adjustments' => $this->money($snapshot->expense_adjustments ?? 0),
+            'investment_adjustments' => $this->money($snapshot->investment_adjustments ?? 0),
+            'accounts_receivable_adjustments' => $this->money($snapshot->accounts_receivable_adjustments ?? 0),
+            'accounts_payable_adjustments' => $this->money($snapshot->accounts_payable_adjustments ?? 0),
+            'manual_adjustments' => $this->money($snapshot->manual_adjustments ?? 0),
             'closing_cash' => $this->money($snapshot->closing_cash),
+            'closing_bank' => $this->money($snapshot->closing_bank ?? 0),
             'closing_inventory' => $this->money($snapshot->closing_inventory),
             'accounts_receivable' => $this->money($snapshot->accounts_receivable),
             'accounts_payable' => $this->money($snapshot->accounts_payable),
             'gross_profit' => $this->money($snapshot->gross_profit),
             'net_profit' => $this->money($snapshot->net_profit),
             'net_investment' => $this->money($snapshot->net_investment),
+            'validation_warnings' => $snapshot->validation_warnings ?? [],
             'is_locked' => (bool) $snapshot->is_locked,
             'computed_at' => $snapshot->computed_at?->toISOString(),
         ];
@@ -669,31 +667,47 @@ class FinancialSnapshotService
 
         return [
             'cash' => $this->money($last?->closing_cash ?? 0),
+            'bank' => $this->money($last?->closing_bank ?? 0),
+            'liquid_assets' => $this->money(($last?->closing_cash ?? 0) + ($last?->closing_bank ?? 0)),
             'inventory' => $this->money($last?->closing_inventory ?? 0),
-            'purchase' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_purchases + (float) $snapshot->credit_purchases)),
-            'expenses' => $this->money($snapshots->sum('expenses')),
-            'sales' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) $snapshot->credit_sales)),
-            'cogs' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cogs_cash_sales + (float) $snapshot->cogs_credit_sales)),
+            'purchase' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_purchases + (float) ($snapshot->bank_purchases ?? 0) + (float) $snapshot->credit_purchases + (float) ($snapshot->purchase_adjustments ?? 0))),
+            'purchase_paid' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_purchases + (float) ($snapshot->bank_purchases ?? 0) + (float) $snapshot->supplier_payments + (float) ($snapshot->supplier_bank_payments ?? 0))),
+            'purchase_pending' => $this->money($last?->accounts_payable ?? 0),
+            'expenses' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->expenses + (float) ($snapshot->expense_adjustments ?? 0))),
+            'sales' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->credit_sales + (float) ($snapshot->sales_adjustments ?? 0))),
+            'sales_total' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->credit_sales + (float) ($snapshot->sales_adjustments ?? 0))),
+            'sales_collected' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->customer_payments + (float) ($snapshot->customer_bank_payments ?? 0))),
+            'sales_pending' => $this->money($last?->accounts_receivable ?? 0),
+            'cogs' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cogs_cash_sales + (float) ($snapshot->cogs_bank_sales ?? 0) + (float) $snapshot->cogs_credit_sales)),
             'profit' => $this->money($snapshots->sum('net_profit')),
             'credit_payable' => $this->money($last?->accounts_payable ?? 0),
             'credit_receivable' => $this->money($last?->accounts_receivable ?? 0),
             'cogs_credit' => $this->money($snapshots->sum('cogs_credit_sales')),
             'investment' => $this->money($snapshots->sum('net_investment')),
             'opening_cash' => $this->money($first?->opening_cash ?? 0),
+            'opening_bank' => $this->money($first?->opening_bank ?? 0),
             'opening_inventory' => $this->money($first?->opening_inventory ?? 0),
             'opening_accounts_receivable' => $this->money($first?->opening_accounts_receivable ?? 0),
             'opening_accounts_payable' => $this->money($first?->opening_accounts_payable ?? 0),
             'closing_cash' => $this->money($last?->closing_cash ?? 0),
+            'closing_bank' => $this->money($last?->closing_bank ?? 0),
             'closing_inventory' => $this->money($last?->closing_inventory ?? 0),
             'accounts_receivable' => $this->money($last?->accounts_receivable ?? 0),
             'accounts_payable' => $this->money($last?->accounts_payable ?? 0),
             'cash_sales' => $this->money($snapshots->sum('cash_sales')),
+            'bank_sales' => $this->money($snapshots->sum('bank_sales')),
             'credit_sales' => $this->money($snapshots->sum('credit_sales')),
             'cash_purchases' => $this->money($snapshots->sum('cash_purchases')),
+            'bank_purchases' => $this->money($snapshots->sum('bank_purchases')),
             'credit_purchases' => $this->money($snapshots->sum('credit_purchases')),
             'customer_payments' => $this->money($snapshots->sum('customer_payments')),
+            'customer_bank_payments' => $this->money($snapshots->sum('customer_bank_payments')),
             'supplier_payments' => $this->money($snapshots->sum('supplier_payments')),
+            'supplier_bank_payments' => $this->money($snapshots->sum('supplier_bank_payments')),
+            'cash_expenses' => $this->money($snapshots->sum('cash_expenses')),
+            'bank_expenses' => $this->money($snapshots->sum('bank_expenses')),
             'cogs_cash_sales' => $this->money($snapshots->sum('cogs_cash_sales')),
+            'cogs_bank_sales' => $this->money($snapshots->sum('cogs_bank_sales')),
             'cogs_credit_sales' => $this->money($snapshots->sum('cogs_credit_sales')),
             'investment_in' => $this->money($snapshots->sum('investment_in')),
             'investment_out' => $this->money($snapshots->sum('investment_out')),
@@ -701,7 +715,15 @@ class FinancialSnapshotService
             'gross_profit' => $this->money($snapshots->sum('gross_profit')),
             'net_profit' => $this->money($snapshots->sum('net_profit')),
             'cash_adjustments' => $this->money($snapshots->sum('cash_adjustments')),
+            'bank_adjustments' => $this->money($snapshots->sum('bank_adjustments')),
             'inventory_adjustments' => $this->money($snapshots->sum('inventory_adjustments')),
+            'sales_adjustments' => $this->money($snapshots->sum('sales_adjustments')),
+            'purchase_adjustments' => $this->money($snapshots->sum('purchase_adjustments')),
+            'expense_adjustments' => $this->money($snapshots->sum('expense_adjustments')),
+            'investment_adjustments' => $this->money($snapshots->sum('investment_adjustments')),
+            'accounts_receivable_adjustments' => $this->money($snapshots->sum('accounts_receivable_adjustments')),
+            'accounts_payable_adjustments' => $this->money($snapshots->sum('accounts_payable_adjustments')),
+            'manual_adjustments' => $this->money($snapshots->sum('manual_adjustments')),
         ];
     }
 
@@ -709,18 +731,33 @@ class FinancialSnapshotService
     {
         return [
             'cash_sales' => 0.0,
+            'bank_sales' => 0.0,
             'credit_sales' => 0.0,
             'cash_purchases' => 0.0,
+            'bank_purchases' => 0.0,
             'credit_purchases' => 0.0,
             'customer_payments' => 0.0,
+            'customer_bank_payments' => 0.0,
             'supplier_payments' => 0.0,
+            'supplier_bank_payments' => 0.0,
             'expenses' => 0.0,
+            'cash_expenses' => 0.0,
+            'bank_expenses' => 0.0,
             'cogs_cash_sales' => 0.0,
+            'cogs_bank_sales' => 0.0,
             'cogs_credit_sales' => 0.0,
             'investment_in' => 0.0,
             'investment_out' => 0.0,
             'cash_adjustments' => 0.0,
+            'bank_adjustments' => 0.0,
             'inventory_adjustments' => 0.0,
+            'sales_adjustments' => 0.0,
+            'purchase_adjustments' => 0.0,
+            'expense_adjustments' => 0.0,
+            'investment_adjustments' => 0.0,
+            'accounts_receivable_adjustments' => 0.0,
+            'accounts_payable_adjustments' => 0.0,
+            'manual_adjustments' => 0.0,
         ];
     }
 
@@ -753,18 +790,122 @@ class FinancialSnapshotService
         return min(1, max(0, $scopedTotal / $orderTotal));
     }
 
-    private function batchBelongsToWarehouse(AccountPaymentBatch $batch, ?int $warehouseId): bool
+    private function paymentBucket(?string $method): ?string
     {
-        if (! $warehouseId) {
-            return true;
+        if ($method === null || in_array($method, self::NON_CASH_METHODS, true)) {
+            return null;
         }
 
-        return (int) ($batch->posSession?->warehouse_id ?? 0) === $warehouseId;
+        return $method === self::CASH_METHOD ? 'cash' : 'bank';
     }
 
-    private function isRealPaymentMethod(?string $method): bool
+    private function snapshotIsFresh(FinancialDailySnapshot $snapshot, Carbon $day, ?int $warehouseId): bool
     {
-        return $method !== null && ! in_array($method, self::NON_CASH_METHODS, true);
+        if ((int) $snapshot->version < self::CURRENT_VERSION || $snapshot->computed_at === null) {
+            return false;
+        }
+
+        if ($day->gte(Carbon::today())) {
+            return false;
+        }
+
+        $latestChange = $this->latestFinancialSourceChangeAt($day, $warehouseId);
+
+        return $latestChange === null || $latestChange->lte($snapshot->computed_at);
+    }
+
+    private function latestFinancialSourceChangeAt(Carbon $day, ?int $warehouseId): ?Carbon
+    {
+        $date = $day->toDateString();
+        $timestamps = collect([
+            $this->latestTimestamp(SalesOrder::query()
+                ->whereDate('date', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->whereHas('items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(SalesOrderPayment::query()
+                ->whereDate('paid_at', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->whereHas('salesOrder.items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(PurchaseOrder::query()
+                ->whereDate('order_date', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))),
+            $this->latestTimestamp(PurchaseOrderPayment::query()
+                ->whereDate('paid_at', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->whereHas('purchaseOrder', fn (Builder $purchase) => $purchase->where('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(OperationalExpense::query()
+                ->whereDate('expense_date', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(CapitalMovement::query()
+                ->whereDate('movement_date', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(FinancialAdjustment::query()
+                ->whereDate('adjustment_date', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(InventoryLot::query()
+                ->whereDate('received_at', '<=', $date)
+                ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))),
+        ])->filter();
+
+        if ($timestamps->isEmpty()) {
+            return null;
+        }
+
+        return $timestamps->sortBy(fn (Carbon $timestamp): int => $timestamp->getTimestamp())->last();
+    }
+
+    private function latestTimestamp(Builder $query): ?Carbon
+    {
+        $timestamps = collect([
+            (clone $query)->max('updated_at'),
+            (clone $query)->max('created_at'),
+        ])->filter();
+
+        if ($timestamps->isEmpty()) {
+            return null;
+        }
+
+        return Carbon::parse($timestamps->max());
+    }
+
+    private function inventoryValueForDate(Carbon $day, ?int $warehouseId): float
+    {
+        $cutoff = $day->copy()->endOfDay();
+        $lotValue = InventoryLot::query()
+            ->where('received_at', '<=', $cutoff)
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->selectRaw('COALESCE(SUM(quantity_available * landed_unit_cost), 0) as value')
+            ->value('value');
+
+        return $this->money((float) $lotValue + $this->inventoryAdjustmentBalanceAsOf($day, $warehouseId));
+    }
+
+    private function inventoryAdjustmentBalanceAsOf(Carbon $day, ?int $warehouseId): float
+    {
+        return $this->money(
+            FinancialAdjustment::query()
+                ->where('type', FinancialAdjustment::TYPE_INVENTORY)
+                ->whereDate('adjustment_date', '<=', $day->toDateString())
+                ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+                ->sum('amount')
+        );
+    }
+
+    private function snapshotWarnings(Carbon $day, ?int $warehouseId): array
+    {
+        $warnings = [];
+
+        if ($day->lt(Carbon::today())) {
+            $warnings[] = 'inventory_historical_value_uses_current_fifo_lot_availability';
+        }
+
+        return $warnings;
+    }
+
+    private function rangeWarnings(Collection $snapshots): array
+    {
+        return $snapshots
+            ->flatMap(fn (FinancialDailySnapshot $snapshot): array => $snapshot->validation_warnings ?? [])
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function snapshotQuery(?int $warehouseId): Builder

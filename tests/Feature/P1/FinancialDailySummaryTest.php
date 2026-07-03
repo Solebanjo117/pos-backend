@@ -1,9 +1,12 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\PaymentMethod;
+use App\Models\InventoryLot;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
@@ -46,7 +49,7 @@ function dailySummaryContext(): array
     return [$admin, $warehouse, $product, $variant];
 }
 
-it('returns real cash sales, cogs and roll-forward inventory in the daily summary', function (): void {
+it('returns real cash sales, supplier deferred payments and FIFO inventory warnings in the daily summary', function (): void {
     [$admin, $warehouse, $product, $variant] = dailySummaryContext();
 
     // Credit purchase of 200 on 2026-05-01 raises inventory + accounts payable.
@@ -54,7 +57,7 @@ it('returns real cash sales, cogs and roll-forward inventory in the daily summar
         'name' => 'Proveedor DS',
         'email' => 'proveedor-ds@example.test',
     ]);
-    PurchaseOrder::create([
+    $purchaseOrder = PurchaseOrder::create([
         'supplier_id' => $supplier->id,
         'warehouse_id' => $warehouse->id,
         'user_id' => $admin->id,
@@ -65,6 +68,27 @@ it('returns real cash sales, cogs and roll-forward inventory in the daily summar
         'tax_amount' => 0,
         'shipping_cost' => 0,
         'total' => 200,
+    ]);
+    PurchaseOrderPayment::create([
+        'purchase_order_id' => $purchaseOrder->id,
+        'amount' => 50,
+        'method' => 'transfer',
+        'paid_at' => '2026-05-03 11:00:00',
+        'user_id' => $admin->id,
+    ]);
+    InventoryLot::create([
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'source_type' => 'purchase_order',
+        'source_id' => $purchaseOrder->id,
+        'received_quantity' => 10,
+        'quantity_available' => 7,
+        'unit_cost_base' => 20,
+        'tax_per_unit' => 0,
+        'misc_per_unit' => 0,
+        'landed_unit_cost' => 20,
+        'received_at' => '2026-05-01 09:00:00',
     ]);
 
     // A cash sale of 100 paid same day, with COGS 60.
@@ -110,17 +134,23 @@ it('returns real cash sales, cogs and roll-forward inventory in the daily summar
 
     $rows = collect($response->json('rows'))->keyBy('date');
 
-    // Inventory roll-forward: +200 from credit purchase on day 1, -60 COGS on day 2.
-    expect((float) $rows['2026-05-01']['closing_inventory'])->toBe(200.0)
+    // Inventory comes from FIFO lots. Historical rows are marked as approximate
+    // because lot availability is the current source of truth.
+    expect((float) $rows['2026-05-01']['closing_inventory'])->toBe(140.0)
         ->and((float) $rows['2026-05-01']['accounts_payable'])->toBe(200.0)
         ->and((float) $rows['2026-05-02']['closing_inventory'])->toBe(140.0);
+    expect($response->json('warnings'))->toContain('inventory_historical_value_uses_current_fifo_lot_availability');
 
     // Sales recognized as real cash sale + COGS on the sale day.
     expect((float) $rows['2026-05-02']['cash_sales'])->toBe(100.0)
         ->and((float) $rows['2026-05-02']['cogs_cash_sales'])->toBe(60.0)
         ->and((float) $rows['2026-05-02']['net_profit'])->toBe(40.0);
+    expect((float) $rows['2026-05-03']['supplier_bank_payments'])->toBe(50.0)
+        ->and((float) $rows['2026-05-03']['closing_bank'])->toBe(-50.0)
+        ->and((float) $rows['2026-05-03']['accounts_payable'])->toBe(150.0);
 
     expect((float) $response->json('totals.cash_sales'))->toBe(100.0)
+        ->and((float) $response->json('totals.supplier_bank_payments'))->toBe(50.0)
         ->and((float) $response->json('totals.net_profit'))->toBe(40.0);
 });
 
@@ -142,4 +172,135 @@ it('reuses cached snapshots for past days but keeps today fresh', function (): v
     $todaySecond = $service->computeDay(now()->toDateString(), $warehouse->id);
     expect($todaySecond->computed_at)->not->toBeNull()
         ->and($todaySecond->computed_at?->greaterThanOrEqualTo($todayFirst->computed_at))->toBeTrue();
+});
+
+it('returns financial drilldown rows and marks formal accounting reports pending without ledger data', function (): void {
+    [$admin, $warehouse, $product, $variant] = dailySummaryContext();
+
+    $order = SalesOrder::create([
+        'order_number' => 'SO-DS-DRILL',
+        'user_id' => $admin->id,
+        'date' => '2026-05-04',
+        'status' => 'completed',
+        'subtotal' => 120,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 120,
+        'payment_status' => 'paid',
+    ]);
+    SalesOrderItem::create([
+        'sales_order_id' => $order->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 120,
+        'unit_cost' => 70,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 120,
+        'total' => 120,
+    ]);
+    SalesOrderPayment::create([
+        'sales_order_id' => $order->id,
+        'amount' => 120,
+        'method' => 'card',
+        'paid_at' => '2026-05-04 12:00:00',
+        'created_by' => $admin->id,
+    ]);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-drilldown?metric=sales&date_from=2026-05-04&date_to=2026-05-04&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('metric', 'sales')
+        ->assertJsonPath('total', 120)
+        ->assertJsonPath('rows.0.document', 'SO-DS-DRILL')
+        ->assertJsonPath('rows.0.paid', 120);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-advanced-status')
+        ->assertOk()
+        ->assertJsonPath('ledger.is_available', false)
+        ->assertJsonPath('reports.5.status', 'pending');
+});
+
+it('maps yappy payments and bank adjustments into Banco', function (): void {
+    [$admin, $warehouse, $product, $variant] = dailySummaryContext();
+
+    PaymentMethod::updateOrCreate(
+        ['code' => 'yappy'],
+        [
+            'name' => 'Yappy',
+            'is_active' => true,
+            'is_system' => true,
+            'requires_reference' => true,
+            'requires_cash_count' => false,
+            'sort_order' => 10,
+        ],
+    );
+
+    $order = SalesOrder::create([
+        'order_number' => 'SO-DS-YAPPY',
+        'user_id' => $admin->id,
+        'date' => '2026-05-05',
+        'status' => 'completed',
+        'subtotal' => 90,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 90,
+        'payment_status' => 'paid',
+    ]);
+    SalesOrderItem::create([
+        'sales_order_id' => $order->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 90,
+        'unit_cost' => 40,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 90,
+        'total' => 90,
+    ]);
+    SalesOrderPayment::create([
+        'sales_order_id' => $order->id,
+        'amount' => 90,
+        'method' => 'yappy',
+        'paid_at' => '2026-05-05 12:00:00',
+        'created_by' => $admin->id,
+    ]);
+
+    $this->actingAs($admin)
+        ->postJson('/api/v1/reports/adjustments', [
+            'warehouse_id' => $warehouse->id,
+            'type' => 'bank',
+            'amount' => 25,
+            'reason' => 'Cuadre banco',
+            'adjustment_date' => '2026-05-05',
+        ])
+        ->assertCreated()
+        ->assertJsonPath('data.type', 'bank');
+
+    $response = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/daily-summary?date_from=2026-05-05&date_to=2026-05-05&warehouse_id='.$warehouse->id)
+        ->assertOk();
+
+    expect((float) $response->json('rows.0.bank_sales'))->toBe(90.0)
+        ->and((float) $response->json('rows.0.bank_adjustments'))->toBe(25.0)
+        ->and((float) $response->json('rows.0.closing_bank'))->toBe(115.0)
+        ->and((float) $response->json('totals.bank'))->toBe(115.0);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-drilldown?metric=bank&date_from=2026-05-05&date_to=2026-05-05&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('total', 115);
 });

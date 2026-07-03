@@ -5,9 +5,12 @@ namespace App\Services;
 use App\Models\Brand;
 use App\Models\Category;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class ProductImportReferenceBatchService
 {
+    public function __construct(private readonly BrandResolver $brandResolver) {}
+
     public function createReferences(array $categories, array $brands): array
     {
         $categoryResult = $this->emptyReferenceResult();
@@ -86,17 +89,14 @@ class ProductImportReferenceBatchService
             }
             $seen[$normalized] = true;
 
-            $brand = $this->brandByName((string) $name);
-            if ($brand instanceof Brand) {
+            [$brand, $created] = $this->brandResolver->firstOrCreateByName($name);
+            if (! $created) {
                 $result['existing'][] = $this->brandPayload($brand);
 
                 continue;
             }
 
-            $result['created'][] = $this->brandPayload(Brand::query()->create([
-                'name' => trim((string) $name),
-                'status' => 'active',
-            ]));
+            $result['created'][] = $this->brandPayload($brand);
         }
 
         return $result;
@@ -129,16 +129,9 @@ class ProductImportReferenceBatchService
             ->first();
     }
 
-    private function brandByName(string $name): ?Brand
-    {
-        return Brand::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim($name))])
-            ->first();
-    }
-
     private function normalizedName(mixed $value): string
     {
-        return mb_strtolower(trim((string) $value));
+        return mb_strtolower(trim(Str::ascii((string) $value)));
     }
 
     private function categoryPayload(Category $category): array

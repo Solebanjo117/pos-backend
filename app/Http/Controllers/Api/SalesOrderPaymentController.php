@@ -43,8 +43,11 @@ class SalesOrderPaymentController extends Controller
     {
         $order = SalesOrder::with(['payments', 'customer'])->findOrFail($orderId);
 
-        // Get all active payment method codes dynamically
-        $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+        $validPaymentMethods = array_values(array_unique(array_merge(
+            PaymentMethod::active()->pluck('code')->toArray(),
+            PaymentMethod::realMoneyCodes(),
+            ['credit', 'store_credit'],
+        )));
 
         $validated = $request->validate([
             'amount' => 'required|numeric|min:0.01',
@@ -75,7 +78,7 @@ class SalesOrderPaymentController extends Controller
             }
         }
 
-        if ($validated['method'] !== 'credit' && $order->customer) {
+        if (! PaymentMethod::isDeferredCode($validated['method']) && $order->customer) {
             $this->accountLedgerService->recordCustomerReceipt($order->customer, [
                 'amount' => (float) $validated['amount'],
                 'method' => $validated['method'],

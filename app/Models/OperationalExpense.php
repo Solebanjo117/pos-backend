@@ -25,6 +25,9 @@ class OperationalExpense extends Model
         'cash',
         'card',
         'transfer',
+        'yappy',
+        'ach',
+        'cheque',
         'other',
     ];
 
@@ -76,12 +79,6 @@ class OperationalExpense extends Model
 
     public function getPaymentMethodLabelAttribute(): ?string
     {
-        return match ($this->payment_method) {
-            'cash' => 'Efectivo',
-            'card' => 'Tarjeta',
-            'transfer' => 'Transferencia',
-            'other' => 'Otro',
-            default => $this->payment_method,
-        };
+        return $this->payment_method === null ? null : PaymentMethod::getNameByCode($this->payment_method);
     }
 }

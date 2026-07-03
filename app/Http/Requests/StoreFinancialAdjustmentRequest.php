@@ -29,7 +29,7 @@ class StoreFinancialAdjustmentRequest extends FormRequest
     {
         return [
             'type.required' => 'El tipo de ajuste es obligatorio.',
-            'type.in' => 'El tipo de ajuste debe ser cash o inventory.',
+            'type.in' => 'El tipo de ajuste no es valido.',
             'amount.required' => 'El monto del ajuste es obligatorio.',
             'amount.numeric' => 'El monto debe ser numerico.',
             'reason.required' => 'El motivo del ajuste es obligatorio.',

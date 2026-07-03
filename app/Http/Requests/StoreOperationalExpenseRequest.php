@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\OperationalExpense;
+use App\Models\PaymentMethod;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -30,7 +31,7 @@ class StoreOperationalExpenseRequest extends FormRequest
             'category' => ['required', 'string', Rule::in(array_keys(OperationalExpense::CATEGORIES))],
             'description' => ['nullable', 'string', 'max:255'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'payment_method' => ['required', 'string', Rule::in(OperationalExpense::PAYMENT_METHODS)],
+            'payment_method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes())],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string'],
         ];

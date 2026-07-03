@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\ProductInventory;
+use App\Models\OperationalExpense;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
@@ -11,6 +12,8 @@ use Illuminate\Support\Facades\DB;
 
 class DashboardService
 {
+    private const NON_MONEY_METHODS = ['credit', 'store_credit', 'supplier_credit'];
+
     /**
      * Get dashboard statistics.
      */
@@ -430,15 +433,27 @@ class DashboardService
             ->get();
 
         $totalRevenue = round((float) $orders->sum('total'), 2);
-        $cashCollected = round((float) $orders
-            ->flatMap(fn (SalesOrder $order) => $order->payments)
-            ->where('method', '!=', 'credit')
-            ->sum('amount'), 2);
-        $accountsReceivable = round((float) $orders->sum(fn (SalesOrder $order): float => $order->amount_due), 2);
+        $payments = $this->financialPaymentsQuery($dateFrom, $dateTo, $warehouseId)
+            ->with('salesOrder.items')
+            ->get();
+        $cashCollected = round((float) $payments->sum(fn (SalesOrderPayment $payment): float => $warehouseId && $payment->salesOrder
+            ? (float) $payment->amount * $this->salesOrderWarehouseRatio($payment->salesOrder, $warehouseId)
+            : (float) $payment->amount), 2);
+        $accountsReceivable = round((float) $orders->sum(function (SalesOrder $order): float {
+            $paid = (float) $order->payments
+                ->whereNotIn('method', self::NON_MONEY_METHODS)
+                ->sum('amount');
+
+            return max(0, (float) $order->total - $paid);
+        }), 2);
         $cogs = round((float) $orders
             ->flatMap(fn (SalesOrder $order) => $order->items)
             ->when($warehouseId, fn ($items) => $items->where('warehouse_id', $warehouseId))
             ->sum(fn (SalesOrderItem $item): float => (float) $item->unit_cost * (int) $item->quantity), 2);
+        $operationalExpenses = round((float) OperationalExpense::query()
+            ->whereBetween('expense_date', [$dateFrom->toDateString(), $dateTo->toDateString()])
+            ->when($warehouseId, fn ($query) => $query->where(fn ($scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->sum('amount'), 2);
         $inventoryValue = round($this->getTotalInventoryValue($warehouseId), 2);
         $pendingOrders = $this->getPendingOrders($warehouseId);
         $lowStockItems = $this->getLowStockItemsCount($warehouseId);
@@ -446,8 +461,9 @@ class DashboardService
         return [
             'total_revenue' => $totalRevenue,
             'accounts_receivable' => $accountsReceivable,
-            'net_profit' => round($totalRevenue - $cogs, 2),
-            'cogs_expenses' => $cogs,
+            'net_profit' => round($totalRevenue - $cogs - $operationalExpenses, 2),
+            'cogs_expenses' => round($cogs + $operationalExpenses, 2),
+            'operational_expenses' => $operationalExpenses,
             'cash_collected' => $cashCollected,
             'inventory_value' => $inventoryValue,
             'pending_orders' => $pendingOrders,
@@ -488,17 +504,26 @@ class DashboardService
 
     private function financialPaymentMethods(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId): array
     {
-        $payments = $this->financialPaymentsQuery($dateFrom, $dateTo, $warehouseId)->get();
-        $total = (float) $payments->sum('amount');
+        $payments = $this->financialPaymentsQuery($dateFrom, $dateTo, $warehouseId)
+            ->with('salesOrder.items')
+            ->get();
+        $amountForPayment = fn (SalesOrderPayment $payment): float => $warehouseId && $payment->salesOrder
+            ? (float) $payment->amount * $this->salesOrderWarehouseRatio($payment->salesOrder, $warehouseId)
+            : (float) $payment->amount;
+        $total = (float) $payments->sum($amountForPayment);
 
         return $payments
             ->groupBy('method')
-            ->map(fn ($methodPayments, string $method): array => [
-                'method' => $method,
-                'label' => $this->paymentMethodLabel($method),
-                'amount' => round((float) $methodPayments->sum('amount'), 2),
-                'percentage' => $total > 0 ? round(((float) $methodPayments->sum('amount') / $total) * 100, 2) : 0.0,
-            ])
+            ->map(function ($methodPayments, string $method) use ($amountForPayment, $total): array {
+                $amount = round((float) $methodPayments->sum($amountForPayment), 2);
+
+                return [
+                    'method' => $method,
+                    'label' => $this->paymentMethodLabel($method),
+                    'amount' => $amount,
+                    'percentage' => $total > 0 ? round(($amount / $total) * 100, 2) : 0.0,
+                ];
+            })
             ->sortByDesc('amount')
             ->values()
             ->all();
@@ -599,7 +624,7 @@ class DashboardService
     private function financialPaymentsQuery(Carbon $dateFrom, Carbon $dateTo, ?int $warehouseId)
     {
         return SalesOrderPayment::query()
-            ->where('method', '!=', 'credit')
+            ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereBetween('paid_at', [$dateFrom, $dateTo])
             ->whereHas('salesOrder', fn ($query) => $query
                 ->whereNotIn('status', ['cancelled'])
@@ -786,5 +811,14 @@ class DashboardService
                 'date' => $sale->created_at->toISOString(),
             ];
         })->toArray();
+    }
+
+    private function salesOrderWarehouseRatio(SalesOrder $order, int $warehouseId): float
+    {
+        $scopedTotal = (float) $order->items
+            ->where('warehouse_id', $warehouseId)
+            ->sum(fn (SalesOrderItem $item): float => (float) $item->total);
+
+        return min(1, max(0, $scopedTotal / max(0.01, (float) $order->total)));
     }
 }

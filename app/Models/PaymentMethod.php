@@ -10,6 +10,14 @@ class PaymentMethod extends Model
 {
     use HasFactory;
 
+    public const CASH_CODE = 'cash';
+
+    public const DEFERRED_CODES = [
+        'credit',
+        'store_credit',
+        'supplier_credit',
+    ];
+
     protected $fillable = [
         'name',
         'code',
@@ -67,12 +75,46 @@ class PaymentMethod extends Model
     {
         static $cache = [];
 
-        if (!isset($cache[$code])) {
+        if (! isset($cache[$code])) {
             $method = static::where('code', $code)->first();
             $cache[$code] = $method?->name ?? ucfirst($code);
         }
 
         return $cache[$code];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function realMoneyCodes(): array
+    {
+        $defaultCodes = ['cash', 'card', 'transfer', 'other', 'yappy', 'ach', 'cheque'];
+        $activeCodes = static::active()
+            ->pluck('code')
+            ->filter(fn (string $code): bool => ! static::isDeferredCode($code))
+            ->values()
+            ->all();
+
+        return array_values(array_unique(array_merge($defaultCodes, $activeCodes)));
+    }
+
+    public static function isDeferredCode(?string $code): bool
+    {
+        return $code === null || in_array($code, self::DEFERRED_CODES, true);
+    }
+
+    public static function isRealMoneyCode(?string $code): bool
+    {
+        return $code !== null && in_array($code, static::realMoneyCodes(), true);
+    }
+
+    public static function liquidityBucket(?string $code): ?string
+    {
+        if (static::isDeferredCode($code)) {
+            return null;
+        }
+
+        return $code === self::CASH_CODE ? 'cash' : 'bank';
     }
 
     /**

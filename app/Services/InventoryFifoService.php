@@ -371,6 +371,18 @@ class InventoryFifoService
 
     public function ensureOpeningLotForInventory(int $productId, ?int $variantId, int $warehouseId, int $quantity, float $unitCost): ?InventoryLot
     {
+        $existingOpeningLot = InventoryLot::query()
+            ->where('product_id', $productId)
+            ->where('variant_id', $variantId)
+            ->where('warehouse_id', $warehouseId)
+            ->where('source_type', 'opening_balance')
+            ->whereNull('source_id')
+            ->first();
+
+        if ($existingOpeningLot instanceof InventoryLot) {
+            return null;
+        }
+
         $missingQuantity = max(0, $quantity - $this->availableLotQuantity($productId, $variantId, $warehouseId));
 
         if ($missingQuantity <= 0) {
