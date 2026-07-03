@@ -194,42 +194,43 @@ class ProductImportBulkWriter
      */
     private function writeOpeningLots(array $payloads, mixed $now): void
     {
-        $movementRows = array_map(fn (array $payload): array => [
-            'movement_type' => 'in',
-            'reason' => 'opening_balance',
-            'product_id' => $payload['product_id'],
-            'variant_id' => $payload['variant_id'],
-            'warehouse_id' => $payload['warehouse_id'],
-            'destination_warehouse_id' => null,
-            'quantity' => $payload['quantity'],
-            'reference_type' => 'opening_balance',
-            'reference_id' => null,
-            'notes' => 'Saldo inicial FIFO',
-            'user_id' => Auth::id(),
-            'supplier_id' => null,
-            'product_batch_id' => null,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ], $payloads);
+        $payloads = array_values(array_filter(
+            $payloads,
+            fn (array $payload): bool => $payload['quantity'] > 0 && ! $this->openingLotExists($payload)
+        ));
 
-        DB::table('inventory_movements')->insert($movementRows);
+        if ($payloads === []) {
+            return;
+        }
 
-        $movementIds = DB::table('inventory_movements')
-            ->whereIn('variant_id', array_column($payloads, 'variant_id'))
-            ->where('reason', 'opening_balance')
-            ->get(['id', 'variant_id', 'warehouse_id'])
-            ->keyBy(fn (object $movement): string => $movement->variant_id.'|'.$movement->warehouse_id);
         $lotRows = [];
 
         foreach ($payloads as $payload) {
-            $movement = $movementIds[$payload['variant_id'].'|'.$payload['warehouse_id']];
+            $movementId = DB::table('inventory_movements')->insertGetId([
+                'movement_type' => 'in',
+                'reason' => 'opening_balance',
+                'product_id' => $payload['product_id'],
+                'variant_id' => $payload['variant_id'],
+                'warehouse_id' => $payload['warehouse_id'],
+                'destination_warehouse_id' => null,
+                'quantity' => $payload['quantity'],
+                'reference_type' => 'opening_balance',
+                'reference_id' => null,
+                'notes' => 'Saldo inicial FIFO',
+                'user_id' => Auth::id(),
+                'supplier_id' => null,
+                'product_batch_id' => null,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
             $lotRows[] = [
                 'product_id' => $payload['product_id'],
                 'variant_id' => $payload['variant_id'],
                 'warehouse_id' => $payload['warehouse_id'],
                 'source_type' => 'opening_balance',
                 'source_id' => null,
-                'source_movement_id' => $movement->id,
+                'source_movement_id' => $movementId,
                 'batch_number' => null,
                 'received_quantity' => $payload['quantity'],
                 'quantity_available' => $payload['quantity'],
@@ -245,6 +246,20 @@ class ProductImportBulkWriter
         }
 
         DB::table('inventory_lots')->insert($lotRows);
+    }
+
+    /**
+     * @param  array{product_id: int, variant_id: int, warehouse_id: int}  $payload
+     */
+    private function openingLotExists(array $payload): bool
+    {
+        return DB::table('inventory_lots')
+            ->where('product_id', $payload['product_id'])
+            ->where('variant_id', $payload['variant_id'])
+            ->where('warehouse_id', $payload['warehouse_id'])
+            ->where('source_type', 'opening_balance')
+            ->whereNull('source_id')
+            ->exists();
     }
 
     /**

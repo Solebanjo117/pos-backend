@@ -16,6 +16,7 @@ use App\Models\VehicleEngine;
 use App\Models\VehicleModel;
 use App\Models\VehicleVin;
 use App\Models\Warehouse;
+use App\Services\ProductImportReferenceBatchService;
 use App\Services\ProductService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -238,6 +239,18 @@ it('rolls back partial work when an import row fails during processing', functio
 
     $this->assertDatabaseMissing('categories', ['name' => 'Categoria Rollback']);
     $this->assertDatabaseMissing('products', ['sku_base' => 'ROLLBACK-1']);
+});
+
+it('reuses normalized brands during product reference creation', function () {
+    Brand::create(['name' => 'CTR', 'status' => 'active']);
+
+    $result = app(ProductImportReferenceBatchService::class)
+        ->createReferences([], [' ctr ', 'CTR']);
+
+    expect($result['brands']['created'])->toBeEmpty()
+        ->and($result['brands']['existing'])->toHaveCount(1)
+        ->and($result['brands']['skipped'])->toHaveCount(1)
+        ->and(Brand::query()->get()->filter(fn (Brand $brand): bool => mb_strtolower(trim($brand->name)) === 'ctr'))->toHaveCount(1);
 });
 
 it('imports brands without prefix and links suppliers from comma lists', function () {

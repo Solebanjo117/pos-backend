@@ -23,6 +23,8 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/financial-snapshots', [ReportController::class, 'financialSnapshots']);
     Route::get('/financial-weekly', [ReportController::class, 'financialWeekly']);
     Route::get('/balance-sheet', [ReportController::class, 'balanceSheet']);
+    Route::get('/financial-drilldown', [ReportController::class, 'financialDrilldown']);
+    Route::get('/financial-advanced-status', [ReportController::class, 'financialAdvancedStatus']);
     Route::post('/capital-movements', [ReportController::class, 'storeCapitalMovement'])->middleware('throttle:60,1');
     Route::get('/capital-movements', [ReportController::class, 'capitalMovements']);
     Route::post('/adjustments', [ReportController::class, 'storeAdjustment'])->middleware('throttle:60,1');

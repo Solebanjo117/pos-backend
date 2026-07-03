@@ -8,10 +8,12 @@ use App\Http\Requests\IncomeStatementReportRequest;
 use App\Http\Requests\LedgerTrialBalanceReportRequest;
 use App\Http\Requests\SalesByClientReportRequest;
 use App\Http\Requests\StoreFinancialAdjustmentRequest;
+use App\Services\FinancialDrilldownService;
 use App\Services\FinancialSnapshotService;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\Response;
 
 class ReportController extends Controller
@@ -20,10 +22,17 @@ class ReportController extends Controller
 
     protected FinancialSnapshotService $financialSnapshotService;
 
-    public function __construct(ReportService $reportService, FinancialSnapshotService $financialSnapshotService)
+    protected FinancialDrilldownService $financialDrilldownService;
+
+    public function __construct(
+        ReportService $reportService,
+        FinancialSnapshotService $financialSnapshotService,
+        FinancialDrilldownService $financialDrilldownService,
+    )
     {
         $this->reportService = $reportService;
         $this->financialSnapshotService = $financialSnapshotService;
+        $this->financialDrilldownService = $financialDrilldownService;
     }
 
     /**
@@ -383,6 +392,49 @@ class ReportController extends Controller
         return response()->json(
             $this->financialSnapshotService->balanceSheet($filters),
         );
+    }
+
+    public function financialDrilldown(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'metric' => 'required|string|in:sales,sales_total,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,cash,bank,inventory,receivable,accounts_receivable,credit_receivable,sales_pending,payable,accounts_payable,credit_payable,purchase_pending,cogs,profit,gross_profit,net_profit,investment,adjustments',
+            'date_from' => 'required|date',
+            'date_to' => 'required|date|after_or_equal:date_from',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
+        return response()->json($this->financialDrilldownService->handle($validated));
+    }
+
+    public function financialAdvancedStatus(): JsonResponse
+    {
+        $journalEntries = DB::table('journal_entries')->count();
+        $journalLines = DB::table('journal_lines')->count();
+        $ledgerEntries = DB::table('account_ledger_entries')->count();
+        $hasLedger = $journalEntries > 0 && $journalLines > 0 && $ledgerEntries > 0;
+
+        return response()->json([
+            'ledger' => [
+                'journal_entries' => $journalEntries,
+                'journal_lines' => $journalLines,
+                'account_ledger_entries' => $ledgerEntries,
+                'is_available' => $hasLedger,
+            ],
+            'reports' => [
+                ['key' => 'operational_income_statement', 'label' => 'Estado de resultados operativo', 'status' => 'available', 'source' => 'Ventas, COGS y gastos operativos'],
+                ['key' => 'operational_balance', 'label' => 'Balance operativo', 'status' => 'available', 'source' => 'Snapshots, inventario, CxC y CxP'],
+                ['key' => 'receivables', 'label' => 'Cuentas por cobrar detalladas', 'status' => 'available', 'source' => 'Ventas menos pagos reales'],
+                ['key' => 'payables', 'label' => 'Cuentas por pagar detalladas', 'status' => 'available', 'source' => 'Compras menos pagos reales'],
+                ['key' => 'cash_flow', 'label' => 'Flujo de efectivo operativo', 'status' => 'partial', 'source' => 'Pagos operativos; no es ledger formal'],
+                ['key' => 'general_journal', 'label' => 'Libro Diario formal', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Journal entries' : 'Pendiente de alimentar journal_entries y journal_lines'],
+                ['key' => 'general_ledger', 'label' => 'Mayor General formal', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Account ledger entries' : 'Sin datos contables disponibles'],
+                ['key' => 't_accounts', 'label' => 'Cuentas T formales', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Ledger contable' : 'Disponible en futura fase de contabilidad formal'],
+                ['key' => 'trial_balance', 'label' => 'Trial Balance real', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Journal lines' : 'Requiere ledger contable real'],
+                ['key' => 'formal_balance', 'label' => 'Balance contable formal', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Ledger contable' : 'No se genera con datos operativos para evitar contabilidad falsa'],
+            ],
+        ]);
     }
 
     public function storeCapitalMovement(Request $request): JsonResponse

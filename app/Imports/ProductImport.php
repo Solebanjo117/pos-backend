@@ -11,6 +11,7 @@ use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductVariant;
 use App\Models\Warehouse;
+use App\Services\BrandResolver;
 use App\Services\ProductImportBulkWriter;
 use App\Services\ProductService;
 use Illuminate\Database\Eloquent\Model;
@@ -88,15 +89,22 @@ class ProductImport extends BaseImport
 
     private readonly ProductImportBulkWriter $bulkWriter;
 
+    private readonly BrandResolver $brandResolver;
+
     private ?int $cachedDefaultTaxRate = null;
 
     private ?bool $hasProductWriteListeners = null;
 
     private bool $largeBatchFastPath = false;
 
-    public function __construct(private readonly ProductService $productService, ?ProductImportBulkWriter $bulkWriter = null)
+    public function __construct(
+        private readonly ProductService $productService,
+        ?ProductImportBulkWriter $bulkWriter = null,
+        ?BrandResolver $brandResolver = null,
+    )
     {
         $this->bulkWriter = $bulkWriter ?? app(ProductImportBulkWriter::class);
+        $this->brandResolver = $brandResolver ?? app(BrandResolver::class);
     }
 
     public function forMode(string $mode): self
@@ -1693,19 +1701,12 @@ class ProductImport extends BaseImport
 
     private function brands(): Collection
     {
-        if ($this->cachedBrands === null) {
-            $this->cachedBrands = Brand::query()->select(['id', 'name'])->get();
-        }
-
-        return $this->cachedBrands;
+        return $this->brandResolver->all();
     }
 
     private function brandByName(string $brandName): ?Brand
     {
-        $normalized = $this->attributeNameKey($brandName);
-
-        return $this->brands()
-            ->first(fn (Brand $brand): bool => $this->attributeNameKey($brand->name) === $normalized);
+        return $this->brandResolver->findByName($brandName);
     }
 
     private function resolveBrandForImport(mixed $value, bool $createMissing, bool $allowGenericFallback): ?Brand
@@ -1740,13 +1741,11 @@ class ProductImport extends BaseImport
             return null;
         }
 
-        $brand = Brand::query()->create([
-            'name' => $brandName,
-            'status' => 'active',
-        ]);
-        $this->cachedBrands = null;
+        [$brand, $created] = $this->brandResolver->firstOrCreateByName($brandName);
         $this->brandSuggestionsCache = [];
-        $this->recordImportModel(Brand::class, $brand->id, 'created', ['name' => $brand->name]);
+        if ($created) {
+            $this->recordImportModel(Brand::class, $brand->id, 'created', ['name' => $brand->name]);
+        }
 
         return $brand;
     }
@@ -1758,13 +1757,11 @@ class ProductImport extends BaseImport
             return $brand;
         }
 
-        $brand = Brand::query()->create([
-            'name' => 'Generica',
-            'status' => 'active',
-        ]);
-        $this->cachedBrands = null;
+        [$brand, $created] = $this->brandResolver->firstOrCreateByName('Generica');
         $this->brandSuggestionsCache = [];
-        $this->recordImportModel(Brand::class, $brand->id, 'created', ['name' => $brand->name]);
+        if ($created) {
+            $this->recordImportModel(Brand::class, $brand->id, 'created', ['name' => $brand->name]);
+        }
 
         return $brand;
     }

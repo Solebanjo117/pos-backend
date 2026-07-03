@@ -37,12 +37,36 @@ class PaymentMethodSeeder extends Seeder
                 'sort_order' => 3,
             ],
             [
+                'name' => 'Yappy',
+                'code' => 'yappy',
+                'is_system' => true,
+                'requires_reference' => true,
+                'requires_cash_count' => false,
+                'sort_order' => 4,
+            ],
+            [
+                'name' => 'ACH',
+                'code' => 'ach',
+                'is_system' => true,
+                'requires_reference' => true,
+                'requires_cash_count' => false,
+                'sort_order' => 5,
+            ],
+            [
+                'name' => 'Cheque',
+                'code' => 'cheque',
+                'is_system' => true,
+                'requires_reference' => true,
+                'requires_cash_count' => false,
+                'sort_order' => 6,
+            ],
+            [
                 'name' => 'Otro',
                 'code' => 'other',
                 'is_system' => true,
                 'requires_reference' => false,
                 'requires_cash_count' => false,
-                'sort_order' => 4,
+                'sort_order' => 7,
             ],
             [
                 'name' => 'Crédito',
@@ -50,7 +74,7 @@ class PaymentMethodSeeder extends Seeder
                 'is_system' => true,
                 'requires_reference' => false,
                 'requires_cash_count' => false,
-                'sort_order' => 5,
+                'sort_order' => 8,
             ],
             [
                 'name' => 'Saldo a Favor',
@@ -58,7 +82,7 @@ class PaymentMethodSeeder extends Seeder
                 'is_system' => true,
                 'requires_reference' => false,
                 'requires_cash_count' => false,
-                'sort_order' => 6,
+                'sort_order' => 9,
             ],
             [
                 'name' => 'Crédito proveedor',
@@ -66,7 +90,7 @@ class PaymentMethodSeeder extends Seeder
                 'is_system' => true,
                 'requires_reference' => false,
                 'requires_cash_count' => false,
-                'sort_order' => 7,
+                'sort_order' => 10,
             ],
         ];
 

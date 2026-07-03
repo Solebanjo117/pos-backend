@@ -20,8 +20,6 @@ use Illuminate\Support\Str;
 
 class AccountLedgerService
 {
-    private const REAL_PAYMENT_METHODS = ['cash', 'card', 'transfer', 'other'];
-
     /**
      * @return array<string, mixed>
      */
@@ -400,7 +398,7 @@ class AccountLedgerService
 
     private function createPaymentBatch(string $accountType, int $accountId, string $direction, float $amount, array $data): AccountPaymentBatch
     {
-        if (! in_array((string) ($data['method'] ?? ''), self::REAL_PAYMENT_METHODS, true)) {
+        if (! PaymentMethod::isRealMoneyCode((string) ($data['method'] ?? ''))) {
             throw new \InvalidArgumentException('El metodo debe ser un pago real.');
         }
 

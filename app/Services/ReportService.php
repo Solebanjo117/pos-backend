@@ -24,6 +24,8 @@ use Illuminate\Support\Collection;
 
 class ReportService
 {
+    private const NON_MONEY_METHODS = ['credit', 'store_credit', 'supplier_credit'];
+
     public function generateCustomerReferenceReport(array $filters): array
     {
         $warehouseId = $filters['warehouse_id'] ?? null;
@@ -231,12 +233,12 @@ class ReportService
         $pendingAmount = round((float) $orders->sum(fn (SalesOrder $order): float => (float) $order->amount_due), 2);
         $lastPayment = $orders
             ->flatMap(fn (SalesOrder $order) => $order->payments)
-            ->where('method', '!=', 'credit')
+            ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->sortByDesc('paid_at')
             ->first();
         $dominantPayment = $orders
             ->flatMap(fn (SalesOrder $order) => $order->payments)
-            ->where('method', '!=', 'credit')
+            ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->groupBy('method')
             ->map(fn (Collection $payments, string $method): array => [
                 'method' => $method,
@@ -941,7 +943,10 @@ class ReportService
         }
 
         // Cash-basis: Fetch payments for the given period
-        $paymentsQuery = \App\Models\SalesOrderPayment::whereBetween('paid_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+        $paymentsQuery = \App\Models\SalesOrderPayment::with('salesOrder.items')
+            ->whereBetween('paid_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
+            ->whereNotIn('method', self::NON_MONEY_METHODS)
+            ->whereHas('salesOrder', fn ($query) => $query->whereIn('status', ['confirmed', 'processing', 'completed']));
 
         if ($warehouseId) {
             $paymentsQuery->whereHas('salesOrder.items', function ($q) use ($warehouseId) {
@@ -964,8 +969,12 @@ class ReportService
                 ];
             }
 
-            $timeline[$paymentDate]['revenue'] += $payment->amount;
-            $totalRevenue += $payment->amount;
+            $amount = $warehouseId && $payment->salesOrder
+                ? (float) $payment->amount * $this->salesOrderWarehouseRatioForReport($payment->salesOrder, (int) $warehouseId)
+                : (float) $payment->amount;
+
+            $timeline[$paymentDate]['revenue'] += $amount;
+            $totalRevenue += $amount;
         }
 
         // Refunds: Approved SalesReturns in the date range
@@ -1582,9 +1591,10 @@ class ReportService
 
     private function receivableDocumentRow(SalesOrder $order, ?Carbon $asOf = null): array
     {
-        $paid = $asOf
-            ? (float) $order->payments->where('method', '!=', 'credit')->filter(fn ($payment): bool => $payment->paid_at <= $asOf)->sum('amount')
-            : (float) $order->amount_paid;
+        $paid = (float) $order->payments
+            ->whereNotIn('method', self::NON_MONEY_METHODS)
+            ->filter(fn ($payment): bool => $asOf === null || $payment->paid_at <= $asOf)
+            ->sum('amount');
         $returned = $asOf
             ? (float) $order->returns->where('status', 'approved')->filter(fn ($return): bool => $return->created_at <= $asOf)->sum('total_amount')
             : (float) $order->total_returned;
@@ -1614,9 +1624,10 @@ class ReportService
 
     private function payableDocumentRow(PurchaseOrder $order, ?Carbon $asOf = null): array
     {
-        $paid = $asOf
-            ? (float) $order->payments->filter(fn ($payment): bool => $payment->paid_at <= $asOf)->sum('amount')
-            : (float) $order->amount_paid;
+        $paid = (float) $order->payments
+            ->whereNotIn('method', self::NON_MONEY_METHODS)
+            ->filter(fn ($payment): bool => $asOf === null || $payment->paid_at <= $asOf)
+            ->sum('amount');
         $amountDue = round(max(0, (float) $order->total - $paid), 2);
         $referenceDate = $order->order_date?->toDateString();
         $daysOutstanding = $referenceDate
@@ -2275,6 +2286,7 @@ class ReportService
         return [
             'date' => $date,
             'cash' => 0.0,
+            'bank' => 0.0,
             'inventory' => 0.0,
             'purchase' => 0.0,
             'expenses' => 0.0,
@@ -2485,17 +2497,26 @@ class ReportService
                 continue;
             }
 
-            if ($adjustment->type === 'cash') {
-                $days[$date]['cash'] = round($days[$date]['cash'] + (float) $adjustment->amount, 2);
-            } elseif ($adjustment->type === 'inventory') {
-                $days[$date]['inventory'] = round($days[$date]['inventory'] + (float) $adjustment->amount, 2);
-            }
+            $amount = (float) $adjustment->amount;
+
+            match ($adjustment->type) {
+                FinancialAdjustment::TYPE_CASH => $days[$date]['cash'] = round($days[$date]['cash'] + $amount, 2),
+                FinancialAdjustment::TYPE_BANK => $days[$date]['bank'] = round($days[$date]['bank'] + $amount, 2),
+                FinancialAdjustment::TYPE_INVENTORY => $days[$date]['inventory'] = round($days[$date]['inventory'] + $amount, 2),
+                FinancialAdjustment::TYPE_SALES => $days[$date]['sales'] = round($days[$date]['sales'] + $amount, 2),
+                FinancialAdjustment::TYPE_PURCHASES => $days[$date]['purchase'] = round($days[$date]['purchase'] + $amount, 2),
+                FinancialAdjustment::TYPE_EXPENSES => $days[$date]['expenses'] = round($days[$date]['expenses'] + $amount, 2),
+                FinancialAdjustment::TYPE_INVESTMENT => $days[$date]['investment'] = round($days[$date]['investment'] + $amount, 2),
+                FinancialAdjustment::TYPE_ACCOUNTS_RECEIVABLE => $days[$date]['credit_receivable'] = round($days[$date]['credit_receivable'] + $amount, 2),
+                FinancialAdjustment::TYPE_ACCOUNTS_PAYABLE => $days[$date]['credit_payable'] = round($days[$date]['credit_payable'] + $amount, 2),
+                default => null,
+            };
         }
     }
 
     private function dailyTotals(array $days): array
     {
-        $keys = ['cash', 'inventory', 'purchase', 'expenses', 'sales', 'cogs', 'profit', 'credit_payable', 'credit_receivable', 'cogs_credit', 'investment'];
+        $keys = ['cash', 'bank', 'inventory', 'purchase', 'expenses', 'sales', 'cogs', 'profit', 'credit_payable', 'credit_receivable', 'cogs_credit', 'investment'];
 
         return collect($keys)->mapWithKeys(fn (string $key): array => [
             $key => round(collect($days)->sum($key), 2),
@@ -2508,5 +2529,14 @@ class ReportService
             ->where('type', $type)
             ->when($warehouseId, fn ($q) => $q->where(fn ($q) => $q->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->sum('amount'), 2);
+    }
+
+    private function salesOrderWarehouseRatioForReport(SalesOrder $order, int $warehouseId): float
+    {
+        $scopedTotal = (float) $order->items
+            ->where('warehouse_id', $warehouseId)
+            ->sum(fn ($item): float => (float) $item->total);
+
+        return min(1, max(0, $scopedTotal / max(0.01, (float) $order->total)));
     }
 }

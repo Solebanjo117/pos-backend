@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Models\PaymentMethod;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -17,10 +18,15 @@ class StorePurchaseOrderPaymentRequest extends FormRequest
      */
     public function rules(): array
     {
+        $validMethods = array_values(array_unique(array_merge(
+            PaymentMethod::realMoneyCodes(),
+            ['credit', 'supplier_credit'],
+        )));
+
         return [
             'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'method' => ['required', Rule::in(['cash', 'card', 'transfer', 'other', 'credit', 'supplier_credit'])],
+            'method' => ['required', Rule::in($validMethods)],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
         ];
