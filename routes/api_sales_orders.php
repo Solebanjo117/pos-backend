@@ -58,6 +58,7 @@ Route::middleware(['web'])->prefix('sales-orders')->group(function () {
 // Standalone return actions
 Route::middleware(['web'])->prefix('sales-returns')->group(function () {
     Route::get('/', [SalesReturnController::class, 'listAll']);
+    Route::get('/candidates', [SalesReturnController::class, 'candidates']);
     Route::get('/{salesReturn}/operational-detail', [SalesReturnController::class, 'operationalDetail']);
     Route::post('/{id}/approve', [SalesReturnController::class, 'approve']);
     Route::post('/{id}/reject', [SalesReturnController::class, 'reject']);

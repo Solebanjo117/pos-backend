@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\SalesOrder;
 use App\Models\SalesReturn;
@@ -75,7 +76,7 @@ class SalesReturnService
             ]);
         }
 
-        if (in_array($salesReturn->refund_method, ['cash', 'card', 'transfer'], true)) {
+        if (in_array($salesReturn->refund_method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true)) {
             $this->assertOpenSession($user, 'Debe tener una sesión de caja abierta para aprobar un reembolso directo.');
         }
 
@@ -121,7 +122,7 @@ class SalesReturnService
             }
 
             $alreadyReturned = SalesReturnItem::whereHas('salesReturn', function ($query) use ($order): void {
-                $query->where('sales_order_id', $order->id)->where('status', 'approved');
+                $query->where('sales_order_id', $order->id)->whereIn('status', ['pending', 'approved']);
             })->where('sales_order_item_id', $returnItem['sales_order_item_id'])
                 ->sum('quantity');
 

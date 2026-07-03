@@ -19,7 +19,7 @@ class StorePurchaseOrderPaymentRequest extends FormRequest
     public function rules(): array
     {
         $validMethods = array_values(array_unique(array_merge(
-            PaymentMethod::realMoneyCodes(),
+            PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_PURCHASE_ORDERS),
             ['credit', 'supplier_credit'],
         )));
 

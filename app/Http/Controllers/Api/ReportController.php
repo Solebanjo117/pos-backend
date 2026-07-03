@@ -94,7 +94,10 @@ class ReportController extends Controller
             return response()->json(['error' => 'Invalid format'], 400);
         }
 
-        $filters = $request->only(['warehouse_id', 'brand_id', 'category_id', 'status']);
+        $filters = array_merge(
+            $request->only(['warehouse_id', 'brand_id', 'category_id', 'status', 'sort_by', 'sort_direction']),
+            ['export_all' => true]
+        );
         $report = $this->reportService->generateStockLevelsReport($filters);
 
         if ($format === 'pdf') {
@@ -111,6 +114,46 @@ class ReportController extends Controller
         return \Maatwebsite\Excel\Facades\Excel::download(
             new \App\Exports\StockLevelsExport($report),
             'stock-levels-report.xlsx'
+        );
+    }
+
+    public function exportInventoryItems(Request $request, string $format): Response
+    {
+        if (! in_array($format, ['csv', 'excel', 'xlsx'], true)) {
+            return response()->json(['error' => 'Invalid format'], 400);
+        }
+
+        $request->validate([
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'brand_id' => 'nullable',
+            'category_id' => 'nullable',
+            'status' => 'nullable|string',
+            'search' => 'nullable|string|max:255',
+            'has_stock' => 'nullable|boolean',
+            'in_stock' => 'nullable|boolean',
+            'archived' => 'nullable|in:true,false,all',
+            'template' => 'nullable|boolean',
+        ]);
+
+        $rows = $this->reportService->generateInventoryItemsExportRows($request->only([
+            'warehouse_id',
+            'brand_id',
+            'category_id',
+            'status',
+            'search',
+            'has_stock',
+            'in_stock',
+            'archived',
+        ]));
+        $template = $request->boolean('template');
+        $extension = $format === 'csv' ? 'csv' : 'xlsx';
+        $filename = ($template ? 'inventory-items-template' : 'inventory-items-export').'.'.$extension;
+        $writerType = $format === 'csv' ? \Maatwebsite\Excel\Excel::CSV : null;
+
+        return \Maatwebsite\Excel\Facades\Excel::download(
+            new \App\Exports\InventoryItemsExport($rows, $template),
+            $filename,
+            $writerType
         );
     }
 

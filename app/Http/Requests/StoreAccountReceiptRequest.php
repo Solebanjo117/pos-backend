@@ -18,9 +18,13 @@ class StoreAccountReceiptRequest extends FormRequest
      */
     public function rules(): array
     {
+        $context = str_contains((string) $this->path(), 'accounts-payable')
+            ? PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS
+            : PaymentMethod::CONTEXT_CUSTOMER_RECEIPTS;
+
         return [
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes())],
+            'method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes($context))],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
             'paid_at' => ['nullable', 'date'],

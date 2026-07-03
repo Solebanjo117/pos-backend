@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSalesReturnRequest;
 use App\Models\SalesOrder;
 use App\Models\SalesReturn;
+use App\Models\SalesReturnItem;
 use App\Services\SalesReturnOperationalDetailService;
 use App\Services\SalesReturnService;
 use Illuminate\Http\JsonResponse;
@@ -27,7 +28,7 @@ class SalesReturnController extends Controller
             'customer_id' => 'nullable|integer|exists:customers,id',
             'sales_order_id' => 'nullable|integer|exists:sales_orders,id',
             'warehouse_id' => 'nullable|integer|exists:warehouses,id',
-            'refund_method' => 'nullable|in:cash,card,transfer,balance',
+            'refund_method' => ['nullable', 'string'],
             'date_from' => 'nullable|date',
             'date_to' => 'nullable|date|after_or_equal:date_from',
             'search' => 'nullable|string|max:100',
@@ -73,6 +74,45 @@ class SalesReturnController extends Controller
         });
 
         return response()->json($returns);
+    }
+
+    public function candidates(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'search' => 'nullable|string|max:100',
+            'per_page' => 'nullable|integer|min:1|max:30',
+        ]);
+
+        $operator = DB::connection()->getDriverName() === 'sqlite' ? 'like' : 'ilike';
+        $search = trim((string) ($validated['search'] ?? ''));
+        $perPage = (int) ($validated['per_page'] ?? 10);
+
+        $orders = SalesOrder::query()
+            ->with([
+                'customer:id,name,code',
+                'items.product:id,sku_base,name',
+                'items.variant:id,sku',
+                'items.seller:id,name',
+            ])
+            ->whereIn('status', ['confirmed', 'completed'])
+            ->when($search !== '', function ($query) use ($operator, $search): void {
+                $like = '%'.$search.'%';
+                $numeric = is_numeric($search) ? (float) $search : null;
+
+                $query->where(function ($query) use ($operator, $like, $numeric): void {
+                    $query->where('order_number', $operator, $like)
+                        ->orWhereHas('customer', fn ($query) => $query->where('name', $operator, $like)->orWhere('code', $operator, $like))
+                        ->when($numeric !== null, fn ($query) => $query->orWhere('total', $numeric));
+                });
+            })
+            ->latest('date')
+            ->limit($perPage)
+            ->get()
+            ->map(fn (SalesOrder $order): array => $this->returnCandidateRow($order))
+            ->filter(fn (array $order): bool => count($order['items']) > 0)
+            ->values();
+
+        return response()->json(['data' => $orders]);
     }
 
     public function operationalDetail(SalesReturn $salesReturn): JsonResponse
@@ -175,5 +215,55 @@ class SalesReturnController extends Controller
             'message' => $errors[0] ?? 'No se pudo procesar la devolución.',
             'errors' => $errors,
         ], 422);
+    }
+
+    private function returnCandidateRow(SalesOrder $order): array
+    {
+        return [
+            'id' => $order->id,
+            'order_number' => $order->order_number,
+            'status' => $order->status,
+            'payment_status' => $order->payment_status,
+            'date' => $order->date?->toDateString(),
+            'total' => (float) $order->total,
+            'has_customer' => $order->customer_id !== null,
+            'customer' => $order->customer ? [
+                'id' => $order->customer->id,
+                'name' => $order->customer->name,
+                'code' => $order->customer->code,
+            ] : null,
+            'items' => $order->items
+                ->filter(fn ($item): bool => ! (bool) $item->is_custom_line)
+                ->map(function ($item): array {
+                    $alreadyReserved = (int) SalesReturnItem::query()
+                        ->where('sales_order_item_id', $item->id)
+                        ->whereHas('salesReturn', function ($query): void {
+                            $query->whereIn('status', ['pending', 'approved']);
+                        })
+                        ->sum('quantity');
+                    $returnable = max(0, (int) $item->quantity - $alreadyReserved);
+
+                    return [
+                        'id' => $item->id,
+                        'product_id' => $item->product_id,
+                        'variant_id' => $item->variant_id,
+                        'product_name' => $item->product_name,
+                        'product_sku' => $item->variant?->sku ?? $item->product_sku,
+                        'quantity' => $returnable,
+                        'sold_quantity' => (int) $item->quantity,
+                        'already_returned_quantity' => $alreadyReserved,
+                        'unit_price' => (float) $item->unit_price,
+                        'discount_percent' => (float) $item->discount_percent,
+                        'tax_percent' => (int) ($item->tax_percent ?? 0),
+                        'total' => $item->quantity > 0
+                            ? round(((float) $item->total / (int) $item->quantity) * $returnable, 2)
+                            : 0,
+                        'seller_name' => $item->seller?->name,
+                    ];
+                })
+                ->filter(fn (array $item): bool => $item['quantity'] > 0)
+                ->values()
+                ->all(),
+        ];
     }
 }

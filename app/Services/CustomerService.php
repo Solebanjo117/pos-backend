@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -446,7 +447,7 @@ class CustomerService
     {
         return $orders
             ->flatMap(fn (SalesOrder $order) => $order->payments
-                ->where('method', '!=', 'credit')
+                ->reject(fn ($payment): bool => PaymentMethod::isDeferredCode($payment->method))
                 ->map(fn ($payment): array => [
                     'id' => $payment->id,
                     'order_id' => $order->id,

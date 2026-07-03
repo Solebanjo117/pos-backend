@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Models\PaymentMethod;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreSalesReturnRequest extends FormRequest
 {
@@ -18,7 +20,10 @@ class StoreSalesReturnRequest extends FormRequest
     {
         return [
             'reason' => ['nullable', 'string', 'max:500'],
-            'refund_method' => ['required', 'string', 'in:cash,card,transfer,balance'],
+            'refund_method' => ['required', 'string', Rule::in(array_values(array_unique(array_merge(
+                PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS),
+                ['balance', 'store_credit'],
+            ))))],
             'refund_notes' => ['nullable', 'string', 'max:500'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.sales_order_item_id' => ['required', 'exists:sales_order_items,id'],

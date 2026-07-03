@@ -567,8 +567,9 @@ class ReportService
             ->values();
 
         $page = max((int) ($filters['page'] ?? 1), 1);
-        $perPage = 25;
         $totalProducts = $products->count();
+        $exportAll = (bool) ($filters['export_all'] ?? false);
+        $perPage = $exportAll ? max($totalProducts, 1) : 25;
         $paginatedProducts = $products->forPage($page, $perPage)->values();
 
         return [
@@ -582,6 +583,120 @@ class ReportService
                 'total' => $totalProducts,
             ],
         ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function generateInventoryItemsExportRows(array $filters = []): array
+    {
+        $operator = $this->caseInsensitiveLikeOperator();
+        $query = ProductInventory::query()
+            ->with([
+                'product' => fn ($query) => $query->withTrashed()->with(['category', 'pricing', 'defaultVariant.brand', 'defaultVariant.pricing']),
+                'variant.brand',
+                'variant.pricing',
+                'variant.suppliers',
+                'warehouse',
+            ])
+            ->select('product_inventory.*');
+
+        if (! empty($filters['warehouse_id'])) {
+            $query->where('warehouse_id', $filters['warehouse_id']);
+        }
+
+        if (! empty($filters['brand_id'])) {
+            $brandIds = is_array($filters['brand_id']) ? $filters['brand_id'] : [$filters['brand_id']];
+            $query->where(function ($query) use ($brandIds): void {
+                $query->whereHas('variant', fn ($query) => $query->whereIn('brand_id', $brandIds))
+                    ->orWhereHas('product.defaultVariant', fn ($query) => $query->whereIn('brand_id', $brandIds));
+            });
+        }
+
+        if (! empty($filters['category_id'])) {
+            $categoryIds = is_array($filters['category_id']) ? $filters['category_id'] : [$filters['category_id']];
+            $query->whereHas('product', fn ($query) => $query->withTrashed()->whereIn('category_id', $categoryIds));
+        }
+
+        if (! empty($filters['status'])) {
+            $query->whereHas('product', fn ($query) => $query->withTrashed()->where('status', $filters['status']));
+        }
+
+        if (! empty($filters['has_stock']) || ! empty($filters['in_stock'])) {
+            $query->where('quantity_available', '>', 0);
+        }
+
+        $archived = (string) ($filters['archived'] ?? 'false');
+        if ($archived === 'true') {
+            $query->whereHas('product', fn ($query) => $query->onlyTrashed());
+        } elseif ($archived !== 'all') {
+            $query->whereHas('product', fn ($query) => $query->whereNull('deleted_at'));
+        } else {
+            $query->whereHas('product', fn ($query) => $query->withTrashed());
+        }
+
+        if (! empty($filters['search'])) {
+            $search = '%'.$filters['search'].'%';
+            $query->where(function ($query) use ($operator, $search): void {
+                $query->whereHas('product', function ($query) use ($operator, $search): void {
+                    $query->withTrashed()
+                        ->where('name', $operator, $search)
+                        ->orWhere('sku_base', $operator, $search)
+                        ->orWhere('system_id', $operator, $search);
+                })
+                    ->orWhereHas('variant', function ($query) use ($operator, $search): void {
+                        $query->where('sku', $operator, $search)
+                            ->orWhere('upc', $operator, $search)
+                            ->orWhere('system_id', $operator, $search)
+                            ->orWhereHas('brand', fn ($query) => $query->where('name', $operator, $search));
+                    });
+            });
+        }
+
+        return $query->get()
+            ->sortBy(fn (ProductInventory $item): string => (string) ($item->product?->name ?? $item->product?->sku_base ?? ''))
+            ->values()
+            ->map(function (ProductInventory $item): array {
+                $product = $item->product;
+                $variant = $item->variant ?: $product?->defaultVariant;
+                $pricing = $variant?->pricing ?: $product?->pricing;
+                $fifoCost = $product
+                    ? app(InventoryFifoService::class)->currentFifoCost(
+                        (int) $item->product_id,
+                        $item->variant_id ? (int) $item->variant_id : null,
+                        (int) $item->warehouse_id
+                    )
+                    : 0.0;
+                $stockValue = $this->fifoStockValue($item);
+                $supplier = $variant?->suppliers
+                    ?->sortByDesc(fn ($supplier) => (bool) ($supplier->pivot?->is_preferred ?? false))
+                    ?->first();
+
+                return [
+                    'product_system_id' => $product?->system_id,
+                    'variant_system_id' => $variant?->system_id,
+                    'product_sku' => $product?->sku_base,
+                    'variant_sku' => $variant?->sku,
+                    'upc' => $variant?->upc,
+                    'product_name' => $product?->name,
+                    'brand' => $variant?->brand?->name,
+                    'category' => $product?->category?->name,
+                    'status' => $product?->status,
+                    'warehouse' => $item->warehouse?->name,
+                    'warehouse_code' => $item->warehouse?->code,
+                    'location' => $item->location_in_warehouse,
+                    'quantity_available' => (int) $item->quantity_available,
+                    'quantity_reserved' => (int) $item->quantity_reserved,
+                    'reorder_point' => (int) $item->reorder_point,
+                    'reorder_quantity' => (int) $item->reorder_quantity,
+                    'fifo_cost' => $fifoCost,
+                    'price' => (float) ($pricing?->calculated_price ?? $pricing?->base_price ?? 0),
+                    'stock_value' => $stockValue,
+                    'preferred_supplier' => $supplier?->name,
+                ];
+            })
+            ->values()
+            ->all();
     }
 
     /**

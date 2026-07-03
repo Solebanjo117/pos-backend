@@ -31,5 +31,6 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/adjustments', [ReportController::class, 'adjustments']);
 
     Route::get('/stock-levels/export/{format}', [ReportController::class, 'exportStockLevels']);
+    Route::get('/inventory-items/export/{format}', [ReportController::class, 'exportInventoryItems']);
     Route::get('/movement-history/export/{format}', [ReportController::class, 'exportMovementHistory']);
 });

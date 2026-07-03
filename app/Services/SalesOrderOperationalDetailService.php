@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AccountLedgerEntry;
 use App\Models\CustomerTransaction;
 use App\Models\InventoryMovement;
+use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
 use Illuminate\Support\Collection;
 
@@ -211,7 +212,7 @@ class SalesOrderOperationalDetailService
     private function paymentContext(SalesOrder $order): array
     {
         $realPaidAmount = round((float) $order->payments
-            ->where('method', '!=', 'credit')
+            ->reject(fn ($payment): bool => PaymentMethod::isDeferredCode($payment->method))
             ->sum('amount'), 2);
         $creditAmount = round((float) $order->payments
             ->where('method', 'credit')
@@ -307,7 +308,9 @@ class SalesOrderOperationalDetailService
      */
     private function arContext(SalesOrder $order, Collection $customerTransactions, Collection $ledgerEntries): array
     {
-        $amountPaid = round((float) $order->payments->where('method', '!=', 'credit')->sum('amount'), 2);
+        $amountPaid = round((float) $order->payments
+            ->reject(fn ($payment): bool => PaymentMethod::isDeferredCode($payment->method))
+            ->sum('amount'), 2);
         $totalReturned = round((float) $order->returns->where('status', 'approved')->sum('total_amount'), 2);
         $amountDue = round(max(0, (float) $order->total - $totalReturned - $amountPaid), 2);
 

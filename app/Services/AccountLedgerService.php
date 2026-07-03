@@ -398,7 +398,12 @@ class AccountLedgerService
 
     private function createPaymentBatch(string $accountType, int $accountId, string $direction, float $amount, array $data): AccountPaymentBatch
     {
-        if (! PaymentMethod::isRealMoneyCode((string) ($data['method'] ?? ''))) {
+        $context = $accountType === 'supplier'
+            ? PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS
+            : PaymentMethod::CONTEXT_CUSTOMER_RECEIPTS;
+        $method = (string) ($data['method'] ?? '');
+
+        if (! in_array($method, PaymentMethod::realMoneyCodes($context), true)) {
             throw new \InvalidArgumentException('El metodo debe ser un pago real.');
         }
 

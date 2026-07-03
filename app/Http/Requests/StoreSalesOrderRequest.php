@@ -11,20 +11,41 @@ class StoreSalesOrderRequest extends FormRequest
     protected function prepareForValidation(): void
     {
         $items = $this->input('items');
+        $payments = $this->input('payments');
 
-        if (! is_array($items)) {
-            return;
-        }
+        if (is_array($payments)) {
+            $methodAliases = [
+                'clave' => 'card',
+                'transferencia' => 'transfer',
+                'notaCredito' => 'credit',
+                'creditoCliente' => 'credit',
+            ];
 
-        foreach ($items as $index => $item) {
-            if (! is_array($item) || ! array_key_exists('tax_percent', $item) || ! is_numeric($item['tax_percent'])) {
-                continue;
+            foreach ($payments as $index => $payment) {
+                if (! is_array($payment)) {
+                    continue;
+                }
+
+                $method = $payment['method'] ?? null;
+                if (is_string($method) && isset($methodAliases[$method])) {
+                    $payments[$index]['method'] = $methodAliases[$method];
+                }
             }
 
-            $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+            $this->merge(['payments' => $payments]);
         }
 
-        $this->merge(['items' => $items]);
+        if (is_array($items)) {
+            foreach ($items as $index => $item) {
+                if (! is_array($item) || ! array_key_exists('tax_percent', $item) || ! is_numeric($item['tax_percent'])) {
+                    continue;
+                }
+
+                $items[$index]['tax_percent'] = (int) round((float) $item['tax_percent']);
+            }
+
+            $this->merge(['items' => $items]);
+        }
     }
 
     public function authorize(): bool
@@ -34,7 +55,10 @@ class StoreSalesOrderRequest extends FormRequest
 
     public function rules(): array
     {
-        $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+        $validPaymentMethods = PaymentMethod::active()
+            ->forContext(PaymentMethod::CONTEXT_SALES)
+            ->pluck('code')
+            ->toArray();
 
         if ($validPaymentMethods === []) {
             $validPaymentMethods = ['cash', 'card', 'transfer', 'credit', 'store_credit'];
@@ -49,7 +73,7 @@ class StoreSalesOrderRequest extends FormRequest
             'status' => 'nullable|in:draft,pending,confirmed',
             'discount_amount' => 'nullable|numeric|min:0',
             'shipping_cost' => 'nullable|numeric|min:0',
-            'payment_method' => 'nullable|in:cash,card,transfer,credit,multiple',
+            'payment_method' => ['nullable', Rule::in(array_values(array_unique(array_merge($validPaymentMethods, ['multiple']))))],
             'payment_status' => 'nullable|in:pending,partial,paid,refunded',
             'initial_payment' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string|max:5000',
