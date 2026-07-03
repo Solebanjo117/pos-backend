@@ -22,6 +22,7 @@ class PurchaseOrder extends Model
         'payment_status',
         'order_date',
         'expected_date',
+        'due_date',
         'received_date',
         'subtotal',
         'tax_amount',
@@ -33,6 +34,7 @@ class PurchaseOrder extends Model
     protected $casts = [
         'order_date' => 'date',
         'expected_date' => 'date',
+        'due_date' => 'date',
         'received_date' => 'date',
         'subtotal' => 'decimal:2',
         'tax_amount' => 'decimal:2',

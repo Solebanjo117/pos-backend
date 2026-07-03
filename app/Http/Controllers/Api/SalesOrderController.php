@@ -106,7 +106,10 @@ class SalesOrderController extends Controller
         try {
             $this->normalizeTaxPercentPayload($request);
 
-            $validPaymentMethods = PaymentMethod::active()->pluck('code')->toArray();
+            $validPaymentMethods = PaymentMethod::active()
+                ->forContext(PaymentMethod::CONTEXT_SALES)
+                ->pluck('code')
+                ->toArray();
 
             if ($validPaymentMethods === []) {
                 $validPaymentMethods = ['cash', 'card', 'transfer', 'credit', 'store_credit'];
@@ -122,7 +125,7 @@ class SalesOrderController extends Controller
                 'source_quote_id' => 'nullable|exists:sales_quotes,id',
                 'discount_amount' => 'nullable|numeric|min:0',
                 'shipping_cost' => 'nullable|numeric|min:0',
-                'payment_method' => 'nullable|in:cash,card,transfer,credit,multiple',
+                'payment_method' => ['nullable', Rule::in(array_values(array_unique(array_merge($validPaymentMethods, ['multiple']))))],
                 'payment_status' => 'nullable|in:pending,partial,paid,refunded',
                 'initial_payment' => 'nullable|numeric|min:0',
                 'notes' => 'nullable|string|max:5000',
@@ -152,13 +155,10 @@ class SalesOrderController extends Controller
 
             $this->validateCustomerVehicle($validated);
 
-            // Map specific payment types to generic database types
+            // Preserve specific payment methods. Only translate legacy aliases
+            // that are not real configured method codes.
             $paymentTypeMap = [
-                'visa' => 'card',
-                'mastercard' => 'card',
-                'amex' => 'card',
                 'clave' => 'card',
-                'yappy' => 'transfer',
                 'transferencia' => 'transfer',
                 'notaCredito' => 'credit',
                 'creditoCliente' => 'credit',
@@ -169,8 +169,6 @@ class SalesOrderController extends Controller
                     $originalMethod = $payment['method'];
                     if (isset($paymentTypeMap[$originalMethod])) {
                         $payment['method'] = $paymentTypeMap[$originalMethod];
-                        // Preserve the specific type in notes for reports
-                        $payment['notes'] = ($payment['notes'] ?? 'Pago POS')." [{$originalMethod}]";
                     }
                 }
                 unset($payment); // break reference

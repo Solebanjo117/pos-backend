@@ -121,7 +121,7 @@ class SalesReturn extends Model
         // 2. Process refund based on refund_method
         $method = $this->refund_method ?? 'balance';
 
-        if ($method === 'balance' && $this->customer_id) {
+        if (in_array($method, ['balance', 'store_credit'], true) && $this->customer_id) {
             // Refund to customer balance (store credit)
             $customer = Customer::find($this->customer_id);
             if ($customer) {
@@ -142,7 +142,7 @@ class SalesReturn extends Model
                     'created_by' => auth()->id(),
                 ]);
             }
-        } elseif (in_array($method, ['cash', 'card', 'transfer'])) {
+        } elseif (in_array($method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true)) {
             // Refund via cash/card/transfer: record a negative payment on the original order
             if (class_exists(\App\Models\SalesOrderPayment::class)) {
                 \App\Models\SalesOrderPayment::create([
@@ -187,7 +187,7 @@ class SalesReturn extends Model
         if ($order) {
             // Recalculate payment_status based on current payments
             $amountPaid = (float) $order->payments()
-                ->whereNotIn('method', ['credit'])
+                ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
                 ->sum('amount');
 
             // Check if entire order was returned

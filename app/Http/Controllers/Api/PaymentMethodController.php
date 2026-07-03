@@ -9,55 +9,51 @@ use Illuminate\Http\Request;
 
 class PaymentMethodController extends Controller
 {
-    /**
-     * GET /api/v1/payment-methods
-     * List active payment methods (all authenticated users)
-     */
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
+        $validated = $request->validate([
+            'context' => 'nullable|string|in:'.implode(',', PaymentMethod::contextOptions()),
+            'real_money' => 'nullable|boolean',
+        ]);
+
         $methods = PaymentMethod::active()
+            ->forContext($validated['context'] ?? null)
+            ->when($request->boolean('real_money'), function ($query): void {
+                $query->whereNotIn('code', PaymentMethod::DEFERRED_CODES);
+            })
             ->ordered()
             ->get();
 
         return response()->json($methods);
     }
 
-    /**
-     * GET /api/v1/payment-methods/all
-     * List ALL payment methods including inactive (admin/manager only)
-     */
     public function all(): JsonResponse
     {
-        $methods = PaymentMethod::ordered()->get();
-
-        return response()->json($methods);
+        return response()->json(PaymentMethod::ordered()->get());
     }
 
-    /**
-     * POST /api/v1/payment-methods
-     * Create new payment method (admin/manager only)
-     */
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'name' => 'required|string|max:100',
             'requires_reference' => 'boolean',
             'requires_cash_count' => 'boolean',
+            'liquidity_bucket' => 'sometimes|string|in:cash,bank,credit,store_credit',
+            'available_in_sales' => 'sometimes|boolean',
+            'available_in_customer_receipts' => 'sometimes|boolean',
+            'available_in_supplier_payments' => 'sometimes|boolean',
+            'available_in_purchase_orders' => 'sometimes|boolean',
+            'available_in_returns' => 'sometimes|boolean',
         ]);
 
-        // Generate code from name
         $code = PaymentMethod::generateCode($validated['name']);
 
-        // Check uniqueness
         if (PaymentMethod::where('code', $code)->exists()) {
             return response()->json([
-                'message' => 'Ya existe un método de pago con ese código.',
-                'errors' => ['name' => ['Un método con nombre similar ya existe.']],
+                'message' => 'Ya existe un metodo de pago con ese codigo.',
+                'errors' => ['name' => ['Un metodo con nombre similar ya existe.']],
             ], 422);
         }
-
-        // Get max sort_order
-        $maxOrder = PaymentMethod::max('sort_order') ?? 0;
 
         $method = PaymentMethod::create([
             'name' => $validated['name'],
@@ -66,66 +62,67 @@ class PaymentMethodController extends Controller
             'is_system' => false,
             'requires_reference' => $validated['requires_reference'] ?? false,
             'requires_cash_count' => $validated['requires_cash_count'] ?? false,
-            'sort_order' => $maxOrder + 1,
+            'liquidity_bucket' => $validated['liquidity_bucket'] ?? PaymentMethod::LIQUIDITY_BANK,
+            'available_in_sales' => $validated['available_in_sales'] ?? true,
+            'available_in_customer_receipts' => $validated['available_in_customer_receipts'] ?? true,
+            'available_in_supplier_payments' => $validated['available_in_supplier_payments'] ?? true,
+            'available_in_purchase_orders' => $validated['available_in_purchase_orders'] ?? true,
+            'available_in_returns' => $validated['available_in_returns'] ?? true,
+            'sort_order' => (PaymentMethod::max('sort_order') ?? 0) + 1,
         ]);
 
         return response()->json($method, 201);
     }
 
-    /**
-     * PUT /api/v1/payment-methods/{id}
-     * Update payment method (admin/manager only)
-     */
     public function update(Request $request, PaymentMethod $paymentMethod): JsonResponse
     {
-        // System methods: cannot change is_active
-        if ($paymentMethod->is_system && $request->has('is_active')) {
-            return response()->json([
-                'message' => 'Los métodos de sistema no pueden ser desactivados.',
-            ], 403);
-        }
-
         $validated = $request->validate([
             'name' => 'sometimes|string|max:100',
             'is_active' => 'sometimes|boolean',
             'requires_reference' => 'sometimes|boolean',
             'requires_cash_count' => 'sometimes|boolean',
+            'liquidity_bucket' => 'sometimes|string|in:cash,bank,credit,store_credit',
+            'available_in_sales' => 'sometimes|boolean',
+            'available_in_customer_receipts' => 'sometimes|boolean',
+            'available_in_supplier_payments' => 'sometimes|boolean',
+            'available_in_purchase_orders' => 'sometimes|boolean',
+            'available_in_returns' => 'sometimes|boolean',
             'sort_order' => 'sometimes|integer|min:0',
         ]);
 
-        // System methods: only allow sort_order changes
         if ($paymentMethod->is_system) {
-            $validated = array_intersect_key($validated, ['sort_order' => true]);
+            $validated = array_intersect_key($validated, [
+                'is_active' => true,
+                'requires_reference' => true,
+                'requires_cash_count' => true,
+                'liquidity_bucket' => true,
+                'available_in_sales' => true,
+                'available_in_customer_receipts' => true,
+                'available_in_supplier_payments' => true,
+                'available_in_purchase_orders' => true,
+                'available_in_returns' => true,
+                'sort_order' => true,
+            ]);
         }
 
         $paymentMethod->update($validated);
 
-        return response()->json($paymentMethod);
+        return response()->json($paymentMethod->fresh());
     }
 
-    /**
-     * DELETE /api/v1/payment-methods/{id}
-     * Archive (soft delete) payment method (admin/manager only)
-     */
     public function destroy(PaymentMethod $paymentMethod): JsonResponse
     {
-        // System methods cannot be deleted
         if ($paymentMethod->is_system) {
             return response()->json([
-                'message' => 'Los métodos de sistema no pueden ser eliminados.',
+                'message' => 'Los metodos de sistema no pueden ser eliminados.',
             ], 403);
         }
 
-        // Soft delete = set is_active to false
         $paymentMethod->update(['is_active' => false]);
 
-        return response()->json(['message' => 'Método de pago archivado.']);
+        return response()->json(['message' => 'Metodo de pago archivado.']);
     }
 
-    /**
-     * POST /api/v1/payment-methods/reorder
-     * Reorder payment methods (admin/manager only)
-     */
     public function reorder(Request $request): JsonResponse
     {
         $validated = $request->validate([

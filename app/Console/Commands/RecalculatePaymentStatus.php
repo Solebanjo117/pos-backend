@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
 
 class RecalculatePaymentStatus extends Command
@@ -34,9 +35,9 @@ class RecalculatePaymentStatus extends Command
         foreach ($orders as $order) {
             $oldStatus = $order->payment_status;
 
-            // Calculate amount paid (excluding 'credit' which is not real money)
+            // Calculate amount paid excluding deferred methods that are not real money.
             $amountPaid = (float) $order->payments()
-                ->whereNotIn('method', ['credit'])
+                ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
                 ->sum('amount');
 
             // Determine correct payment_status

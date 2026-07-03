@@ -142,10 +142,14 @@ class SalesOrder extends Model
     public function getAmountPaidAttribute(): float
     {
         if ($this->relationLoaded('payments')) {
-            return (float) $this->payments->where('method', '!==', 'credit')->sum('amount');
+            return (float) $this->payments
+                ->reject(fn (SalesOrderPayment $payment): bool => PaymentMethod::isDeferredCode($payment->method))
+                ->sum('amount');
         }
 
-        return (float) $this->payments()->where('method', '!=', 'credit')->sum('amount');
+        return (float) $this->payments()
+            ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
+            ->sum('amount');
     }
 
     public function getAmountDueAttribute(): float
@@ -310,7 +314,7 @@ class SalesOrder extends Model
                 // Charge only the amount that remains unpaid (total - real payments)
                 // Note: 'credit' method is NOT real money received, only registers intent
                 $amountPaid = (float) $this->payments()
-                    ->whereNotIn('method', ['credit'])
+                    ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
                     ->sum('amount');
                 $amountToBill = max(0, (float) $this->total - $amountPaid);
 
@@ -340,7 +344,7 @@ class SalesOrder extends Model
 
         // Recalculate payment_status after confirming
         $amountPaid = (float) $this->payments()
-            ->whereNotIn('method', ['credit'])
+            ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
             ->sum('amount');
 
         if ($amountPaid <= 0) {
@@ -390,7 +394,9 @@ class SalesOrder extends Model
         ]);
 
         // Recalculate payment_status
-        $paid = (float) $this->payments()->where('method', '!=', 'credit')->sum('amount');
+        $paid = (float) $this->payments()
+            ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
+            ->sum('amount');
         if ($paid <= 0) {
             $this->payment_status = 'pending';
         } elseif ($paid >= (float) $this->total) {
@@ -421,7 +427,7 @@ class SalesOrder extends Model
                         'description' => "Saldo a favor aplicado a venta {$this->order_number}",
                         'transaction_date' => now(),
                     ]);
-                } elseif ($method !== 'credit' && ! $isCheckout) {
+                } elseif (! PaymentMethod::isDeferredCode($method) && ! $isCheckout) {
                     // Si es cobro normal (efectivo/tarjeta/transferencia), solo baja el balance general
                     // si NO es un pago efectuado el día del Checkout original
                     $customer->current_balance -= $amount;

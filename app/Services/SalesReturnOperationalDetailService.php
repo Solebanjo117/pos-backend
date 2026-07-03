@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AccountLedgerEntry;
 use App\Models\CustomerTransaction;
 use App\Models\InventoryMovement;
+use App\Models\PaymentMethod;
 use App\Models\SalesOrderPayment;
 use App\Models\SalesReturn;
 use App\Models\SalesReturnItem;
@@ -186,7 +187,7 @@ class SalesReturnOperationalDetailService
         return [
             'method' => $return->refund_method,
             'amount' => (float) $return->total_amount,
-            'requires_open_session' => in_array($return->refund_method, ['cash', 'card', 'transfer'], true),
+            'requires_open_session' => in_array($return->refund_method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true),
             'refund_payment' => $payment ? [
                 'id' => $payment->id,
                 'method' => $payment->method,
@@ -287,7 +288,7 @@ class SalesReturnOperationalDetailService
             'can_reject' => $isPending,
             'can_open_order' => $return->sales_order_id !== null,
             'can_open_customer' => $return->customer_id !== null,
-            'can_open_pos_session' => in_array($return->refund_method, ['cash', 'card', 'transfer'], true),
+            'can_open_pos_session' => in_array($return->refund_method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true),
         ];
 
         return [
@@ -295,7 +296,7 @@ class SalesReturnOperationalDetailService
             'can_reject' => $isPending,
             'can_open_order' => $return->sales_order_id !== null,
             'can_open_customer' => $return->customer_id !== null,
-            'can_open_pos_session' => in_array($return->refund_method, ['cash', 'card', 'transfer'], true),
+            'can_open_pos_session' => in_array($return->refund_method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true),
             'status' => $return->status,
             'status_label' => $return->status_label,
             'actions' => $actions,
