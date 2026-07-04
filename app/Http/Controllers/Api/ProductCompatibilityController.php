@@ -38,11 +38,12 @@ class ProductCompatibilityController extends Controller
     {
         $validated = $request->validate([
             'product_id' => 'required|exists:products,id',
-            'scope_type' => 'nullable|in:universal,make,model,chassis,engine',
+            'scope_type' => 'nullable|in:universal,make,model,chassis,engine,raw',
             'make_id' => 'nullable|exists:vehicle_makes,id',
             'model_id' => 'nullable|exists:vehicle_models,id',
             'engine_id' => 'nullable|exists:vehicle_engines,id',
             'chassis_id' => 'nullable|exists:vehicle_chassis,id',
+            'raw_vehicle_text' => 'nullable|string|max:1000',
             'notes' => 'nullable|string|max:500',
             'all_engines' => 'nullable|boolean',
             'all_chassis' => 'nullable|boolean',
@@ -54,6 +55,12 @@ class ProductCompatibilityController extends Controller
         if ($scopeType === null) {
             return response()->json([
                 'message' => 'Se requiere marca, modelo, chasis, motor o compatibilidad universal.',
+            ], 422);
+        }
+
+        if ($scopeType === 'raw' && trim((string) ($validated['raw_vehicle_text'] ?? '')) === '') {
+            return response()->json([
+                'message' => 'Se requiere texto de carro para compatibilidad raw.',
             ], 422);
         }
 
@@ -70,6 +77,9 @@ class ProductCompatibilityController extends Controller
             $query->where('scope_type', 'make')->where('make_id', $validated['make_id']);
         } elseif ($scopeType === 'universal') {
             $query->where('scope_type', 'universal');
+        } elseif ($scopeType === 'raw') {
+            $rawKey = mb_strtolower(trim(\Illuminate\Support\Str::ascii((string) preg_replace('/\s+/u', ' ', $validated['raw_vehicle_text'] ?? ''))));
+            $query->where('scope_type', 'raw')->where('raw_vehicle_key', $rawKey);
         }
 
         $existing = $query->first();
@@ -88,6 +98,10 @@ class ProductCompatibilityController extends Controller
             'model_id' => $validated['model_id'] ?? null,
             'engine_id' => $validated['engine_id'] ?? null,
             'chassis_id' => $validated['chassis_id'] ?? null,
+            'raw_vehicle_key' => isset($validated['raw_vehicle_text'])
+                ? mb_strtolower(trim(\Illuminate\Support\Str::ascii((string) preg_replace('/\s+/u', ' ', $validated['raw_vehicle_text']))))
+                : null,
+            'raw_vehicle_text' => $validated['raw_vehicle_text'] ?? null,
             'notes' => $validated['notes'] ?? null,
             'all_engines' => in_array($scopeType, ['universal', 'model'], true) ? (bool) ($validated['all_engines'] ?? false) : false,
             'all_chassis' => in_array($scopeType, ['universal', 'model'], true) ? (bool) ($validated['all_chassis'] ?? false) : false,
@@ -228,6 +242,7 @@ class ProductCompatibilityController extends Controller
             ! empty($validated['chassis_id']) => 'chassis',
             ! empty($validated['model_id']) => 'model',
             ! empty($validated['make_id']) => 'make',
+            ! empty($validated['raw_vehicle_text']) => 'raw',
             ! empty($validated['all_engines']) || ! empty($validated['all_chassis']) => 'universal',
             default => null,
         };

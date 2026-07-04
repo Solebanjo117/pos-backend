@@ -26,6 +26,8 @@ class SalesReturnOperationalDetailService
             'salesOrder.items',
             'customer:id,code,name,email,phone,current_balance',
             'user:id,name,email',
+            'approver:id,name,email',
+            'rejecter:id,name,email',
             'warehouse:id,code,name',
             'items.product:id,sku_base,name',
             'items.variant.brand:id,name',
@@ -70,12 +72,27 @@ class SalesReturnOperationalDetailService
             'refund_method' => $return->refund_method,
             'refund_notes' => $return->refund_notes,
             'total_amount' => (float) $return->total_amount,
+            'receivable_applied_amount' => (float) $return->receivable_applied_amount,
+            'money_refund_amount' => (float) $return->money_refund_amount,
+            'store_credit_amount' => (float) $return->store_credit_amount,
+            'approved_at' => $return->approved_at?->toISOString(),
+            'rejected_at' => $return->rejected_at?->toISOString(),
             'created_at' => $return->created_at?->toISOString(),
             'updated_at' => $return->updated_at?->toISOString(),
             'user' => $return->user ? [
                 'id' => $return->user->id,
                 'name' => $return->user->name,
                 'email' => $return->user->email,
+            ] : null,
+            'approver' => $return->approver ? [
+                'id' => $return->approver->id,
+                'name' => $return->approver->name,
+                'email' => $return->approver->email,
+            ] : null,
+            'rejecter' => $return->rejecter ? [
+                'id' => $return->rejecter->id,
+                'name' => $return->rejecter->name,
+                'email' => $return->rejecter->email,
             ] : null,
             'customer' => $return->customer ? [
                 'id' => $return->customer->id,
@@ -187,7 +204,10 @@ class SalesReturnOperationalDetailService
         return [
             'method' => $return->refund_method,
             'amount' => (float) $return->total_amount,
-            'requires_open_session' => in_array($return->refund_method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true),
+            'receivable_applied_amount' => (float) $return->receivable_applied_amount,
+            'money_refund_amount' => (float) $return->money_refund_amount,
+            'store_credit_amount' => (float) $return->store_credit_amount,
+            'requires_open_session' => $return->refund_method === PaymentMethod::CASH_CODE && (float) $return->money_refund_amount > 0,
             'refund_payment' => $payment ? [
                 'id' => $payment->id,
                 'method' => $payment->method,
@@ -349,7 +369,10 @@ class SalesReturnOperationalDetailService
             ->with('creator:id,name')
             ->where('sales_order_id', $return->sales_order_id)
             ->where('amount', '<', 0)
-            ->where('notes', 'like', "%{$return->return_number}%")
+            ->where(function ($query) use ($return): void {
+                $query->where('sales_return_id', $return->id)
+                    ->orWhere('notes', 'like', "%{$return->return_number}%");
+            })
             ->latest('paid_at')
             ->first();
     }
@@ -424,13 +447,14 @@ class SalesReturnOperationalDetailService
         ]);
 
         if ($return->status !== 'pending') {
+            $processor = $return->status === 'approved' ? $return->approver : $return->rejecter;
             $events->push([
                 'type' => $return->status,
                 'label' => $return->status === 'approved' ? 'Devolución aprobada' : 'Devolución rechazada',
-                'occurred_at' => $return->updated_at?->toISOString(),
+                'occurred_at' => ($return->approved_at ?? $return->rejected_at ?? $return->updated_at)?->toISOString(),
                 'source' => 'sales_return',
                 'href' => "/returns/{$return->id}",
-                'actor_name' => $return->user?->name,
+                'actor_name' => $processor?->name,
                 'amount' => (float) $return->total_amount,
             ]);
         }

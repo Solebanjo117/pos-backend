@@ -20,6 +20,14 @@ class ProductImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
             'precio',
             'cantidad',
             'descripcion',
+            'vendor',
+            'vendor_id',
+            'carro',
+            'make',
+            'model',
+            'chasis',
+            'engine',
+            'vin',
         ];
     }
 
@@ -36,6 +44,14 @@ class ProductImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
                 '6.42',
                 '10',
                 'Terminal importado desde Lightspeed',
+                'Distribuidora Nacional',
+                'VEN-001',
+                'TOYOTA YARIS P90 1NZFE NCP93L-BEMRK MTM',
+                'TOYOTA',
+                'YARIS',
+                'P90',
+                '1NZFE',
+                '',
             ],
             [
                 '10W30 cuarto mineral',
@@ -47,6 +63,14 @@ class ProductImportTemplate implements FromArray, ShouldAutoSize, WithHeadings
                 '7.25',
                 '4',
                 'Aceite importado desde Lightspeed',
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
             ],
         ];
     }

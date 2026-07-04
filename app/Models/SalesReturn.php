@@ -21,12 +21,24 @@ class SalesReturn extends Model
         'status',
         'reason',
         'total_amount',
+        'receivable_applied_amount',
+        'money_refund_amount',
+        'store_credit_amount',
         'refund_method',
         'refund_notes',
+        'approved_by',
+        'approved_at',
+        'rejected_by',
+        'rejected_at',
     ];
 
     protected $casts = [
         'total_amount' => 'decimal:2',
+        'receivable_applied_amount' => 'decimal:2',
+        'money_refund_amount' => 'decimal:2',
+        'store_credit_amount' => 'decimal:2',
+        'approved_at' => 'datetime',
+        'rejected_at' => 'datetime',
     ];
 
     protected $appends = ['status_label', 'formatted_total'];
@@ -51,6 +63,16 @@ class SalesReturn extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function approver(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    public function rejecter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'rejected_by');
     }
 
     public function items(): HasMany
@@ -92,10 +114,23 @@ class SalesReturn extends Model
     /**
      * Approve the return: restore inventory and process refund based on refund_method.
      */
-    public function approve(): bool
+    public function approve(?User $user = null, array $amounts = []): bool
     {
         if ($this->status !== 'pending') {
             return false;
+        }
+
+        if ($user !== null || $amounts !== []) {
+            $this->fill([
+                'status' => 'approved',
+                'receivable_applied_amount' => $amounts['receivable_applied_amount'] ?? $this->receivable_applied_amount ?? 0,
+                'money_refund_amount' => $amounts['money_refund_amount'] ?? $this->money_refund_amount ?? 0,
+                'store_credit_amount' => $amounts['store_credit_amount'] ?? $this->store_credit_amount ?? 0,
+                'approved_by' => $user?->id,
+                'approved_at' => now(),
+            ])->save();
+
+            return true;
         }
 
         // 1. Restore inventory for each returned item
@@ -220,14 +255,17 @@ class SalesReturn extends Model
     /**
      * Reject the return.
      */
-    public function reject(): bool
+    public function reject(?User $user = null): bool
     {
         if ($this->status !== 'pending') {
             return false;
         }
 
-        $this->status = 'rejected';
-        $this->save();
+        $this->fill([
+            'status' => 'rejected',
+            'rejected_by' => $user?->id,
+            'rejected_at' => now(),
+        ])->save();
 
         return true;
     }

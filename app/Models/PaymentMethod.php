@@ -49,6 +49,7 @@ class PaymentMethod extends Model
         'name',
         'code',
         'is_active',
+        'archived_at',
         'is_system',
         'requires_reference',
         'requires_cash_count',
@@ -63,6 +64,7 @@ class PaymentMethod extends Model
 
     protected $casts = [
         'is_active'           => 'boolean',
+        'archived_at'         => 'datetime',
         'is_system'           => 'boolean',
         'requires_reference'  => 'boolean',
         'requires_cash_count' => 'boolean',
@@ -74,12 +76,25 @@ class PaymentMethod extends Model
         'sort_order'          => 'integer',
     ];
 
+    protected $appends = [
+        'is_archived',
+    ];
+
     /**
      * Scope: Only active payment methods
      */
     public function scopeActive(Builder $query): Builder
     {
         return $query->where('is_active', true);
+    }
+
+    public function scopeNotArchived(Builder $query): Builder
+    {
+        if (! static::hasColumn('archived_at')) {
+            return $query;
+        }
+
+        return $query->whereNull('archived_at');
     }
 
     /**
@@ -138,18 +153,43 @@ class PaymentMethod extends Model
     public static function realMoneyCodes(?string $context = null): array
     {
         $defaultCodes = ['cash', 'card', 'transfer', 'other', 'yappy', 'ach', 'cheque'];
-        $activeCodes = static::active()
-            ->forContext($context)
-            ->pluck('code')
-            ->filter(fn (string $code): bool => ! static::isDeferredCode($code))
-            ->values()
-            ->all();
+        $activeCodes = static::validCodesForContext($context, true);
 
         if ($activeCodes === []) {
             return $defaultCodes;
         }
 
         return array_values(array_unique($activeCodes));
+    }
+
+    /**
+     * @param  array<int, string>  $exclude
+     * @return array<int, string>
+     */
+    public static function validCodesForContext(
+        ?string $context = null,
+        bool $realMoneyOnly = false,
+        array $exclude = [],
+    ): array
+    {
+        return static::active()
+            ->notArchived()
+            ->forContext($context)
+            ->when(
+                $realMoneyOnly,
+                fn (Builder $query) => $query->whereNotIn(
+                    'code',
+                    self::DEFERRED_CODES,
+                ),
+            )
+            ->when(
+                $exclude !== [],
+                fn (Builder $query) => $query->whereNotIn('code', $exclude),
+            )
+            ->pluck('code')
+            ->filter(fn (string $code): bool => trim($code) !== '')
+            ->values()
+            ->all();
     }
 
     public static function isDeferredCode(?string $code): bool
@@ -204,6 +244,11 @@ class PaymentMethod extends Model
         }
 
         return (bool) $this->{$column};
+    }
+
+    public function getIsArchivedAttribute(): bool
+    {
+        return $this->archived_at !== null;
     }
 
     private static function hasColumn(string $column): bool

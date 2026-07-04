@@ -466,6 +466,7 @@ class ProductProfileService
                 'model_id' => $compatibility->model_id,
                 'engine_id' => $compatibility->engine_id,
                 'chassis_id' => $compatibility->chassis_id,
+                'raw_vehicle_text' => $compatibility->raw_vehicle_text,
                 'make' => $compatibility->make?->name ?? $compatibility->model?->make?->name ?? $compatibility->engine?->model?->make?->name ?? $compatibility->chassis?->model?->make?->name,
                 'model' => $compatibility->model?->name ?? $compatibility->engine?->model?->name ?? $compatibility->chassis?->model?->name,
                 'year_range' => $compatibility->model?->year_range ?? $compatibility->engine?->model?->year_range ?? $compatibility->chassis?->model?->year_range,

@@ -106,10 +106,11 @@ class SalesOrderController extends Controller
         try {
             $this->normalizeTaxPercentPayload($request);
 
-            $validPaymentMethods = PaymentMethod::active()
-                ->forContext(PaymentMethod::CONTEXT_SALES)
-                ->pluck('code')
-                ->toArray();
+            $validPaymentMethods = PaymentMethod::validCodesForContext(
+                PaymentMethod::CONTEXT_SALES,
+                false,
+                ['supplier_credit'],
+            );
 
             if ($validPaymentMethods === []) {
                 $validPaymentMethods = ['cash', 'card', 'transfer', 'credit', 'store_credit'];
@@ -134,6 +135,7 @@ class SalesOrderController extends Controller
                 'payments' => 'nullable|array',
                 'payments.*.amount' => 'required_with:payments|numeric|min:0.01',
                 'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
+                'payments.*.reference_number' => 'nullable|string|max:100',
                 'payments.*.notes' => 'nullable|string',
                 'items' => 'nullable|array',
                 'items.*.product_id' => 'nullable|exists:products,id',
@@ -167,7 +169,10 @@ class SalesOrderController extends Controller
             if (! empty($validated['payments'])) {
                 foreach ($validated['payments'] as &$payment) {
                     $originalMethod = $payment['method'];
-                    if (isset($paymentTypeMap[$originalMethod])) {
+                    if (
+                        isset($paymentTypeMap[$originalMethod])
+                        && ! in_array($originalMethod, $validPaymentMethods, true)
+                    ) {
                         $payment['method'] = $paymentTypeMap[$originalMethod];
                     }
                 }
@@ -326,6 +331,16 @@ class SalesOrderController extends Controller
         try {
             $this->normalizeTaxPercentPayload($request);
 
+            $validPaymentMethods = PaymentMethod::validCodesForContext(
+                PaymentMethod::CONTEXT_SALES,
+                false,
+                ['supplier_credit'],
+            );
+
+            if ($validPaymentMethods === []) {
+                $validPaymentMethods = ['cash', 'card', 'transfer', 'credit', 'store_credit'];
+            }
+
             $validated = $request->validate([
                 'customer_id' => 'nullable|exists:customers,id',
                 'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
@@ -333,7 +348,7 @@ class SalesOrderController extends Controller
                 'date' => 'nullable|date',
                 'discount_amount' => 'nullable|numeric|min:0',
                 'shipping_cost' => 'nullable|numeric|min:0',
-                'payment_method' => 'nullable|in:cash,card,transfer,credit,multiple',
+                'payment_method' => ['nullable', Rule::in(array_values(array_unique(array_merge($validPaymentMethods, ['multiple']))))],
                 'notes' => 'nullable|string',
                 'internal_notes' => 'nullable|string',
                 'items' => 'nullable|array',

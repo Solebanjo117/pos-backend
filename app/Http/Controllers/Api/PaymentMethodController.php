@@ -17,7 +17,12 @@ class PaymentMethodController extends Controller
         ]);
 
         $methods = PaymentMethod::active()
+            ->notArchived()
             ->forContext($validated['context'] ?? null)
+            ->when(
+                ($validated['context'] ?? null) === PaymentMethod::CONTEXT_SALES,
+                fn ($query) => $query->where('code', '!=', 'supplier_credit'),
+            )
             ->when($request->boolean('real_money'), function ($query): void {
                 $query->whereNotIn('code', PaymentMethod::DEFERRED_CODES);
             })
@@ -29,13 +34,14 @@ class PaymentMethodController extends Controller
 
     public function all(): JsonResponse
     {
-        return response()->json(PaymentMethod::ordered()->get());
+        return response()->json(PaymentMethod::notArchived()->ordered()->get());
     }
 
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'name' => 'required|string|max:100',
+            'is_active' => 'sometimes|boolean',
             'requires_reference' => 'boolean',
             'requires_cash_count' => 'boolean',
             'liquidity_bucket' => 'sometimes|string|in:cash,bank,credit,store_credit',
@@ -47,10 +53,13 @@ class PaymentMethodController extends Controller
         ]);
 
         $code = PaymentMethod::generateCode($validated['name']);
+        $existing = PaymentMethod::where('code', $code)->first();
 
-        if (PaymentMethod::where('code', $code)->exists()) {
+        if ($existing) {
             return response()->json([
-                'message' => 'Ya existe un metodo de pago con ese codigo.',
+                'message' => $existing->is_archived
+                    ? 'Ya existe un metodo de pago archivado con ese codigo. No se creo un duplicado.'
+                    : 'Ya existe un metodo de pago con ese codigo.',
                 'errors' => ['name' => ['Un metodo con nombre similar ya existe.']],
             ], 422);
         }
@@ -58,16 +67,16 @@ class PaymentMethodController extends Controller
         $method = PaymentMethod::create([
             'name' => $validated['name'],
             'code' => $code,
-            'is_active' => true,
+            'is_active' => $validated['is_active'] ?? true,
             'is_system' => false,
             'requires_reference' => $validated['requires_reference'] ?? false,
             'requires_cash_count' => $validated['requires_cash_count'] ?? false,
             'liquidity_bucket' => $validated['liquidity_bucket'] ?? PaymentMethod::LIQUIDITY_BANK,
             'available_in_sales' => $validated['available_in_sales'] ?? true,
-            'available_in_customer_receipts' => $validated['available_in_customer_receipts'] ?? true,
-            'available_in_supplier_payments' => $validated['available_in_supplier_payments'] ?? true,
-            'available_in_purchase_orders' => $validated['available_in_purchase_orders'] ?? true,
-            'available_in_returns' => $validated['available_in_returns'] ?? true,
+            'available_in_customer_receipts' => $validated['available_in_customer_receipts'] ?? false,
+            'available_in_supplier_payments' => $validated['available_in_supplier_payments'] ?? false,
+            'available_in_purchase_orders' => $validated['available_in_purchase_orders'] ?? false,
+            'available_in_returns' => $validated['available_in_returns'] ?? false,
             'sort_order' => (PaymentMethod::max('sort_order') ?? 0) + 1,
         ]);
 
@@ -118,7 +127,10 @@ class PaymentMethodController extends Controller
             ], 403);
         }
 
-        $paymentMethod->update(['is_active' => false]);
+        $paymentMethod->update([
+            'is_active' => false,
+            'archived_at' => now(),
+        ]);
 
         return response()->json(['message' => 'Metodo de pago archivado.']);
     }

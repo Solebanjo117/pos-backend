@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSalesReturnRequest;
+use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
 use App\Models\SalesReturn;
 use App\Models\SalesReturnItem;
 use App\Services\SalesReturnOperationalDetailService;
 use App\Services\SalesReturnService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -42,6 +44,8 @@ class SalesReturnController extends Controller
             'customer:id,name,code',
             'warehouse:id,code,name',
             'user:id,name',
+            'approver:id,name',
+            'rejecter:id,name',
             'items.product',
         ])
             ->when(! empty($validated['status']), fn ($query) => $query->where('status', $validated['status']))
@@ -67,8 +71,11 @@ class SalesReturnController extends Controller
 
         $returns->getCollection()->transform(function (SalesReturn $return): array {
             $mapped = $return->toArray();
-            $mapped['processed_by_name'] = $return->user ? $return->user->name : 'Sistema';
-            $mapped['processed_at'] = $return->created_at?->toISOString();
+            $processor = $return->status === 'approved'
+                ? $return->approver
+                : ($return->status === 'rejected' ? $return->rejecter : $return->user);
+            $mapped['processed_by_name'] = $processor ? $processor->name : 'Sistema';
+            $mapped['processed_at'] = ($return->approved_at ?? $return->rejected_at ?? $return->created_at)?->toISOString();
 
             return $mapped;
         });
@@ -90,18 +97,31 @@ class SalesReturnController extends Controller
         $orders = SalesOrder::query()
             ->with([
                 'customer:id,name,code',
-                'items.product:id,sku_base,name',
-                'items.variant:id,sku',
+                'payments',
+                'returns',
+                'items.product:id,sku_base,alternate_code,system_id,name',
+                'items.variant:id,sku,upc,system_id',
                 'items.seller:id,name',
             ])
             ->whereIn('status', ['confirmed', 'completed'])
             ->when($search !== '', function ($query) use ($operator, $search): void {
                 $like = '%'.$search.'%';
                 $numeric = is_numeric($search) ? (float) $search : null;
+                $date = $this->parseCandidateSearchDate($search);
 
-                $query->where(function ($query) use ($operator, $like, $numeric): void {
+                $query->where(function ($query) use ($operator, $like, $numeric, $date): void {
                     $query->where('order_number', $operator, $like)
                         ->orWhereHas('customer', fn ($query) => $query->where('name', $operator, $like)->orWhere('code', $operator, $like))
+                        ->orWhereHas('items.product', fn ($query) => $query
+                            ->where('name', $operator, $like)
+                            ->orWhere('sku_base', $operator, $like)
+                            ->orWhere('alternate_code', $operator, $like)
+                            ->orWhere('system_id', $operator, $like))
+                        ->orWhereHas('items.variant', fn ($query) => $query
+                            ->where('sku', $operator, $like)
+                            ->orWhere('upc', $operator, $like)
+                            ->orWhere('system_id', $operator, $like))
+                        ->when($date !== null, fn ($query) => $query->orWhereDate('date', $date))
                         ->when($numeric !== null, fn ($query) => $query->orWhere('total', $numeric));
                 });
             })
@@ -128,14 +148,17 @@ class SalesReturnController extends Controller
         $order = SalesOrder::findOrFail($orderId);
 
         $returns = SalesReturn::where('sales_order_id', $order->id)
-            ->with(['items.product', 'items.variant', 'user', 'items.seller'])
+            ->with(['items.product', 'items.variant', 'user', 'approver', 'rejecter', 'items.seller'])
             ->orderBy('created_at', 'desc')
             ->get();
 
         $data = $returns->map(function (SalesReturn $return): array {
             $mapped = $return->toArray();
-            $mapped['processed_by_name'] = $return->user ? $return->user->name : 'Sistema';
-            $mapped['processed_at'] = $return->created_at->toISOString();
+            $processor = $return->status === 'approved'
+                ? $return->approver
+                : ($return->status === 'rejected' ? $return->rejecter : $return->user);
+            $mapped['processed_by_name'] = $processor ? $processor->name : 'Sistema';
+            $mapped['processed_at'] = ($return->approved_at ?? $return->rejected_at ?? $return->created_at)?->toISOString();
             $mapped['items'] = $return->items->map(function ($item): array {
                 $mappedItem = $item->toArray();
                 $mappedItem['seller_name'] = $item->seller ? $item->seller->name : null;
@@ -191,12 +214,12 @@ class SalesReturnController extends Controller
         }
     }
 
-    public function reject(int $id): JsonResponse
+    public function reject(Request $request, int $id): JsonResponse
     {
         $return = SalesReturn::findOrFail($id);
 
         try {
-            $return = $this->salesReturnService->reject($return);
+            $return = $this->salesReturnService->reject($return, $request->user());
         } catch (ValidationException $exception) {
             return $this->validationError($exception);
         }
@@ -219,6 +242,50 @@ class SalesReturnController extends Controller
 
     private function returnCandidateRow(SalesOrder $order): array
     {
+        $paid = (float) $order->payments
+            ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
+            ->sum('amount');
+        $totalReturned = (float) $order->returns
+            ->where('status', 'approved')
+            ->sum('total_amount');
+        $effectiveTotal = max(0, (float) $order->total - $totalReturned);
+        $amountDue = round(max(0, $effectiveTotal - $paid), 2);
+        $returnableAmount = 0.0;
+        $items = $order->items
+            ->filter(fn ($item): bool => ! (bool) $item->is_custom_line)
+            ->map(function ($item) use (&$returnableAmount): array {
+                $alreadyReserved = (int) SalesReturnItem::query()
+                    ->where('sales_order_item_id', $item->id)
+                    ->whereHas('salesReturn', function ($query): void {
+                        $query->whereIn('status', ['pending', 'approved']);
+                    })
+                    ->sum('quantity');
+                $returnable = max(0, (int) $item->quantity - $alreadyReserved);
+                $lineTotal = $item->quantity > 0
+                    ? round(((float) $item->total / (int) $item->quantity) * $returnable, 2)
+                    : 0;
+                $returnableAmount += $lineTotal;
+
+                return [
+                    'id' => $item->id,
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'product_name' => $item->product_name,
+                    'product_sku' => $item->variant?->sku ?? $item->product_sku,
+                    'quantity' => $returnable,
+                    'sold_quantity' => (int) $item->quantity,
+                    'already_returned_quantity' => $alreadyReserved,
+                    'unit_price' => (float) $item->unit_price,
+                    'discount_percent' => (float) $item->discount_percent,
+                    'tax_percent' => (int) ($item->tax_percent ?? 0),
+                    'total' => $lineTotal,
+                    'seller_name' => $item->seller?->name,
+                ];
+            })
+            ->filter(fn (array $item): bool => $item['quantity'] > 0)
+            ->values()
+            ->all();
+
         return [
             'id' => $order->id,
             'order_number' => $order->order_number,
@@ -226,44 +293,33 @@ class SalesReturnController extends Controller
             'payment_status' => $order->payment_status,
             'date' => $order->date?->toDateString(),
             'total' => (float) $order->total,
+            'total_paid' => round($paid, 2),
+            'total_returned' => round($totalReturned, 2),
+            'amount_due' => $amountDue,
+            'returnable_amount' => round($returnableAmount, 2),
+            'recommended_refund_method' => $amountDue > 0 ? SalesReturnService::METHOD_RECEIVABLE : 'refund',
             'has_customer' => $order->customer_id !== null,
             'customer' => $order->customer ? [
                 'id' => $order->customer->id,
                 'name' => $order->customer->name,
                 'code' => $order->customer->code,
             ] : null,
-            'items' => $order->items
-                ->filter(fn ($item): bool => ! (bool) $item->is_custom_line)
-                ->map(function ($item): array {
-                    $alreadyReserved = (int) SalesReturnItem::query()
-                        ->where('sales_order_item_id', $item->id)
-                        ->whereHas('salesReturn', function ($query): void {
-                            $query->whereIn('status', ['pending', 'approved']);
-                        })
-                        ->sum('quantity');
-                    $returnable = max(0, (int) $item->quantity - $alreadyReserved);
-
-                    return [
-                        'id' => $item->id,
-                        'product_id' => $item->product_id,
-                        'variant_id' => $item->variant_id,
-                        'product_name' => $item->product_name,
-                        'product_sku' => $item->variant?->sku ?? $item->product_sku,
-                        'quantity' => $returnable,
-                        'sold_quantity' => (int) $item->quantity,
-                        'already_returned_quantity' => $alreadyReserved,
-                        'unit_price' => (float) $item->unit_price,
-                        'discount_percent' => (float) $item->discount_percent,
-                        'tax_percent' => (int) ($item->tax_percent ?? 0),
-                        'total' => $item->quantity > 0
-                            ? round(((float) $item->total / (int) $item->quantity) * $returnable, 2)
-                            : 0,
-                        'seller_name' => $item->seller?->name,
-                    ];
-                })
-                ->filter(fn (array $item): bool => $item['quantity'] > 0)
-                ->values()
-                ->all(),
+            'items' => $items,
         ];
+    }
+
+    private function parseCandidateSearchDate(string $search): ?string
+    {
+        $search = trim($search);
+
+        if (! preg_match('/^(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})$/', $search)) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($search)->toDateString();
+        } catch (\Throwable) {
+            return null;
+        }
     }
 }

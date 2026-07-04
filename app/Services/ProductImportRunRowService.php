@@ -381,6 +381,58 @@ class ProductImportRunRowService
     /**
      * @return array<int, array<string, mixed>>
      */
+    public function claimAllImportableRows(ImportRun $importRun): array
+    {
+        return DB::transaction(function () use ($importRun): array {
+            $staleBefore = now()->subMinutes(self::PROCESSING_LEASE_MINUTES);
+            $rows = $importRun->rows()
+                ->where('status', 'valid')
+                ->select(['id', 'row_number', 'data', 'source_data', 'execution_status', 'updated_at'])
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            if ($rows->isEmpty()) {
+                return [];
+            }
+
+            $alreadyExecuted = $rows->contains(fn (ImportRunRow $row): bool => in_array($row->execution_status, ['success', 'failed'], true));
+            if ($alreadyExecuted) {
+                return [];
+            }
+
+            $activeProcessing = $rows->contains(
+                fn (ImportRunRow $row): bool => $row->execution_status === 'processing'
+                    && $row->updated_at !== null
+                    && $row->updated_at->greaterThanOrEqualTo($staleBefore)
+            );
+            if ($activeProcessing) {
+                return [];
+            }
+
+            ImportRunRow::query()
+                ->whereKey($rows->pluck('id')->all())
+                ->update([
+                    'execution_status' => 'processing',
+                    'updated_at' => now(),
+                ]);
+
+            return $rows
+                ->map(fn (ImportRunRow $row): array => array_merge(
+                    $this->legacyHiddenDataFromSource($row->source_data ?? [], $importRun->mapping ?? []),
+                    $row->data ?? [],
+                    [
+                        '__row' => $row->row_number,
+                        '__source_data' => $row->source_data ?? [],
+                    ]
+                ))
+                ->all();
+        });
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
     public function nextPendingImportableRows(ImportRun $importRun, int $chunkSize): array
     {
         return $importRun->rows()
@@ -661,6 +713,57 @@ class ProductImportRunRowService
                 'execution_error' => null,
                 'errors' => json_encode([], JSON_UNESCAPED_UNICODE),
                 'conflicts' => json_encode([], JSON_UNESCAPED_UNICODE),
+            ]);
+
+        if ($errorsByRow->isEmpty()) {
+            return;
+        }
+
+        $importRun->rows()
+            ->whereIn('row_number', $errorsByRow->keys())
+            ->select(['id', 'row_number', 'change_preview'])
+            ->orderBy('id')
+            ->chunkById(500, function (Collection $rows) use ($errorsByRow): void {
+                foreach ($rows as $row) {
+                    $error = $errorsByRow->get($row->row_number);
+                    $row->update([
+                        'status' => 'error',
+                        'execution_status' => 'failed',
+                        'execution_error' => $error['error'],
+                        'errors' => [$error['error']],
+                        'conflicts' => $error['conflicts'] ?? [],
+                        'change_preview' => $error['change_preview'] ?? $row->change_preview ?? [],
+                    ]);
+                }
+            });
+    }
+
+    /**
+     * @param  array<int, int>  $rowNumbers
+     */
+    public function synchronizeAtomicExecutionResultsForRows(ImportRun $importRun, ProductImport $import, array $rowNumbers): void
+    {
+        if ($rowNumbers === []) {
+            return;
+        }
+
+        if ($import->errorCount <= 0) {
+            $this->synchronizeExecutionResultsForRows($importRun, $import, $rowNumbers);
+
+            return;
+        }
+
+        $errorsByRow = collect($import->errors)
+            ->whereIn('row', $rowNumbers)
+            ->keyBy('row');
+
+        $importRun->rows()
+            ->whereIn('row_number', $rowNumbers)
+            ->where('status', 'valid')
+            ->update([
+                'execution_status' => null,
+                'executed_at' => null,
+                'execution_error' => null,
             ]);
 
         if ($errorsByRow->isEmpty()) {

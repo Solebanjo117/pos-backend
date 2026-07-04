@@ -7,10 +7,12 @@ use App\Models\FinancialAdjustment;
 use App\Models\FinancialDailySnapshot;
 use App\Models\InventoryLot;
 use App\Models\OperationalExpense;
+use App\Models\PaymentMethod;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesReturn;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -22,8 +24,6 @@ class FinancialSnapshotService
     private const PURCHASE_EXCLUDED_STATUSES = ['cancelled', 'draft'];
 
     private const NON_CASH_METHODS = ['credit', 'store_credit', 'supplier_credit'];
-
-    private const CASH_METHOD = 'cash';
 
     private const CURRENT_VERSION = 3;
 
@@ -277,6 +277,7 @@ class FinancialSnapshotService
 
         foreach ([
             $this->salesOriginFlows($from, $to, $warehouseId),
+            $this->salesReturnFlows($from, $to, $warehouseId),
             $this->purchaseOriginFlows($from, $to, $warehouseId),
             $this->expenseFlows($from, $to, $warehouseId),
             $this->customerPaymentFlows($from, $to, $warehouseId),
@@ -317,10 +318,12 @@ class FinancialSnapshotService
             $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $scopedTotal);
             $sameDayCashPayments = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
+                    && (float) $payment->amount > 0
                     && $payment->paid_at?->toDateString() === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $sameDayBankPayments = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
+                    && (float) $payment->amount > 0
                     && $payment->paid_at?->toDateString() === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $creditMarkers = $order->payments
@@ -344,6 +347,61 @@ class FinancialSnapshotService
             $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] + $cogsCredit);
             $flows['cogs_bank_sales'] = $this->money($flows['cogs_bank_sales'] + $cogsBank);
             $flows['cogs_cash_sales'] = $this->money($flows['cogs_cash_sales'] + max(0, $cogs - $cogsCredit - $cogsBank));
+        }
+
+        return $flows;
+    }
+
+    private function salesReturnFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
+    {
+        $flows = $this->emptyFlows();
+        $returns = SalesReturn::query()
+            ->with(['items.salesOrderItem', 'salesOrder.items'])
+            ->where('status', 'approved')
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->where(function (Builder $query) use ($from, $to): void {
+                $query->where(function (Builder $approved) use ($from, $to): void {
+                    $approved->whereNotNull('approved_at')
+                        ->whereDate('approved_at', '<=', $to->toDateString())
+                        ->when($from, fn (Builder $scope) => $scope->whereDate('approved_at', '>=', $from->toDateString()));
+                })->orWhere(function (Builder $legacy) use ($from, $to): void {
+                    $legacy->whereNull('approved_at')
+                        ->whereDate('updated_at', '<=', $to->toDateString())
+                        ->when($from, fn (Builder $scope) => $scope->whereDate('updated_at', '>=', $from->toDateString()));
+                });
+            })
+            ->get();
+
+        foreach ($returns as $return) {
+            $total = $this->money($return->total_amount);
+            if ($total <= 0) {
+                continue;
+            }
+
+            $cogs = $this->money($return->items->sum(fn ($item): float => (float) ($item->salesOrderItem?->unit_cost ?? 0) * (int) $item->quantity));
+            $split = $this->returnSplitAmounts($return);
+            $moneyBucket = $this->paymentBucket($return->refund_method);
+            $moneyAmount = $split['money'];
+            $receivableAmount = $split['receivable'];
+            $storeCreditAmount = $split['store_credit'];
+
+            if ($moneyAmount > 0 && $moneyBucket === 'cash') {
+                $flows['cash_sales'] = $this->money($flows['cash_sales'] - $moneyAmount);
+                $flows['cogs_cash_sales'] = $this->money($flows['cogs_cash_sales'] - ($cogs * ($moneyAmount / $total)));
+            } elseif ($moneyAmount > 0 && $moneyBucket === 'bank') {
+                $flows['bank_sales'] = $this->money($flows['bank_sales'] - $moneyAmount);
+                $flows['cogs_bank_sales'] = $this->money($flows['cogs_bank_sales'] - ($cogs * ($moneyAmount / $total)));
+            }
+
+            if ($receivableAmount > 0) {
+                $flows['credit_sales'] = $this->money($flows['credit_sales'] - $receivableAmount);
+                $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] - ($cogs * ($receivableAmount / $total)));
+            }
+
+            if ($storeCreditAmount > 0) {
+                $flows['sales_adjustments'] = $this->money($flows['sales_adjustments'] - $storeCreditAmount);
+                $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] - ($cogs * ($storeCreditAmount / $total)));
+            }
         }
 
         return $flows;
@@ -420,6 +478,7 @@ class FinancialSnapshotService
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
             ->whereNotIn('method', self::NON_CASH_METHODS)
+            ->where('amount', '>', 0)
             ->get();
 
         foreach ($payments as $payment) {
@@ -792,11 +851,32 @@ class FinancialSnapshotService
 
     private function paymentBucket(?string $method): ?string
     {
-        if ($method === null || in_array($method, self::NON_CASH_METHODS, true)) {
-            return null;
+        return PaymentMethod::liquidityBucket($method);
+    }
+
+    /**
+     * @return array{receivable: float, money: float, store_credit: float}
+     */
+    private function returnSplitAmounts(SalesReturn $return): array
+    {
+        $receivable = $this->money($return->receivable_applied_amount ?? 0);
+        $money = $this->money($return->money_refund_amount ?? 0);
+        $storeCredit = $this->money($return->store_credit_amount ?? 0);
+
+        if (($receivable + $money + $storeCredit) <= 0) {
+            $total = $this->money($return->total_amount);
+            if (in_array($return->refund_method, ['balance', 'store_credit', 'receivable'], true)) {
+                $storeCredit = $total;
+            } elseif ($this->paymentBucket($return->refund_method) !== null) {
+                $money = $total;
+            }
         }
 
-        return $method === self::CASH_METHOD ? 'cash' : 'bank';
+        return [
+            'receivable' => $receivable,
+            'money' => $money,
+            'store_credit' => $storeCredit,
+        ];
     }
 
     private function snapshotIsFresh(FinancialDailySnapshot $snapshot, Carbon $day, ?int $warehouseId): bool
@@ -824,6 +904,15 @@ class FinancialSnapshotService
             $this->latestTimestamp(SalesOrderPayment::query()
                 ->whereDate('paid_at', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->whereHas('salesOrder.items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))),
+            $this->latestTimestamp(SalesReturn::query()
+                ->where('status', 'approved')
+                ->where(function (Builder $query) use ($date): void {
+                    $query->whereDate('approved_at', $date)
+                        ->orWhere(function (Builder $legacy) use ($date): void {
+                            $legacy->whereNull('approved_at')->whereDate('updated_at', $date);
+                        });
+                })
+                ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))),
             $this->latestTimestamp(PurchaseOrder::query()
                 ->whereDate('order_date', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))),

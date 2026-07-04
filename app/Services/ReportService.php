@@ -17,6 +17,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesReturn;
 use App\Models\Warehouse;
 use Carbon\Carbon;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -1061,6 +1062,7 @@ class ReportService
         $paymentsQuery = \App\Models\SalesOrderPayment::with('salesOrder.items')
             ->whereBetween('paid_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
             ->whereNotIn('method', self::NON_MONEY_METHODS)
+            ->where('amount', '>', 0)
             ->whereHas('salesOrder', fn ($query) => $query->whereIn('status', ['confirmed', 'processing', 'completed']));
 
         if ($warehouseId) {
@@ -1093,14 +1095,25 @@ class ReportService
         }
 
         // Refunds: Approved SalesReturns in the date range
-        $refundsQuery = \App\Models\SalesReturn::where('status', 'approved')
-            ->whereBetween('created_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+        $refundsQuery = SalesReturn::query()
+            ->with('items.salesOrderItem')
+            ->where('status', 'approved')
+            ->where(function ($query) use ($filters): void {
+                $query->whereBetween('approved_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
+                    ->orWhere(function ($legacy) use ($filters): void {
+                        $legacy->whereNull('approved_at')
+                            ->whereBetween('updated_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+                    });
+            });
 
         if ($warehouseId) {
             $refundsQuery->where('warehouse_id', $warehouseId);
         }
 
-        $totalRefunds = (float) $refundsQuery->sum('total_amount');
+        $refunds = $refundsQuery->get();
+        $totalRefunds = (float) $refunds->sum('total_amount');
+        $refundCogs = (float) $refunds->sum(fn (SalesReturn $return): float => $this->salesReturnCogs($return));
+        $this->applyRefundsToFinancialTimeline($timeline, $refunds);
 
         $expenses = $this->financialOperationalExpenses($filters);
         $totalOperationalExpenses = (float) $expenses['total'];
@@ -1127,15 +1140,18 @@ class ReportService
             $dayData['gross_profit'] = $dayData['revenue'] - $dayData['cogs'];
             $dayData['profit'] = $dayData['gross_profit'] - $dayData['operational_expenses'];
         }
+        unset($dayData);
+        ksort($timeline);
 
-        $grossProfit = $totalRevenue - $totalCogs - $totalRefunds;
+        $netCogs = $totalCogs - $refundCogs;
+        $grossProfit = $totalRevenue - $netCogs - $totalRefunds;
         $netProfit = $grossProfit - $totalOperationalExpenses;
         $margin = $totalRevenue > 0 ? ($netProfit / $totalRevenue) * 100 : 0;
 
         return [
             'summary' => [
                 'total_revenue' => round($totalRevenue, 2),
-                'total_cogs' => round($totalCogs, 2),
+                'total_cogs' => round($netCogs, 2),
                 'total_refunds' => round($totalRefunds, 2),
                 'total_operational_expenses' => round($totalOperationalExpenses, 2),
                 'gross_profit' => round($grossProfit, 2),
@@ -1440,14 +1456,25 @@ class ReportService
             $timeline[$date]['orders_count'] += 1;
         }
 
-        $refundsQuery = \App\Models\SalesReturn::where('status', 'approved')
-            ->whereBetween('created_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+        $refundsQuery = SalesReturn::query()
+            ->with('items.salesOrderItem')
+            ->where('status', 'approved')
+            ->where(function ($query) use ($filters): void {
+                $query->whereBetween('approved_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
+                    ->orWhere(function ($legacy) use ($filters): void {
+                        $legacy->whereNull('approved_at')
+                            ->whereBetween('updated_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+                    });
+            });
 
         if ($warehouseId) {
             $refundsQuery->where('warehouse_id', $warehouseId);
         }
 
-        $totalRefunds = (float) $refundsQuery->sum('total_amount');
+        $refunds = $refundsQuery->get();
+        $totalRefunds = (float) $refunds->sum('total_amount');
+        $refundCogs = (float) $refunds->sum(fn (SalesReturn $return): float => $this->salesReturnCogs($return));
+        $this->applyRefundsToFinancialTimeline($timeline, $refunds);
         $expenses = $this->financialOperationalExpenses($filters);
         $totalOperationalExpenses = (float) $expenses['total'];
 
@@ -1468,15 +1495,18 @@ class ReportService
             $dayData['gross_profit'] = $dayData['revenue'] - $dayData['cogs'];
             $dayData['profit'] = $dayData['gross_profit'] - ($dayData['operational_expenses'] ?? 0);
         }
+        unset($dayData);
+        ksort($timeline);
 
-        $grossProfit = $totalRevenue - $totalCogs - $totalRefunds;
+        $netCogs = $totalCogs - $refundCogs;
+        $grossProfit = $totalRevenue - $netCogs - $totalRefunds;
         $netProfit = $grossProfit - $totalOperationalExpenses;
         $margin = $totalRevenue > 0 ? ($netProfit / $totalRevenue) * 100 : 0;
 
         return [
             'summary' => [
                 'total_revenue' => round($totalRevenue, 2),
-                'total_cogs' => round($totalCogs, 2),
+                'total_cogs' => round($netCogs, 2),
                 'total_refunds' => round($totalRefunds, 2),
                 'total_operational_expenses' => round($totalOperationalExpenses, 2),
                 'gross_profit' => round($grossProfit, 2),
@@ -1820,6 +1850,48 @@ class ReportService
             ->all();
     }
 
+    private function salesReturnCogs(SalesReturn $return): float
+    {
+        return round((float) $return->items->sum(
+            fn ($item): float => (float) ($item->salesOrderItem?->unit_cost ?? 0) * (int) $item->quantity
+        ), 2);
+    }
+
+    /**
+     * @param  array<string, array<string, mixed>>  $timeline
+     * @param  Collection<int, SalesReturn>  $refunds
+     */
+    private function applyRefundsToFinancialTimeline(array &$timeline, Collection $refunds): void
+    {
+        foreach ($refunds as $return) {
+            $date = $this->salesReturnImpactDate($return);
+            $timeline[$date] ??= $this->emptyFinancialTimelineDay($date);
+            $timeline[$date]['revenue'] -= (float) $return->total_amount;
+            $timeline[$date]['cogs'] -= $this->salesReturnCogs($return);
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function emptyFinancialTimelineDay(string $date): array
+    {
+        return [
+            'date' => $date,
+            'revenue' => 0,
+            'cogs' => 0,
+            'profit' => 0,
+            'orders_count' => 0,
+            'operational_expenses' => 0,
+        ];
+    }
+
+    private function salesReturnImpactDate(SalesReturn $return): string
+    {
+        return Carbon::parse($return->approved_at ?? $return->updated_at ?? $return->created_at ?? now())
+            ->format('Y-m-d');
+    }
+
     private function financialOperationalExpenses(array $filters): array
     {
         $warehouseId = $filters['warehouse_id'] ?? null;
@@ -2083,7 +2155,8 @@ class ReportService
         // 2. PAYMENTS received today (Cash-basis revenue)
         // =========================================
         $paymentsQuery = \App\Models\SalesOrderPayment::with('salesOrder')
-            ->whereBetween('paid_at', [$startOfDay, $endOfDay]);
+            ->whereBetween('paid_at', [$startOfDay, $endOfDay])
+            ->where('amount', '>', 0);
 
         if ($warehouseId || $userId) {
             $paymentsQuery->whereHas('salesOrder', function ($q) use ($warehouseId, $userId) {
@@ -2122,8 +2195,16 @@ class ReportService
         // =========================================
         // 4. REFUNDS: Approved SalesReturns for the day
         // =========================================
-        $refundsQuery = \App\Models\SalesReturn::where('status', 'approved')
-            ->whereBetween('created_at', [$startOfDay, $endOfDay]);
+        $refundsQuery = SalesReturn::query()
+            ->with('items.salesOrderItem')
+            ->where('status', 'approved')
+            ->where(function ($query) use ($startOfDay, $endOfDay): void {
+                $query->whereBetween('approved_at', [$startOfDay, $endOfDay])
+                    ->orWhere(function ($legacy) use ($startOfDay, $endOfDay): void {
+                        $legacy->whereNull('approved_at')
+                            ->whereBetween('updated_at', [$startOfDay, $endOfDay]);
+                    });
+            });
 
         if ($userId) {
             $refundsQuery->where('user_id', $userId);
@@ -2133,7 +2214,9 @@ class ReportService
             $refundsQuery->where('warehouse_id', $warehouseId);
         }
 
-        $totalRefunds = (float) $refundsQuery->sum('total_amount');
+        $refunds = $refundsQuery->get();
+        $totalRefunds = (float) $refunds->sum('total_amount');
+        $refundCogs = (float) $refunds->sum(fn (SalesReturn $return): float => $this->salesReturnCogs($return));
 
         // =========================================
         // 5. BUILD SUMMARY
@@ -2201,6 +2284,8 @@ class ReportService
             }
         }
 
+        $summary['cogs'] -= $refundCogs;
+
         // 5c. Calculate derived metrics
         $summary['net_sales'] = $summary['total_sales'] - $totalRefunds;
         $summary['gross_profit'] = $summary['net_sales'] - $summary['cogs'];
@@ -2210,9 +2295,15 @@ class ReportService
 
         // 5d. Cash drawer reconciliation
         $cashSales = $summary['by_payment_method']['cash'] ?? 0;
-        // For simplicity, assume all refunds could be in cash;
-        // if a refund_method field exists, this should be filtered.
-        $cashRefunds = $totalRefunds;
+        $cashRefunds = $refunds->sum(function (SalesReturn $return): float {
+            if ($return->refund_method !== 'cash') {
+                return 0.0;
+            }
+
+            $moneyRefund = (float) ($return->money_refund_amount ?? 0);
+
+            return $moneyRefund > 0 ? $moneyRefund : (float) $return->total_amount;
+        });
 
         // Cash movements (retiros / ingresos extra) from sessions of the day
         $sessionIds = $sessions->pluck('id');
@@ -2333,14 +2424,13 @@ class ReportService
 
         $rent = (float) ($byCategory['rent']['amount'] ?? 0);
         $salary = (float) ($byCategory['payroll']['amount'] ?? 0);
-        $electricity = (float) ($byCategory['electricity']['amount'] ?? 0);
-        $utilities = (float) ($byCategory['utilities']['amount'] ?? 0);
+        $utilities = (float) ($byCategory['utilities']['amount'] ?? 0)
+            + (float) ($byCategory['electricity']['amount'] ?? 0);
         $internet = (float) ($byCategory['software']['amount'] ?? 0);
 
         $mapped = [
             'rent' => ['label' => 'Rent', 'amount' => round($rent, 2)],
             'salary' => ['label' => 'Salary', 'amount' => round($salary, 2)],
-            'electricity' => ['label' => 'Electricity', 'amount' => round($electricity, 2)],
             'utilities' => ['label' => 'Utilities', 'amount' => round($utilities, 2)],
             'internet' => ['label' => 'Internet', 'amount' => round($internet, 2)],
         ];
@@ -2352,7 +2442,7 @@ class ReportService
         return [
             'items' => array_values($mapped),
             'other' => ['label' => 'Otros', 'amount' => $otherTotal],
-            'total' => round($rent + $salary + $electricity + $utilities + $internet + $otherTotal, 2),
+            'total' => round($rent + $salary + $utilities + $internet + $otherTotal, 2),
         ];
     }
 
@@ -2419,6 +2509,7 @@ class ReportService
     {
         $payments = SalesOrderPayment::query()
             ->whereBetween('paid_at', [$from, $to])
+            ->where('amount', '>', 0)
             ->when($warehouseId, fn ($q) => $q->whereHas('salesOrder.items', fn ($q) => $q->where('warehouse_id', $warehouseId)))
             ->get();
 

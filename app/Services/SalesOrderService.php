@@ -181,7 +181,8 @@ class SalesOrderService
                             amount: (float) $payment['amount'],
                             method: $payment['method'] ?? 'cash',
                             notes: $payment['notes'] ?? 'Pago POS',
-                            isCheckout: true
+                            isCheckout: true,
+                            referenceNumber: $payment['reference_number'] ?? null,
                         );
                     }
                 }

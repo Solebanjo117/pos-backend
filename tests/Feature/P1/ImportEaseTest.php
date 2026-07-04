@@ -35,18 +35,22 @@ it('publishes a compact product import template while keeping legacy fields hidd
         'precio',
         'cantidad',
         'descripcion',
+        'vendor',
+        'vendor_id',
+        'carro',
+        'make',
+        'model',
+        'chasis',
+        'engine',
+        'vin',
     ];
 
     $acceptedLegacyFields = [
         'warehouse',
         'categorias_extra',
         'atributos',
-        'make',
-        'model',
         'year',
         'code',
-        'engine',
-        'vin',
     ];
 
     expect((new ProductImportTemplate)->headings())->toBe($visibleHeaders)

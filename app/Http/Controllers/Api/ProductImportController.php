@@ -171,18 +171,21 @@ class ProductImportController extends Controller
     {
         $import = (new ProductImport($this->productService))
             ->forMode($request->input('mode', ImportRun::MODE_CREATE_UPDATE));
-        $import->execute($request->input('rows', []));
+        $import->executeAtomic($request->input('rows', []));
+        $hasErrors = $import->errorCount > 0;
 
         return response()->json([
-            'success' => true,
+            'success' => ! $hasErrors,
             'data' => [
                 'success_count' => $import->successCount,
                 'error_count' => $import->errorCount,
                 'results' => $import->results,
                 'errors' => $import->errors,
             ],
-            'message' => "Importados: {$import->successCount}, Errores: {$import->errorCount}",
-        ]);
+            'message' => $hasErrors
+                ? 'Archivo no importado: corrige los errores y vuelve a validar.'
+                : "Importados: {$import->successCount}, Errores: {$import->errorCount}",
+        ], $hasErrors ? 422 : 200);
     }
 
     public function validateRows(ValidateProductImportRowsRequest $request): JsonResponse
@@ -279,38 +282,10 @@ class ProductImportController extends Controller
             return $this->startImportFromValidatedRun($request);
         }
 
-        if (! $request->boolean('force_without_preview')) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Primero valide el archivo completo antes de importarlo.',
-            ], 422);
-        }
-
-        if ($request->input('force_confirmation') !== 'IMPORTAR SIN PREVIEW') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Debe confirmar con IMPORTAR SIN PREVIEW para importar sin validacion previa.',
-            ], 422);
-        }
-
-        if (! $request->hasFile('file')) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Debe seleccionar un archivo para importar sin preview.',
-            ], 422);
-        }
-
-        return $this->startFileRun(
-            $request,
-            ImportRun::TYPE_IMPORT,
-            $request->input('mode', ImportRun::MODE_CREATE_UPDATE),
-            null,
-            false,
-            [
-                'force_without_preview' => true,
-                'force_reason' => $request->input('force_reason'),
-            ]
-        );
+        return response()->json([
+            'success' => false,
+            'message' => 'Primero valide el archivo completo sin errores antes de importarlo.',
+        ], 422);
     }
 
     public function validateFile(PreviewImportRequest $request): JsonResponse
@@ -562,6 +537,13 @@ class ProductImportController extends Controller
         }
 
         $summary = $validationRun->summary ?? [];
+        if ((int) $validationRun->error_count > 0 || (int) ($summary['conflict_count'] ?? 0) > 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La validacion seleccionada tiene errores o conflictos. No se importo ninguna fila.',
+            ], 422);
+        }
+
         if (
             ($summary['rows_dirty'] ?? false) === true
             || (int) ($summary['rows_revision'] ?? 0) !== (int) ($summary['validated_rows_revision'] ?? 0)

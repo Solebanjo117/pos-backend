@@ -121,21 +121,17 @@ class ProcessProductImportRun implements ShouldQueue
                     'processed_rows' => 0,
                     'heartbeat_at' => now(),
                 ]);
-                $shouldContinue = true;
-                $rowService->eachImportableRowChunk($importRun, self::IMPORT_CHUNK_SIZE, function (array $chunk) use ($import, $afterChunk, $totalRows, &$shouldContinue): bool {
-                    if (! $shouldContinue) {
-                        return false;
-                    }
+                $rows = $rowService->claimAllImportableRows($importRun);
+                $rowNumbers = collect($rows)->pluck('__row')->map(fn ($row): int => (int) $row)->all();
+                $import->executeAtomic($rows);
+                $rowService->synchronizeAtomicExecutionResultsForRows($importRun, $import, $rowNumbers);
 
-                    $import->execute($chunk);
-                    if (! $afterChunk($import, $import->processedCount, $totalRows)) {
-                        $shouldContinue = false;
-                    }
+                if (! $afterChunk($import, $import->processedCount, $totalRows)) {
+                    return;
+                }
 
-                    return $shouldContinue;
-                });
-                if ($shouldContinue) {
-                    $rowService->synchronizeExecutionErrors($importRun, $import);
+                if ($import->errorCount > 0) {
+                    throw new \RuntimeException('Archivo no importado: corrige los errores y vuelve a validar antes de importar.');
                 }
             } elseif ($importRun->shouldProcessFailedRows()) {
                 $rows = collect($importRun->failed_rows)->map(fn (array $row): array => $row['data'] ?? $row)->values()->all();
@@ -145,11 +141,14 @@ class ProcessProductImportRun implements ShouldQueue
                     'processed_rows' => 0,
                     'heartbeat_at' => now(),
                 ]);
-                $import->execute($rows);
+                $import->executeAtomic($rows);
                 if ($shouldStop($import)) {
                     $this->markCancelled($importRun, $import->processedCount, $import);
 
                     return;
+                }
+                if ($import->errorCount > 0) {
+                    throw new \RuntimeException('Archivo no importado: corrige los errores y vuelve a validar antes de importar.');
                 }
             } else {
                 $path = Storage::disk('local')->path($importRun->stored_path);
@@ -164,7 +163,24 @@ class ProcessProductImportRun implements ShouldQueue
                 if ($isValidationRun) {
                     $import->validateFileInChunks($path, self::VALIDATION_CHUNK_SIZE, $afterChunk, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
                 } else {
-                    $import->importInChunks($path, self::IMPORT_CHUNK_SIZE, $afterChunk, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
+                    $rows = [];
+                    $offset = 0;
+
+                    do {
+                        $chunk = $import->fileRowsChunk($path, $offset, self::IMPORT_CHUNK_SIZE, $importRun->sheet_index, $importRun->sheet_name, $importRun->mapping ?? []);
+                        $rows = array_merge($rows, $chunk['rows']);
+                        $offset += count($chunk['rows']);
+                    } while (($chunk['has_more'] ?? false) === true && $chunk['rows'] !== []);
+
+                    $import->executeAtomic($rows);
+
+                    if (! $afterChunk($import, $import->processedCount, count($rows))) {
+                        return;
+                    }
+
+                    if ($import->errorCount > 0) {
+                        throw new \RuntimeException('Archivo no importado: corrige los errores y vuelve a validar antes de importar.');
+                    }
                 }
             }
 
