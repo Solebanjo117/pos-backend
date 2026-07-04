@@ -19,6 +19,8 @@ class ProductVehicleCompatibility extends Model
         'model_id',
         'engine_id',
         'chassis_id',
+        'raw_vehicle_key',
+        'raw_vehicle_text',
         'notes',
         'all_engines',
         'all_chassis',

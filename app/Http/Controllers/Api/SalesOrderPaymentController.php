@@ -38,6 +38,7 @@ class SalesOrderPaymentController extends Controller
         $validated = $request->validate([
             'amount' => 'required|numeric|min:0.01',
             'method' => ['required', Rule::in($validPaymentMethods)],
+            'reference_number' => 'nullable|string|max:100',
             'notes' => 'nullable|string|max:500',
             'paid_at' => 'nullable|date',
         ]);
@@ -53,6 +54,7 @@ class SalesOrderPaymentController extends Controller
             $this->accountLedgerService->recordCustomerReceipt($order->customer, [
                 'amount' => (float) $validated['amount'],
                 'method' => $validated['method'],
+                'reference_number' => $validated['reference_number'] ?? null,
                 'notes' => $validated['notes'] ?? null,
                 'paid_at' => $validated['paid_at'] ?? now(),
                 'applications' => [
@@ -69,6 +71,7 @@ class SalesOrderPaymentController extends Controller
                     method: $validated['method'],
                     notes: $validated['notes'] ?? null,
                     paidAt: $validated['paid_at'] ?? now(),
+                    referenceNumber: $validated['reference_number'] ?? null,
                 );
             });
         }

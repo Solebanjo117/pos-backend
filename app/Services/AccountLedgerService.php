@@ -143,6 +143,7 @@ class AccountLedgerService
                     method: $data['method'],
                     notes: $data['notes'] ?? "Recibo {$batch->batch_number}",
                     paidAt: $data['paid_at'] ?? now(),
+                    referenceNumber: $data['reference_number'] ?? $batch->batch_number,
                 );
 
                 $batch->applications()->create([

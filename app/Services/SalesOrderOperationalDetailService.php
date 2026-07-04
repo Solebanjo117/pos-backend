@@ -187,6 +187,7 @@ class SalesOrderOperationalDetailService
                 'amount' => (float) $payment->amount,
                 'is_refund' => (float) $payment->amount < 0,
                 'paid_at' => $payment->paid_at?->toISOString(),
+                'reference_number' => $payment->reference_number,
                 'notes' => $payment->notes,
                 'creator_name' => $payment->creator?->name,
             ])

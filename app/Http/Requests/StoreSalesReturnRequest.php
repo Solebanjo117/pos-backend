@@ -22,7 +22,7 @@ class StoreSalesReturnRequest extends FormRequest
             'reason' => ['nullable', 'string', 'max:500'],
             'refund_method' => ['required', 'string', Rule::in(array_values(array_unique(array_merge(
                 PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS),
-                ['balance', 'store_credit'],
+                ['balance', 'store_credit', 'receivable'],
             ))))],
             'refund_notes' => ['nullable', 'string', 'max:500'],
             'items' => ['required', 'array', 'min:1'],

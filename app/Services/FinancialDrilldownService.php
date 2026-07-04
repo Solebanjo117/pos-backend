@@ -6,6 +6,7 @@ use App\Models\CapitalMovement;
 use App\Models\FinancialAdjustment;
 use App\Models\InventoryLot;
 use App\Models\OperationalExpense;
+use App\Models\PaymentMethod;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
@@ -61,7 +62,7 @@ class FinancialDrilldownService
     private function sales(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = SalesOrder::query()
-            ->with(['customer', 'payments', 'items'])
+            ->with(['customer', 'payments', 'items', 'returns'])
             ->whereIn('status', self::SALES_STATUSES)
             ->whereDate('date', '>=', $from->toDateString())
             ->whereDate('date', '<=', $to->toDateString())
@@ -70,9 +71,11 @@ class FinancialDrilldownService
             ->orderByDesc('id')
             ->get();
 
-        $rows = $orders->map(function (SalesOrder $order) use ($warehouseId): array {
+        $rows = $orders->map(function (SalesOrder $order) use ($warehouseId, $to): array {
             $total = $this->salesOrderScopedTotal($order, $warehouseId);
             $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $total);
+            $returned = $this->approvedReturnAmountForOrder($order, $to, $warehouseId);
+            $effectiveTotal = $this->money(max(0, $total - $returned));
             $paid = $this->money($order->payments
                 ->whereNotIn('method', self::NON_MONEY_METHODS)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio));
@@ -84,10 +87,10 @@ class FinancialDrilldownService
                 'party' => $order->customer?->name ?? 'Cliente general',
                 'status' => $order->status_label ?? $order->status,
                 'method' => $order->payment_method,
-                'total' => $total,
+                'total' => $effectiveTotal,
                 'paid' => $paid,
-                'pending' => $this->money(max(0, $total - $paid)),
-                'amount' => $total,
+                'pending' => $this->money(max(0, $effectiveTotal - $paid)),
+                'amount' => $effectiveTotal,
             ];
         });
 
@@ -101,6 +104,7 @@ class FinancialDrilldownService
             ->whereDate('paid_at', '>=', $from->toDateString())
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->whereNotIn('method', self::NON_MONEY_METHODS)
+            ->where('amount', '>', 0)
             ->whereHas('salesOrder', fn (Builder $query) => $query->whereIn('status', self::SALES_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('salesOrder.items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))
             ->orderByDesc('paid_at')
@@ -118,7 +122,7 @@ class FinancialDrilldownService
                 'document' => $order?->order_number,
                 'party' => $order?->customer?->name ?? 'Cliente general',
                 'method' => $payment->formatted_method ?? $payment->method,
-                'reference' => $payment->notes,
+                'reference' => $payment->reference_number ?? $payment->notes,
                 'amount' => $this->money((float) $payment->amount * $ratio),
             ];
         });
@@ -254,7 +258,7 @@ class FinancialDrilldownService
     private function receivables(string $metric, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = SalesOrder::query()
-            ->with(['customer', 'payments', 'items'])
+            ->with(['customer', 'payments', 'items', 'returns'])
             ->whereIn('status', self::SALES_STATUSES)
             ->whereDate('date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))
@@ -265,19 +269,21 @@ class FinancialDrilldownService
         $rows = $orders->map(function (SalesOrder $order) use ($warehouseId, $to): array {
             $total = $this->salesOrderScopedTotal($order, $warehouseId);
             $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $total);
+            $returned = $this->approvedReturnAmountForOrder($order, $to, $warehouseId);
+            $effectiveTotal = $this->money(max(0, $total - $returned));
             $paid = $this->money($order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => ! in_array($payment->method, self::NON_MONEY_METHODS, true)
                     && $payment->paid_at !== null
                     && $payment->paid_at->toDateString() <= $to->toDateString())
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio));
-            $pending = $this->money(max(0, $total - $paid));
+            $pending = $this->money(max(0, $effectiveTotal - $paid));
 
             return [
                 'id' => $order->id,
                 'date' => $order->date?->toDateString(),
                 'document' => $order->order_number,
                 'party' => $order->customer?->name ?? 'Cliente general',
-                'total' => $total,
+                'total' => $effectiveTotal,
                 'paid' => $paid,
                 'pending' => $pending,
                 'amount' => $pending,
@@ -498,7 +504,7 @@ class FinancialDrilldownService
     private function liquiditySalesRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
     {
         return SalesOrderPayment::query()
-            ->with(['salesOrder.customer', 'salesOrder.items'])
+            ->with(['salesOrder.customer', 'salesOrder.items', 'salesReturn'])
             ->whereDate('paid_at', '>=', $from->toDateString())
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->whereNotIn('method', self::NON_MONEY_METHODS)
@@ -514,8 +520,10 @@ class FinancialDrilldownService
                 return [
                     'id' => 'sale-payment-'.$payment->id,
                     'date' => $payment->paid_at?->toDateString(),
-                    'source' => 'Pago recibido',
-                    'description' => $order?->order_number.' - '.($order?->customer?->name ?? 'Cliente general'),
+                    'source' => (float) $payment->amount < 0 ? 'Reembolso' : 'Pago recibido',
+                    'description' => $payment->salesReturn
+                        ? $payment->salesReturn->return_number.' - '.($order?->customer?->name ?? 'Cliente general')
+                        : $order?->order_number.' - '.($order?->customer?->name ?? 'Cliente general'),
                     'method' => $payment->formatted_method ?? $payment->method,
                     'amount' => $this->money((float) $payment->amount * $ratio),
                 ];
@@ -694,13 +702,28 @@ class FinancialDrilldownService
         return min(1, max(0, $scopedTotal / max(0.01, (float) $order->total)));
     }
 
+    private function approvedReturnAmountForOrder(SalesOrder $order, Carbon $to, ?int $warehouseId): float
+    {
+        return $this->money($order->returns
+            ->filter(function ($return) use ($to, $warehouseId): bool {
+                if ($return->status !== 'approved') {
+                    return false;
+                }
+
+                if ($warehouseId && (int) $return->warehouse_id !== (int) $warehouseId) {
+                    return false;
+                }
+
+                $date = $return->approved_at ?? $return->updated_at ?? $return->created_at;
+
+                return $date !== null && Carbon::parse($date)->lte($to->copy()->endOfDay());
+            })
+            ->sum('total_amount'));
+    }
+
     private function paymentBucket(?string $method): ?string
     {
-        if ($method === null || in_array($method, self::NON_MONEY_METHODS, true)) {
-            return null;
-        }
-
-        return $method === 'cash' ? 'cash' : 'bank';
+        return PaymentMethod::liquidityBucket($method);
     }
 
     private function money(mixed $value): float

@@ -14,6 +14,11 @@ class StoreSalesOrderRequest extends FormRequest
         $payments = $this->input('payments');
 
         if (is_array($payments)) {
+            $configuredSalesMethods = PaymentMethod::validCodesForContext(
+                PaymentMethod::CONTEXT_SALES,
+                false,
+                ['supplier_credit'],
+            );
             $methodAliases = [
                 'clave' => 'card',
                 'transferencia' => 'transfer',
@@ -27,7 +32,11 @@ class StoreSalesOrderRequest extends FormRequest
                 }
 
                 $method = $payment['method'] ?? null;
-                if (is_string($method) && isset($methodAliases[$method])) {
+                if (
+                    is_string($method)
+                    && isset($methodAliases[$method])
+                    && ! in_array($method, $configuredSalesMethods, true)
+                ) {
                     $payments[$index]['method'] = $methodAliases[$method];
                 }
             }
@@ -55,10 +64,11 @@ class StoreSalesOrderRequest extends FormRequest
 
     public function rules(): array
     {
-        $validPaymentMethods = PaymentMethod::active()
-            ->forContext(PaymentMethod::CONTEXT_SALES)
-            ->pluck('code')
-            ->toArray();
+        $validPaymentMethods = PaymentMethod::validCodesForContext(
+            PaymentMethod::CONTEXT_SALES,
+            false,
+            ['supplier_credit'],
+        );
 
         if ($validPaymentMethods === []) {
             $validPaymentMethods = ['cash', 'card', 'transfer', 'credit', 'store_credit'];
@@ -81,6 +91,7 @@ class StoreSalesOrderRequest extends FormRequest
             'payments' => 'nullable|array',
             'payments.*.amount' => 'required_with:payments|numeric|min:0.01',
             'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
+            'payments.*.reference_number' => 'nullable|string|max:100',
             'payments.*.notes' => 'nullable|string',
             'items' => 'nullable|array',
             'items.*.product_id' => 'required|exists:products,id',

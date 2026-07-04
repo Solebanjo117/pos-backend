@@ -9,10 +9,14 @@ use App\Models\ImportRun;
 use App\Models\ImportRunRecord;
 use App\Models\Product;
 use App\Models\ProductAttribute;
+use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
+use App\Models\ProductVehicleCompatibility;
 use App\Models\Warehouse;
 use App\Services\BrandResolver;
 use App\Services\ProductImportBulkWriter;
+use App\Services\ProductImportVehicleResolver;
+use App\Services\ProductImportVendorResolver;
 use App\Services\ProductService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\UploadedFile;
@@ -91,6 +95,10 @@ class ProductImport extends BaseImport
 
     private readonly BrandResolver $brandResolver;
 
+    private readonly ProductImportVendorResolver $vendorResolver;
+
+    private readonly ProductImportVehicleResolver $vehicleResolver;
+
     private ?int $cachedDefaultTaxRate = null;
 
     private ?bool $hasProductWriteListeners = null;
@@ -101,10 +109,14 @@ class ProductImport extends BaseImport
         private readonly ProductService $productService,
         ?ProductImportBulkWriter $bulkWriter = null,
         ?BrandResolver $brandResolver = null,
+        ?ProductImportVendorResolver $vendorResolver = null,
+        ?ProductImportVehicleResolver $vehicleResolver = null,
     )
     {
         $this->bulkWriter = $bulkWriter ?? app(ProductImportBulkWriter::class);
         $this->brandResolver = $brandResolver ?? app(BrandResolver::class);
+        $this->vendorResolver = $vendorResolver ?? app(ProductImportVendorResolver::class);
+        $this->vehicleResolver = $vehicleResolver ?? app(ProductImportVehicleResolver::class);
     }
 
     public function forMode(string $mode): self
@@ -133,6 +145,14 @@ class ProductImport extends BaseImport
             ['key' => 'precio', 'label' => 'Precio', 'type' => 'number'],
             ['key' => 'cantidad', 'label' => 'Cantidad', 'type' => 'number'],
             ['key' => 'descripcion', 'label' => 'Descripcion', 'type' => 'text'],
+            ['key' => 'vendor', 'label' => 'Vendor', 'type' => 'text'],
+            ['key' => 'vendor_id', 'label' => 'Vendor ID', 'type' => 'text'],
+            ['key' => 'carro', 'label' => 'Carro', 'type' => 'text'],
+            ['key' => 'make', 'label' => 'MAKE', 'type' => 'text'],
+            ['key' => 'model', 'label' => 'MODEL', 'type' => 'text'],
+            ['key' => 'chasis', 'label' => 'CHASIS', 'type' => 'text'],
+            ['key' => 'engine', 'label' => 'ENGINE', 'type' => 'text'],
+            ['key' => 'vin', 'label' => 'VIN', 'type' => 'text'],
         ];
     }
 
@@ -148,6 +168,14 @@ class ProductImport extends BaseImport
             'precio' => '7.99',
             'cantidad' => '12',
             'descripcion' => 'Bujia para motor gasolina',
+            'vendor' => 'Distribuidora Nacional',
+            'vendor_id' => 'VEN-001',
+            'carro' => 'TOYOTA YARIS P90 1NZFE NCP93L-BEMRK MTM',
+            'make' => 'TOYOTA',
+            'model' => 'YARIS',
+            'chasis' => 'P90',
+            'engine' => '1NZFE',
+            'vin' => '',
         ];
     }
 
@@ -315,6 +343,14 @@ class ProductImport extends BaseImport
             'costo', 'cost', 'unit_cost', 'default_cost', 'avg_cost' => 'costo',
             'precio', 'price', 'retail_price', 'sale_price', 'unit_price' => 'precio',
             'cantidad', 'quantity', 'qty', 'stock', 'on_hand' => 'cantidad',
+            'vendor', 'proveedor', 'supplier' => 'vendor',
+            'vendor_id', 'vendorid', 'vendor_code', 'supplier_id', 'supplier_code', 'id_proveedor', 'proveedor_id' => 'vendor_id',
+            'carro', 'vehiculo', 'vehicle', 'vehicle_text', 'auto' => 'carro',
+            'make', 'marca_carro', 'vehicle_make' => 'make',
+            'model', 'modelo', 'vehicle_model' => 'model',
+            'chasis', 'chassis', 'chassis_code', 'vehicle_chassis' => 'chasis',
+            'engine', 'motor', 'engine_code', 'vehicle_engine' => 'engine',
+            'vin', 'numero_vin', 'vin_number' => 'vin',
             'imagen_url', 'url_imagen', 'image_url', 'image', 'imagen', 'foto', 'photo' => 'imagen_url',
             'warehouse', 'almacen', 'bodega' => 'warehouse',
             'categorias_extra', 'extra_categories', 'extra_category_ids' => 'categorias_extra',
@@ -364,6 +400,12 @@ class ProductImport extends BaseImport
                 $errors[] = "El almacen '{$warehouseName}' no existe.";
             }
         }
+
+        $errors = array_merge(
+            $errors,
+            $this->vendorResolver->validateRow($row),
+            $this->vehicleResolver->validateRow($row)
+        );
 
         return $errors;
     }
@@ -428,11 +470,18 @@ class ProductImport extends BaseImport
             $variants[] = $rowVariant;
         }
 
+        $resolvedVariants = [];
         if (is_array($variants) && ! empty($variants)) {
             foreach ($variants as $variantData) {
-                $this->createEnrichedVariant($product, $variantData);
+                $resolvedVariant = $this->createEnrichedVariant($product, $variantData);
+                if ($resolvedVariant instanceof ProductVariant) {
+                    $resolvedVariants[] = $resolvedVariant;
+                }
             }
         }
+
+        $this->syncVendorForImportedProduct($product, $resolvedVariants, $row);
+        $this->syncVehicleForImportedProduct($product, $row);
 
         return $product;
     }
@@ -500,6 +549,65 @@ class ProductImport extends BaseImport
         $this->largeBatchFastPath = false;
     }
 
+    public function executeAtomic(array $rows): void
+    {
+        $validationImport = (new self(
+            $this->productService,
+            $this->bulkWriter,
+            $this->brandResolver,
+            $this->vendorResolver,
+            $this->vehicleResolver,
+        ))->forMode(ImportRun::MODE_VALIDATE_ONLY);
+        $validationImport->validateRows($rows);
+
+        if ($validationImport->errorCount > 0) {
+            $this->processedCount = count($rows);
+            $this->successCount = 0;
+            $this->errorCount = $validationImport->errorCount;
+            $this->results = [];
+            $this->errors = $validationImport->errors;
+            $this->validationRows = $validationImport->validationRows;
+
+            return;
+        }
+
+        DB::beginTransaction();
+
+        try {
+            $this->execute($rows);
+
+            if ($this->errorCount > 0) {
+                DB::rollBack();
+                $this->successCount = 0;
+                $this->results = [];
+
+                return;
+            }
+
+            DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            $this->processedCount = max($this->processedCount, count($rows));
+            $this->successCount = 0;
+            $this->results = [];
+
+            if ($this->errorCount === 0) {
+                $this->errorCount = 1;
+                $this->rememberErrorEntry([
+                    'row' => 0,
+                    'label' => 'Importacion',
+                    'data' => [],
+                    'error' => $e->getMessage(),
+                    'action_type' => self::ACTION_INVALID,
+                    'change_preview' => [],
+                    'conflicts' => [],
+                ]);
+            }
+        } finally {
+            $this->largeBatchFastPath = false;
+        }
+    }
+
     private function fastRowOperationPreview(array $row, array $previewData, array $errors, array $duplicateKeys, ?string $duplicateKey = null): array
     {
         $conflicts = [];
@@ -547,6 +655,8 @@ class ProductImport extends BaseImport
             || ($operation['conflicts'] ?? []) !== []
             || ! empty($row['__variants'])
             || ! empty($previewData['__attributes'])
+            || $this->vendorResolver->hasVendorPayload($row)
+            || $this->vehicleResolver->hasVehiclePayload($row)
             || $this->splitDelimitedValues($row['categorias_extra'] ?? null) !== []
             || $this->splitDelimitedValues($row['atributos'] ?? null) !== []
         ) {
@@ -2621,7 +2731,7 @@ class ProductImport extends BaseImport
         return mb_strtolower(trim(Str::ascii($name)));
     }
 
-    private function createEnrichedVariant(Product $product, array $variantData): void
+    private function createEnrichedVariant(Product $product, array $variantData): ?ProductVariant
     {
         $brandId = null;
         if (! empty($variantData['brand_id'])) {
@@ -2631,7 +2741,7 @@ class ProductImport extends BaseImport
         }
 
         if (! $brandId) {
-            return;
+            return null;
         }
 
         $importSystemId = $this->nullIfEmpty($variantData['system_id'] ?? null);
@@ -2698,6 +2808,46 @@ class ProductImport extends BaseImport
                     (float) ($variant->pricing?->cost_total ?? 0)
                 );
             }
+        }
+
+        return $variant->refresh();
+    }
+
+    /**
+     * @param  array<int, ProductVariant>  $variants
+     */
+    private function syncVendorForImportedProduct(Product $product, array $variants, array $row): void
+    {
+        $supplier = $this->vendorResolver->resolve($row);
+        if ($supplier === null) {
+            return;
+        }
+
+        $supplierCost = $this->parseMoney($row['costo'] ?? null);
+        $targets = $variants === [] ? [null] : $variants;
+
+        foreach ($targets as $variant) {
+            [$productSupplier, $created] = $this->vendorResolver->sync(
+                $product,
+                $variant instanceof ProductVariant ? $variant : null,
+                $supplier,
+                $supplierCost
+            );
+            $this->recordImportModel(ProductSupplier::class, $productSupplier->id, $created ? 'created' : 'updated', [
+                'supplier_id' => $supplier->id,
+            ]);
+        }
+    }
+
+    private function syncVehicleForImportedProduct(Product $product, array $row): void
+    {
+        foreach ($this->vehicleResolver->sync($product, $row) as $compatibility) {
+            $this->recordImportModel(
+                ProductVehicleCompatibility::class,
+                $compatibility->id,
+                $compatibility->wasRecentlyCreated ? 'created' : 'updated',
+                ['scope_type' => $compatibility->scope_type]
+            );
         }
     }
 

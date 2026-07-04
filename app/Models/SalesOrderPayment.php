@@ -12,8 +12,10 @@ class SalesOrderPayment extends Model
 
     protected $fillable = [
         'sales_order_id',
+        'sales_return_id',
         'amount',
         'method',
+        'reference_number',
         'notes',
         'paid_at',
         'created_by',
@@ -27,6 +29,11 @@ class SalesOrderPayment extends Model
     public function salesOrder(): BelongsTo
     {
         return $this->belongsTo(SalesOrder::class);
+    }
+
+    public function salesReturn(): BelongsTo
+    {
+        return $this->belongsTo(SalesReturn::class);
     }
 
     public function creator(): BelongsTo

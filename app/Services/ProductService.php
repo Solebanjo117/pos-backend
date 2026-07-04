@@ -1326,6 +1326,10 @@ class ProductService
 
     private function formatVehicleScopeLabel(ProductVehicleCompatibility $compatibility, bool $isEnginePart): ?string
     {
+        if ($compatibility->scope_type === 'raw') {
+            return $compatibility->raw_vehicle_text;
+        }
+
         if ($compatibility->scope_type === 'make') {
             return $compatibility->make?->name;
         }

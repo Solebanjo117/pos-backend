@@ -11,8 +11,6 @@ class ProductImportRunChunkProcessor
 {
     public const CHUNK_SIZE = 500;
 
-    private const PERSISTED_IMPORT_CHUNK_SIZE = 100;
-
     private const RESULT_LIMIT = 100;
 
     private const DETAILED_GROUPING_ROW_LIMIT = 5000;
@@ -170,7 +168,38 @@ class ProductImportRunChunkProcessor
             $this->rowService->persistValidationRowsChunk($importRun, $import->validationRows);
             $import->validationRows = [];
         } else {
-            $import->execute($chunk['rows']);
+            $rows = $chunk['rows'];
+            $offset = count($rows);
+
+            while (($chunk['has_more'] ?? false) === true && $chunk['rows'] !== []) {
+                $chunk = $import->fileRowsChunk(
+                    $path,
+                    $offset,
+                    $chunkSize,
+                    $importRun->sheet_index,
+                    $importRun->sheet_name,
+                    $importRun->mapping ?? []
+                );
+                $rows = array_merge($rows, $chunk['rows']);
+                $offset += count($chunk['rows']);
+            }
+
+            $import->executeAtomic($rows);
+
+            $processedRows = count($rows);
+            $totalRows = max((int) ($chunk['total_rows'] ?? 0), $processedRows);
+            if ($import->errorCount > 0) {
+                $this->updateProgress($importRun, $import, 0, $totalRows, $runStartedAt);
+
+                throw new \RuntimeException('Archivo no importado: corrige los errores y vuelve a validar antes de importar.');
+            }
+
+            $this->updateProgress($importRun, $import, $processedRows, $totalRows, $runStartedAt, $processedRows);
+
+            return [
+                'processed_rows' => $processedRows,
+                'has_more' => false,
+            ];
         }
 
         $processedRows = count($chunk['rows']);
@@ -288,8 +317,14 @@ class ProductImportRunChunkProcessor
      */
     private function processPersistedImportChunk(ImportRun $importRun, ProductImport $import, int $chunkSize, float $runStartedAt): array
     {
-        $chunkSize = min($chunkSize, self::PERSISTED_IMPORT_CHUNK_SIZE);
-        $rows = $this->rowService->claimPendingImportableRows($importRun, $chunkSize);
+        if ($this->rowService->executedImportableRowsCount($importRun) > 0) {
+            return [
+                'processed_rows' => 0,
+                'has_more' => false,
+            ];
+        }
+
+        $rows = $this->rowService->claimAllImportableRows($importRun);
         if ($rows === []) {
             return [
                 'processed_rows' => 0,
@@ -298,15 +333,21 @@ class ProductImportRunChunkProcessor
         }
 
         $rowNumbers = collect($rows)->pluck('__row')->map(fn ($row): int => (int) $row)->all();
-        $import->execute($rows);
-        $this->rowService->synchronizeExecutionResultsForRows($importRun, $import, $rowNumbers);
+        $import->executeAtomic($rows);
+        $this->rowService->synchronizeAtomicExecutionResultsForRows($importRun, $import, $rowNumbers);
 
         $processedRows = count($rows);
-        $newProcessedRows = $this->rowService->executedImportableRowsCount($importRun);
-        $totalRows = max((int) $importRun->total_rows, $importRun->rows()->where('status', 'valid')->count());
-        $hasMore = $this->rowService->hasUnfinishedImportableRows($importRun->refresh());
+        if ($import->errorCount > 0) {
+            $this->updateProgress($importRun, $import, 0, $processedRows, $runStartedAt);
 
-        $this->updateProgress($importRun, $import, $newProcessedRows, $totalRows, $runStartedAt, $chunkSize);
+            throw new \RuntimeException('Archivo no importado: corrige los errores y vuelve a validar antes de importar.');
+        }
+
+        $newProcessedRows = $processedRows;
+        $totalRows = max((int) $importRun->total_rows, $importRun->rows()->where('status', 'valid')->count());
+        $hasMore = false;
+
+        $this->updateProgress($importRun, $import, $newProcessedRows, $totalRows, $runStartedAt, $processedRows);
 
         return [
             'processed_rows' => $processedRows,
@@ -323,8 +364,7 @@ class ProductImportRunChunkProcessor
             ->map(fn (array $row): array => $row['data'] ?? $row)
             ->values()
             ->all();
-        $offset = (int) $importRun->processed_rows;
-        $rows = array_slice($failedRows, $offset, $chunkSize);
+        $rows = $failedRows;
 
         if ($rows === []) {
             return [
@@ -333,18 +373,21 @@ class ProductImportRunChunkProcessor
             ];
         }
 
-        $import->execute($rows);
+        $import->executeAtomic($rows);
 
         $processedRows = count($rows);
-        $newProcessedRows = $offset + $processedRows;
         $totalRows = count($failedRows);
-        $hasMore = $newProcessedRows < $totalRows;
+        if ($import->errorCount > 0) {
+            $this->updateProgress($importRun, $import, 0, $totalRows, $runStartedAt);
 
-        $this->updateProgress($importRun, $import, $newProcessedRows, $totalRows, $runStartedAt);
+            throw new \RuntimeException('Archivo no importado: corrige los errores y vuelve a validar antes de importar.');
+        }
+
+        $this->updateProgress($importRun, $import, $processedRows, $totalRows, $runStartedAt, $processedRows);
 
         return [
             'processed_rows' => $processedRows,
-            'has_more' => $hasMore,
+            'has_more' => false,
         ];
     }
 
