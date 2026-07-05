@@ -101,6 +101,11 @@ Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class.':re
     require __DIR__.'/api_payment_methods.php';
 
     // ---------------------------------------------------------------
+    // Business datetime corrections: admin only, audit-tracked
+    // ---------------------------------------------------------------
+    require __DIR__.'/api_business_datetime.php';
+
+    // ---------------------------------------------------------------
     // Activity Logs: admin only
     // ---------------------------------------------------------------
     require __DIR__.'/api_activity_logs.php';

@@ -13,6 +13,7 @@ use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
 use Carbon\Carbon;
+use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
@@ -62,7 +63,7 @@ class FinancialDrilldownService
     private function sales(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = SalesOrder::query()
-            ->with(['customer', 'payments', 'items', 'returns'])
+            ->with(['customer', 'payments', 'items', 'returns', 'user'])
             ->whereIn('status', self::SALES_STATUSES)
             ->whereDate('date', '>=', $from->toDateString())
             ->whereDate('date', '<=', $to->toDateString())
@@ -83,8 +84,10 @@ class FinancialDrilldownService
             return [
                 'id' => $order->id,
                 'date' => $order->date?->toDateString(),
+                ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
                 'document' => $order->order_number,
                 'party' => $order->customer?->name ?? 'Cliente general',
+                'user' => $order->user?->name,
                 'status' => $order->status_label ?? $order->status,
                 'method' => $order->payment_method,
                 'total' => $effectiveTotal,
@@ -100,7 +103,7 @@ class FinancialDrilldownService
     private function salesPayments(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $payments = SalesOrderPayment::query()
-            ->with(['salesOrder.customer', 'salesOrder.items'])
+            ->with(['salesOrder.customer', 'salesOrder.items', 'creator'])
             ->whereDate('paid_at', '>=', $from->toDateString())
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->whereNotIn('method', self::NON_MONEY_METHODS)
@@ -119,8 +122,10 @@ class FinancialDrilldownService
             return [
                 'id' => $payment->id,
                 'date' => $payment->paid_at?->toDateString(),
+                ...$this->traceFields($payment->paid_at, $payment->business_datetime, 'paid_at'),
                 'document' => $order?->order_number,
                 'party' => $order?->customer?->name ?? 'Cliente general',
+                'user' => $payment->creator?->name,
                 'method' => $payment->formatted_method ?? $payment->method,
                 'reference' => $payment->reference_number ?? $payment->notes,
                 'amount' => $this->money((float) $payment->amount * $ratio),
@@ -133,7 +138,7 @@ class FinancialDrilldownService
     private function purchases(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = PurchaseOrder::query()
-            ->with(['supplier', 'payments'])
+            ->with(['supplier', 'payments', 'user'])
             ->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES)
             ->whereDate('order_date', '>=', $from->toDateString())
             ->whereDate('order_date', '<=', $to->toDateString())
@@ -151,8 +156,16 @@ class FinancialDrilldownService
             return [
                 'id' => $order->id,
                 'date' => $order->order_date?->toDateString(),
+                ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
                 'document' => $order->po_number,
                 'party' => $order->supplier?->name ?? 'Proveedor general',
+                'user' => $order->user?->name,
+                'method' => $order->payments
+                    ->whereNotIn('method', self::NON_MONEY_METHODS)
+                    ->map(fn (PurchaseOrderPayment $payment): string => $payment->method_label ?? $payment->method)
+                    ->unique()
+                    ->values()
+                    ->join(' / ') ?: ($order->payment_status === 'pending' ? 'Credito' : null),
                 'status' => $order->status_label ?? $order->status,
                 'total' => $total,
                 'paid' => $paid,
@@ -167,7 +180,7 @@ class FinancialDrilldownService
     private function supplierPayments(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $payments = PurchaseOrderPayment::query()
-            ->with(['purchaseOrder.supplier'])
+            ->with(['purchaseOrder.supplier', 'user'])
             ->whereDate('paid_at', '>=', $from->toDateString())
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->whereNotIn('method', self::NON_MONEY_METHODS)
@@ -180,8 +193,10 @@ class FinancialDrilldownService
         $rows = $payments->map(fn (PurchaseOrderPayment $payment): array => [
             'id' => $payment->id,
             'date' => $payment->paid_at?->toDateString(),
+            ...$this->traceFields($payment->paid_at, $payment->business_datetime, 'paid_at'),
             'document' => $payment->purchaseOrder?->po_number,
             'party' => $payment->purchaseOrder?->supplier?->name ?? 'Proveedor general',
+            'user' => $payment->user?->name,
             'method' => $payment->method_label ?? $payment->method,
             'reference' => $payment->reference_number,
             'amount' => $this->money($payment->amount),
@@ -193,6 +208,7 @@ class FinancialDrilldownService
     private function expenses(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $expenses = OperationalExpense::query()
+            ->with(['creator'])
             ->whereDate('expense_date', '>=', $from->toDateString())
             ->whereDate('expense_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
@@ -203,18 +219,22 @@ class FinancialDrilldownService
         $rows = $expenses->map(fn (OperationalExpense $expense): array => [
             'id' => $expense->id,
             'date' => $expense->expense_date?->toDateString(),
+            ...$this->traceFields($expense->created_at, $expense->business_datetime, 'created_at'),
             'category' => $expense->category_label,
             'description' => $expense->description,
+            'user' => $expense->creator?->name,
             'method' => $expense->payment_method_label,
             'reference' => $expense->reference_number,
             'amount' => $this->money($expense->amount),
         ]);
 
         return $this->collectionPayload($metric, 'Gastos', [
-            ['key' => 'date', 'label' => 'Fecha'],
+            ...$this->datetimeColumns(),
             ['key' => 'category', 'label' => 'Categoria'],
             ['key' => 'description', 'label' => 'Concepto'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'method', 'label' => 'Metodo'],
+            ['key' => 'reference', 'label' => 'Referencia'],
             ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
         ], $rows, $page, $perPage);
     }
@@ -222,7 +242,7 @@ class FinancialDrilldownService
     private function inventory(string $metric, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $lots = InventoryLot::query()
-            ->with(['product.category', 'variant.brand', 'warehouse'])
+            ->with(['product.category', 'variant.brand', 'warehouse', 'sourceMovement.user'])
             ->where('quantity_available', '>', 0)
             ->whereDate('received_at', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
@@ -233,22 +253,26 @@ class FinancialDrilldownService
         $rows = $lots->map(fn (InventoryLot $lot): array => [
             'id' => $lot->id,
             'date' => $lot->received_at?->toDateString(),
+            ...$this->traceFields($lot->received_at, $lot->sourceMovement?->business_datetime, 'received_at'),
             'product' => $lot->product?->name,
             'sku' => $lot->variant?->sku ?? $lot->product?->sku_base,
             'brand' => $lot->variant?->brand?->name,
             'category' => $lot->product?->category?->name,
             'warehouse' => $lot->warehouse?->name,
+            'user' => $lot->sourceMovement?->user?->name,
             'quantity' => (int) $lot->quantity_available,
             'unit_cost' => $this->money($lot->landed_unit_cost),
             'amount' => $this->money((float) $lot->quantity_available * (float) $lot->landed_unit_cost),
         ]);
 
         return $this->collectionPayload($metric, 'Inventario valorizado', [
+            ...$this->datetimeColumns(),
             ['key' => 'product', 'label' => 'Producto'],
             ['key' => 'sku', 'label' => 'SKU'],
             ['key' => 'brand', 'label' => 'Marca'],
             ['key' => 'category', 'label' => 'Categoria'],
             ['key' => 'warehouse', 'label' => 'Almacen'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'quantity', 'label' => 'Stock'],
             ['key' => 'unit_cost', 'label' => 'Costo', 'type' => 'money'],
             ['key' => 'amount', 'label' => 'Valor', 'type' => 'money'],
@@ -258,7 +282,7 @@ class FinancialDrilldownService
     private function receivables(string $metric, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = SalesOrder::query()
-            ->with(['customer', 'payments', 'items', 'returns'])
+            ->with(['customer', 'payments', 'items', 'returns', 'user'])
             ->whereIn('status', self::SALES_STATUSES)
             ->whereDate('date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))
@@ -281,8 +305,11 @@ class FinancialDrilldownService
             return [
                 'id' => $order->id,
                 'date' => $order->date?->toDateString(),
+                ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
                 'document' => $order->order_number,
                 'party' => $order->customer?->name ?? 'Cliente general',
+                'user' => $order->user?->name,
+                'method' => $order->payment_method,
                 'total' => $effectiveTotal,
                 'paid' => $paid,
                 'pending' => $pending,
@@ -296,7 +323,7 @@ class FinancialDrilldownService
     private function payables(string $metric, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = PurchaseOrder::query()
-            ->with(['supplier', 'payments'])
+            ->with(['supplier', 'payments', 'user'])
             ->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES)
             ->whereDate('order_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
@@ -316,8 +343,16 @@ class FinancialDrilldownService
             return [
                 'id' => $order->id,
                 'date' => $order->order_date?->toDateString(),
+                ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
                 'document' => $order->po_number,
                 'party' => $order->supplier?->name ?? 'Proveedor general',
+                'user' => $order->user?->name,
+                'method' => $order->payments
+                    ->whereNotIn('method', self::NON_MONEY_METHODS)
+                    ->map(fn (PurchaseOrderPayment $payment): string => $payment->method_label ?? $payment->method)
+                    ->unique()
+                    ->values()
+                    ->join(' / ') ?: ($order->payment_status === 'pending' ? 'Credito' : null),
                 'total' => $total,
                 'paid' => $paid,
                 'pending' => $pending,
@@ -331,7 +366,7 @@ class FinancialDrilldownService
     private function cogs(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $items = SalesOrderItem::query()
-            ->with(['salesOrder.customer', 'product', 'variant.brand'])
+            ->with(['salesOrder.customer', 'salesOrder.user', 'product', 'variant.brand'])
             ->whereHas('salesOrder', fn (Builder $query) => $query
                 ->whereIn('status', self::SALES_STATUSES)
                 ->whereDate('date', '>=', $from->toDateString())
@@ -344,8 +379,10 @@ class FinancialDrilldownService
         $rows = $items->map(fn (SalesOrderItem $item): array => [
             'id' => $item->id,
             'date' => $item->salesOrder?->date?->toDateString(),
+            ...$this->traceFields($item->salesOrder?->created_at, $item->salesOrder?->business_datetime, 'created_at'),
             'document' => $item->salesOrder?->order_number,
             'party' => $item->salesOrder?->customer?->name ?? 'Cliente general',
+            'user' => $item->salesOrder?->user?->name,
             'product' => $item->product_name,
             'sku' => $item->variant?->sku ?? $item->product_sku,
             'quantity' => (int) $item->quantity,
@@ -359,7 +396,7 @@ class FinancialDrilldownService
     private function profit(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $items = SalesOrderItem::query()
-            ->with(['salesOrder.customer', 'product', 'variant.brand'])
+            ->with(['salesOrder.customer', 'salesOrder.user', 'product', 'variant.brand'])
             ->whereHas('salesOrder', fn (Builder $query) => $query
                 ->whereIn('status', self::SALES_STATUSES)
                 ->whereDate('date', '>=', $from->toDateString())
@@ -374,8 +411,10 @@ class FinancialDrilldownService
             return [
                 'id' => 'sale-'.$item->id,
                 'date' => $item->salesOrder?->date?->toDateString(),
+                ...$this->traceFields($item->salesOrder?->created_at, $item->salesOrder?->business_datetime, 'created_at'),
                 'document' => $item->salesOrder?->order_number,
                 'party' => $item->salesOrder?->customer?->name ?? 'Cliente general',
+                'user' => $item->salesOrder?->user?->name,
                 'description' => $item->product_name,
                 'revenue' => $revenue,
                 'cost' => $cogs,
@@ -384,6 +423,7 @@ class FinancialDrilldownService
         });
 
         $expenseRows = OperationalExpense::query()
+            ->with(['creator'])
             ->whereDate('expense_date', '>=', $from->toDateString())
             ->whereDate('expense_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
@@ -391,8 +431,10 @@ class FinancialDrilldownService
             ->map(fn (OperationalExpense $expense): array => [
                 'id' => 'expense-'.$expense->id,
                 'date' => $expense->expense_date?->toDateString(),
+                ...$this->traceFields($expense->created_at, $expense->business_datetime, 'created_at'),
                 'document' => 'Gasto',
                 'party' => $expense->category_label,
+                'user' => $expense->creator?->name,
                 'description' => $expense->description,
                 'revenue' => 0.0,
                 'cost' => $this->money($expense->amount),
@@ -404,9 +446,10 @@ class FinancialDrilldownService
             : $rows->concat($expenseRows)->sortByDesc('date')->values();
 
         return $this->collectionPayload($metric, $metric === 'gross_profit' ? 'Utilidad bruta' : 'Utilidad / profit', [
-            ['key' => 'date', 'label' => 'Fecha'],
+            ...$this->datetimeColumns(),
             ['key' => 'document', 'label' => 'Origen'],
             ['key' => 'party', 'label' => 'Cliente/Categoria'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'description', 'label' => 'Detalle'],
             ['key' => 'revenue', 'label' => 'Ingreso', 'type' => 'money'],
             ['key' => 'cost', 'label' => 'Costo/Gasto', 'type' => 'money'],
@@ -426,8 +469,12 @@ class FinancialDrilldownService
         $rows = collect([[
             'id' => 'opening-'.$metric,
             'date' => $from->toDateString(),
+            'occurred_at' => null,
+            'business_datetime' => null,
+            'datetime_source' => 'opening_balance',
             'description' => $bucket === 'cash' ? 'Saldo inicial efectivo' : 'Saldo inicial banco',
             'source' => 'Apertura',
+            'user' => null,
             'method' => $bucket === 'cash' ? 'Efectivo' : 'Banco',
             'amount' => $this->money($totals['opening_'.$metric] ?? 0),
         ]]);
@@ -443,9 +490,10 @@ class FinancialDrilldownService
         }
 
         return $this->collectionPayload($metric, $bucket === 'cash' ? 'Efectivo' : 'Banco', [
-            ['key' => 'date', 'label' => 'Fecha'],
+            ...$this->datetimeColumns(),
             ['key' => 'source', 'label' => 'Origen'],
             ['key' => 'description', 'label' => 'Detalle'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'method', 'label' => 'Metodo'],
             ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
         ], $rows->sortByDesc('date')->values(), $page, $perPage, $summary['warnings'] ?? [], $this->money($totals[$metric] ?? 0));
@@ -454,6 +502,7 @@ class FinancialDrilldownService
     private function investment(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $rows = CapitalMovement::query()
+            ->with(['user'])
             ->whereDate('movement_date', '>=', $from->toDateString())
             ->whereDate('movement_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
@@ -463,14 +512,17 @@ class FinancialDrilldownService
             ->map(fn (CapitalMovement $movement): array => [
                 'id' => $movement->id,
                 'date' => $movement->movement_date?->toDateString(),
+                ...$this->traceFields($movement->created_at, $movement->business_datetime, 'created_at'),
                 'type' => $movement->movement_type_label,
+                'user' => $movement->user?->name,
                 'description' => $movement->reason,
                 'amount' => $this->money($movement->movement_type === CapitalMovement::TYPE_IN ? $movement->amount : -$movement->amount),
             ]);
 
         return $this->collectionPayload($metric, 'Inversion', [
-            ['key' => 'date', 'label' => 'Fecha'],
+            ...$this->datetimeColumns(),
             ['key' => 'type', 'label' => 'Tipo'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'description', 'label' => 'Motivo'],
             ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
         ], $rows, $page, $perPage);
@@ -479,6 +531,7 @@ class FinancialDrilldownService
     private function adjustments(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $rows = FinancialAdjustment::query()
+            ->with(['user'])
             ->whereDate('adjustment_date', '>=', $from->toDateString())
             ->whereDate('adjustment_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
@@ -488,14 +541,17 @@ class FinancialDrilldownService
             ->map(fn (FinancialAdjustment $adjustment): array => [
                 'id' => $adjustment->id,
                 'date' => $adjustment->adjustment_date?->toDateString(),
+                ...$this->traceFields($adjustment->created_at, $adjustment->business_datetime, 'created_at'),
                 'type' => $adjustment->type_label,
+                'user' => $adjustment->user?->name,
                 'description' => $adjustment->reason,
                 'amount' => $this->money($adjustment->amount),
             ]);
 
         return $this->collectionPayload($metric, 'Ajustes financieros', [
-            ['key' => 'date', 'label' => 'Fecha'],
+            ...$this->datetimeColumns(),
             ['key' => 'type', 'label' => 'Tipo'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'description', 'label' => 'Motivo'],
             ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
         ], $rows, $page, $perPage);
@@ -504,7 +560,7 @@ class FinancialDrilldownService
     private function liquiditySalesRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
     {
         return SalesOrderPayment::query()
-            ->with(['salesOrder.customer', 'salesOrder.items', 'salesReturn'])
+            ->with(['salesOrder.customer', 'salesOrder.items', 'salesReturn', 'creator'])
             ->whereDate('paid_at', '>=', $from->toDateString())
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->whereNotIn('method', self::NON_MONEY_METHODS)
@@ -520,10 +576,12 @@ class FinancialDrilldownService
                 return [
                     'id' => 'sale-payment-'.$payment->id,
                     'date' => $payment->paid_at?->toDateString(),
+                    ...$this->traceFields($payment->paid_at, $payment->business_datetime, 'paid_at'),
                     'source' => (float) $payment->amount < 0 ? 'Reembolso' : 'Pago recibido',
                     'description' => $payment->salesReturn
                         ? $payment->salesReturn->return_number.' - '.($order?->customer?->name ?? 'Cliente general')
                         : $order?->order_number.' - '.($order?->customer?->name ?? 'Cliente general'),
+                    'user' => $payment->creator?->name,
                     'method' => $payment->formatted_method ?? $payment->method,
                     'amount' => $this->money((float) $payment->amount * $ratio),
                 ];
@@ -533,7 +591,7 @@ class FinancialDrilldownService
     private function liquidityPurchaseRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
     {
         return PurchaseOrderPayment::query()
-            ->with(['purchaseOrder.supplier'])
+            ->with(['purchaseOrder.supplier', 'user'])
             ->whereDate('paid_at', '>=', $from->toDateString())
             ->whereDate('paid_at', '<=', $to->toDateString())
             ->whereNotIn('method', self::NON_MONEY_METHODS)
@@ -544,8 +602,10 @@ class FinancialDrilldownService
             ->map(fn (PurchaseOrderPayment $payment): array => [
                 'id' => 'purchase-payment-'.$payment->id,
                 'date' => $payment->paid_at?->toDateString(),
+                ...$this->traceFields($payment->paid_at, $payment->business_datetime, 'paid_at'),
                 'source' => 'Pago proveedor',
                 'description' => $payment->purchaseOrder?->po_number.' - '.($payment->purchaseOrder?->supplier?->name ?? 'Proveedor general'),
+                'user' => $payment->user?->name,
                 'method' => $payment->method_label ?? $payment->method,
                 'amount' => -$this->money($payment->amount),
             ]);
@@ -554,6 +614,7 @@ class FinancialDrilldownService
     private function liquidityExpenseRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
     {
         return OperationalExpense::query()
+            ->with(['creator'])
             ->whereDate('expense_date', '>=', $from->toDateString())
             ->whereDate('expense_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
@@ -562,8 +623,10 @@ class FinancialDrilldownService
             ->map(fn (OperationalExpense $expense): array => [
                 'id' => 'expense-'.$expense->id,
                 'date' => $expense->expense_date?->toDateString(),
+                ...$this->traceFields($expense->created_at, $expense->business_datetime, 'created_at'),
                 'source' => 'Gasto',
                 'description' => $expense->description,
+                'user' => $expense->creator?->name,
                 'method' => $expense->payment_method_label,
                 'amount' => -$this->money($expense->amount),
             ]);
@@ -572,6 +635,7 @@ class FinancialDrilldownService
     private function liquidityCapitalRows(Carbon $from, Carbon $to, ?int $warehouseId): Collection
     {
         return CapitalMovement::query()
+            ->with(['user'])
             ->whereDate('movement_date', '>=', $from->toDateString())
             ->whereDate('movement_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
@@ -579,8 +643,10 @@ class FinancialDrilldownService
             ->map(fn (CapitalMovement $movement): array => [
                 'id' => 'capital-'.$movement->id,
                 'date' => $movement->movement_date?->toDateString(),
+                ...$this->traceFields($movement->created_at, $movement->business_datetime, 'created_at'),
                 'source' => 'Capital',
                 'description' => $movement->reason,
+                'user' => $movement->user?->name,
                 'method' => 'Efectivo',
                 'amount' => $this->money($movement->movement_type === CapitalMovement::TYPE_IN ? $movement->amount : -$movement->amount),
             ]);
@@ -591,6 +657,7 @@ class FinancialDrilldownService
         $type = $bucket === 'cash' ? FinancialAdjustment::TYPE_CASH : FinancialAdjustment::TYPE_BANK;
 
         return FinancialAdjustment::query()
+            ->with(['user'])
             ->where('type', $type)
             ->whereDate('adjustment_date', '>=', $from->toDateString())
             ->whereDate('adjustment_date', '<=', $to->toDateString())
@@ -599,8 +666,10 @@ class FinancialDrilldownService
             ->map(fn (FinancialAdjustment $adjustment): array => [
                 'id' => $bucket.'-adjustment-'.$adjustment->id,
                 'date' => $adjustment->adjustment_date?->toDateString(),
+                ...$this->traceFields($adjustment->created_at, $adjustment->business_datetime, 'created_at'),
                 'source' => 'Ajuste',
                 'description' => $adjustment->reason,
+                'user' => $adjustment->user?->name,
                 'method' => $bucket === 'cash' ? 'Efectivo' : 'Banco',
                 'amount' => $this->money($adjustment->amount),
             ]);
@@ -645,41 +714,75 @@ class FinancialDrilldownService
 
     private function salesColumns(): array
     {
-        return [
-            ['key' => 'date', 'label' => 'Fecha'],
+        return array_merge($this->datetimeColumns(), [
             ['key' => 'document', 'label' => 'Documento'],
             ['key' => 'party', 'label' => 'Cliente/Proveedor'],
+            ['key' => 'user', 'label' => 'Usuario'],
+            ['key' => 'method', 'label' => 'Metodo'],
             ['key' => 'status', 'label' => 'Estado'],
             ['key' => 'total', 'label' => 'Total', 'type' => 'money'],
             ['key' => 'paid', 'label' => 'Pagado', 'type' => 'money'],
             ['key' => 'pending', 'label' => 'Pendiente', 'type' => 'money'],
-        ];
+        ]);
     }
 
     private function paymentColumns(): array
     {
-        return [
-            ['key' => 'date', 'label' => 'Fecha'],
+        return array_merge($this->datetimeColumns(), [
             ['key' => 'document', 'label' => 'Documento'],
             ['key' => 'party', 'label' => 'Cliente/Proveedor'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'method', 'label' => 'Metodo'],
             ['key' => 'reference', 'label' => 'Referencia'],
             ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
-        ];
+        ]);
     }
 
     private function itemColumns(string $amountLabel): array
     {
-        return [
-            ['key' => 'date', 'label' => 'Fecha'],
+        return array_merge($this->datetimeColumns(), [
             ['key' => 'document', 'label' => 'Venta'],
             ['key' => 'party', 'label' => 'Cliente'],
+            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'product', 'label' => 'Producto'],
             ['key' => 'sku', 'label' => 'SKU'],
             ['key' => 'quantity', 'label' => 'Cantidad'],
             ['key' => 'unit_cost', 'label' => 'Costo unit.', 'type' => 'money'],
             ['key' => 'amount', 'label' => $amountLabel, 'type' => 'money'],
+        ]);
+    }
+
+    private function datetimeColumns(): array
+    {
+        return [
+            ['key' => 'occurred_at', 'label' => 'Fecha/Hora', 'type' => 'datetime'],
+            ['key' => 'business_datetime', 'label' => 'Operativa', 'type' => 'datetime'],
         ];
+    }
+
+    /**
+     * @return array<string, string|null>
+     */
+    private function traceFields(mixed $occurredAt, mixed $businessDatetime, string $source): array
+    {
+        return [
+            'occurred_at' => $this->isoDatetime($occurredAt),
+            'business_datetime' => $this->isoDatetime($businessDatetime),
+            'datetime_source' => $this->isoDatetime($occurredAt) ? $source : 'missing',
+        ];
+    }
+
+    private function isoDatetime(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if ($value instanceof DateTimeInterface) {
+            return Carbon::instance($value)->toIso8601String();
+        }
+
+        return Carbon::parse($value)->toIso8601String();
     }
 
     private function salesOrderScopedTotal(SalesOrder $order, ?int $warehouseId): float

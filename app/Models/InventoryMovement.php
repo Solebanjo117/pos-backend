@@ -25,12 +25,14 @@ class InventoryMovement extends Model
         'user_id',
         'supplier_id',
         'product_batch_id',
+        'business_datetime',
     ];
 
     protected $casts = [
         'quantity' => 'integer',
         'reference_id' => 'integer',
         'product_batch_id' => 'integer',
+        'business_datetime' => 'datetime',
     ];
 
     /**

@@ -19,11 +19,13 @@ class SalesOrderPayment extends Model
         'notes',
         'paid_at',
         'created_by',
+        'business_datetime',
     ];
 
     protected $casts = [
         'amount'  => 'decimal:2',
         'paid_at' => 'datetime',
+        'business_datetime' => 'datetime',
     ];
 
     public function salesOrder(): BelongsTo
