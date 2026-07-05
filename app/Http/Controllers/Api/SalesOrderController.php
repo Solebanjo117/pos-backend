@@ -254,14 +254,23 @@ class SalesOrderController extends Controller
                 $hasCredit = true;
             }
 
+            if ($hasCredit && empty($validated['customer_id'])) {
+                return response()->json([
+                    'message' => 'Selecciona un cliente para vender a credito.',
+                ], 422);
+            }
+
             if (
                 $hasCredit
                 && ! empty($validated['customer_id'])
             ) {
                 $customer = \App\Models\Customer::find($validated['customer_id']);
 
-                if ($customer && $customer->credit_limit > 0) {
-                    $creditAvailable = max(0, $customer->credit_limit - $customer->current_balance);
+                if ($customer) {
+                    $creditAvailable = max(
+                        0,
+                        (float) $customer->credit_limit - (float) $customer->current_balance,
+                    );
 
                     $requiredCredit = $creditAmount > 0 ? $creditAmount : null;
 

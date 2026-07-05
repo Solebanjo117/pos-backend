@@ -159,9 +159,12 @@ class SalesOrder extends Model
 
         // Effective total after returns
         $effectiveTotal = (float) $this->total - $totalReturned;
+        $storeCreditApplied = $this->relationLoaded('payments')
+            ? (float) $this->payments->where('method', 'store_credit')->sum('amount')
+            : (float) $this->payments()->where('method', 'store_credit')->sum('amount');
 
         // Amount still owed
-        return max(0, $effectiveTotal - $this->amount_paid);
+        return max(0, $effectiveTotal - $this->amount_paid - $storeCreditApplied);
     }
 
     public function getTotalReturnedAttribute(): float
@@ -316,7 +319,13 @@ class SalesOrder extends Model
                 $amountPaid = (float) $this->payments()
                     ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
                     ->sum('amount');
-                $amountToBill = max(0, (float) $this->total - $amountPaid);
+                $storeCreditApplied = (float) $this->payments()
+                    ->where('method', 'store_credit')
+                    ->sum('amount');
+                $amountToBill = max(
+                    0,
+                    (float) $this->total - $amountPaid - $storeCreditApplied,
+                );
 
                 // Only create transaction if there's an amount to bill
                 if ($amountToBill > 0) {
