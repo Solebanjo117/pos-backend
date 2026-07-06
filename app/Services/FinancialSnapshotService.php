@@ -1014,6 +1014,8 @@ class FinancialSnapshotService
             'movement_type_label' => $movement->movement_type_label,
             'amount' => $this->money($movement->amount),
             'movement_date' => $movement->movement_date?->toDateString(),
+            'business_datetime' => $movement->business_datetime?->toIso8601String(),
+            'created_at' => $movement->created_at?->toIso8601String(),
             'reason' => $movement->reason,
             'notes' => $movement->notes,
             'warehouse_id' => $movement->warehouse_id,

@@ -37,6 +37,7 @@ class SalesOrder extends Model
         'sent_to_warehouse_at',
         'prepared_by',
         'prepared_at',
+        'business_datetime',
     ];
 
     protected $casts = [
@@ -49,6 +50,7 @@ class SalesOrder extends Model
         'audit_logs' => 'array',
         'sent_to_warehouse_at' => 'datetime',
         'prepared_at' => 'datetime',
+        'business_datetime' => 'datetime',
     ];
 
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'total_returned'];

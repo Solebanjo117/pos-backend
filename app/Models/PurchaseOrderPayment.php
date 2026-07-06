@@ -20,11 +20,13 @@ class PurchaseOrderPayment extends Model
         'reference_number',
         'notes',
         'paid_at',
+        'business_datetime',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'paid_at' => 'datetime',
+        'business_datetime' => 'datetime',
     ];
 
     protected $appends = ['formatted_amount', 'method_label'];

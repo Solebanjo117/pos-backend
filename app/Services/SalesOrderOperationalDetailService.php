@@ -87,6 +87,7 @@ class SalesOrderOperationalDetailService
             'internal_notes' => $order->internal_notes,
             'created_at' => $order->created_at?->toISOString(),
             'updated_at' => $order->updated_at?->toISOString(),
+            'business_datetime' => $order->business_datetime?->toIso8601String(),
             'sent_to_warehouse_at' => $order->sent_to_warehouse_at?->toISOString(),
             'prepared_at' => $order->prepared_at?->toISOString(),
             'prepared_by' => $order->preparedBy ? [
@@ -187,6 +188,7 @@ class SalesOrderOperationalDetailService
                 'amount' => (float) $payment->amount,
                 'is_refund' => (float) $payment->amount < 0,
                 'paid_at' => $payment->paid_at?->toISOString(),
+                'business_datetime' => $payment->business_datetime?->toIso8601String(),
                 'reference_number' => $payment->reference_number,
                 'notes' => $payment->notes,
                 'creator_name' => $payment->creator?->name,
@@ -446,6 +448,7 @@ class SalesOrderOperationalDetailService
             'reference_id' => $movement->reference_id,
             'notes' => $movement->notes,
             'created_at' => $movement->created_at?->toISOString(),
+            'business_datetime' => $movement->business_datetime?->toIso8601String(),
             'user_name' => $movement->user?->name,
             'lot_allocations' => $movement->lotAllocations->map(fn ($allocation): array => [
                 'id' => $allocation->id,

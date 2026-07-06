@@ -61,11 +61,13 @@ class FinancialAdjustment extends Model
         'reason',
         'adjustment_date',
         'notes',
+        'business_datetime',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'adjustment_date' => 'date',
+        'business_datetime' => 'datetime',
     ];
 
     protected $appends = ['type_label'];

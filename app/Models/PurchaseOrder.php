@@ -29,6 +29,7 @@ class PurchaseOrder extends Model
         'shipping_cost',
         'total',
         'notes',
+        'business_datetime',
     ];
 
     protected $casts = [
@@ -40,6 +41,7 @@ class PurchaseOrder extends Model
         'tax_amount' => 'decimal:2',
         'shipping_cost' => 'decimal:2',
         'total' => 'decimal:2',
+        'business_datetime' => 'datetime',
     ];
 
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'payment_status_label', 'display_name'];

@@ -43,11 +43,13 @@ class OperationalExpense extends Model
         'payment_method',
         'reference_number',
         'notes',
+        'business_datetime',
     ];
 
     protected $casts = [
         'expense_date' => 'date',
         'amount' => 'decimal:2',
+        'business_datetime' => 'datetime',
     ];
 
     protected $appends = ['category_label', 'payment_method_label'];

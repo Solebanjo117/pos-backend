@@ -21,11 +21,13 @@ class CapitalMovement extends Model
         'notes',
         'source_type',
         'source_id',
+        'business_datetime',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'movement_date' => 'date',
+        'business_datetime' => 'datetime',
     ];
 
     protected $appends = ['movement_type_label'];
