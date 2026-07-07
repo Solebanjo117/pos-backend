@@ -25,6 +25,12 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/balance-sheet', [ReportController::class, 'balanceSheet']);
     Route::get('/financial-drilldown', [ReportController::class, 'financialDrilldown']);
     Route::get('/financial-advanced-status', [ReportController::class, 'financialAdvancedStatus']);
+    Route::get('/accounting/journal', [ReportController::class, 'accountingJournal']);
+    Route::get('/accounting/entries/{entry}', [ReportController::class, 'accountingEntry']);
+    Route::get('/accounting/accounts', [ReportController::class, 'accountingAccounts']);
+    Route::get('/accounting/accounts/{account}/ledger', [ReportController::class, 'accountingAccountLedger']);
+    Route::get('/accounting/accounts/{account}/t-account', [ReportController::class, 'accountingTAccount']);
+    Route::get('/accounting/trial-balance', [ReportController::class, 'accountingTrialBalance']);
     Route::post('/capital-movements', [ReportController::class, 'storeCapitalMovement'])->middleware('throttle:60,1');
     Route::get('/capital-movements', [ReportController::class, 'capitalMovements']);
     Route::post('/adjustments', [ReportController::class, 'storeAdjustment'])->middleware('throttle:60,1');

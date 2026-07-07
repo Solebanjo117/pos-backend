@@ -457,7 +457,16 @@ class FinancialSnapshotService
 
         foreach ($expenses as $expense) {
             $amount = $this->money($expense->amount);
-            $flows['expenses'] = $this->money($flows['expenses'] + $amount);
+            $affectsIncomeStatement = (bool) ($expense->affects_income_statement ?? true);
+            $affectsCashFlow = (bool) ($expense->affects_cash_flow ?? true);
+
+            if ($affectsIncomeStatement) {
+                $flows['expenses'] = $this->money($flows['expenses'] + $amount);
+            }
+
+            if (! $affectsCashFlow) {
+                continue;
+            }
 
             $bucket = $this->paymentBucket($expense->payment_method);
             if ($bucket === 'cash') {

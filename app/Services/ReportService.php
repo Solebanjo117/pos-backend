@@ -1902,8 +1902,12 @@ class ReportService
         $warehouseId = $filters['warehouse_id'] ?? null;
 
         $query = OperationalExpense::query()
+            ->with('categoryRecord')
             ->whereDate('expense_date', '>=', $filters['date_from'])
-            ->whereDate('expense_date', '<=', $filters['date_to']);
+            ->whereDate('expense_date', '<=', $filters['date_to'])
+            ->where(fn ($query) => $query
+                ->where('affects_income_statement', true)
+                ->orWhereNull('affects_income_statement'));
 
         if ($warehouseId) {
             $query->where(function ($query) use ($warehouseId): void {
@@ -1918,12 +1922,16 @@ class ReportService
             'total' => round((float) $expenses->sum('amount'), 2),
             'by_category' => $expenses
                 ->groupBy('category')
-                ->map(fn ($items, $category) => [
-                    'category' => $category,
-                    'label' => OperationalExpense::CATEGORIES[$category] ?? $category,
-                    'amount' => round((float) $items->sum('amount'), 2),
-                    'count' => $items->count(),
-                ])
+                ->map(function ($items, $category): array {
+                    $first = $items->first();
+
+                    return [
+                        'category' => $category,
+                        'label' => $first?->category_label ?? OperationalExpense::CATEGORIES[$category] ?? $category,
+                        'amount' => round((float) $items->sum('amount'), 2),
+                        'count' => $items->count(),
+                    ];
+                })
                 ->sortBy('category')
                 ->values()
                 ->all(),
@@ -2427,27 +2435,39 @@ class ReportService
         $expenses = $this->financialOperationalExpenses($filters);
         $byCategory = collect($expenses['by_category'])->keyBy('category');
 
-        $rent = (float) ($byCategory['rent']['amount'] ?? 0);
-        $salary = (float) ($byCategory['payroll']['amount'] ?? 0);
-        $utilities = (float) ($byCategory['utilities']['amount'] ?? 0)
-            + (float) ($byCategory['electricity']['amount'] ?? 0);
-        $internet = (float) ($byCategory['software']['amount'] ?? 0);
-
-        $mapped = [
-            'rent' => ['label' => 'Rent', 'amount' => round($rent, 2)],
-            'salary' => ['label' => 'Salary', 'amount' => round($salary, 2)],
-            'utilities' => ['label' => 'Utilities', 'amount' => round($utilities, 2)],
-            'internet' => ['label' => 'Internet', 'amount' => round($internet, 2)],
+        $groups = [
+            'rent' => ['label' => 'Rent', 'categories' => ['rent']],
+            'salary' => ['label' => 'Salary', 'categories' => ['payroll']],
+            'utilities' => ['label' => 'Utilities', 'categories' => ['utilities', 'electricity']],
+            'internet' => ['label' => 'Internet', 'categories' => ['software']],
         ];
 
-        $mappedKeys = ['rent', 'payroll', 'electricity', 'utilities', 'software'];
-        $others = $byCategory->filter(fn ($item, $key) => ! in_array($key, $mappedKeys, true));
-        $otherTotal = round((float) $others->sum('amount'), 2);
+        $mapped = collect($groups)
+            ->map(fn (array $group, string $key): array => [
+                'label' => $group['label'],
+                'amount' => round((float) collect($group['categories'])->sum(fn (string $category): float => (float) ($byCategory[$category]['amount'] ?? 0)), 2),
+                'expense_group' => $key,
+            ])
+            ->values();
+
+        $mappedKeys = collect($groups)->flatMap(fn (array $group): array => $group['categories'])->all();
+        $customItems = $byCategory
+            ->filter(fn ($item, $key): bool => ! in_array($key, $mappedKeys, true) && $key !== 'other')
+            ->filter(fn (array $item): bool => abs((float) ($item['amount'] ?? 0)) > 0.005)
+            ->map(fn (array $item, string $key): array => [
+                'label' => $item['label'] ?? $key,
+                'amount' => round((float) ($item['amount'] ?? 0), 2),
+                'expense_category' => $key,
+            ])
+            ->values();
+
+        $otherTotal = round((float) ($byCategory['other']['amount'] ?? 0), 2);
+        $items = $mapped->concat($customItems)->values();
 
         return [
-            'items' => array_values($mapped),
-            'other' => ['label' => 'Otros', 'amount' => $otherTotal],
-            'total' => round($rent + $salary + $utilities + $internet + $otherTotal, 2),
+            'items' => $items->all(),
+            'other' => ['label' => 'Otros', 'amount' => $otherTotal, 'expense_category' => 'other'],
+            'total' => round((float) $items->sum('amount') + $otherTotal, 2),
         ];
     }
 
@@ -2571,6 +2591,7 @@ class ReportService
     {
         $expenses = OperationalExpense::query()
             ->whereBetween('expense_date', [$from->toDateString(), $to->toDateString()])
+            ->where(fn ($q) => $q->where('affects_income_statement', true)->orWhereNull('affects_income_statement'))
             ->when($warehouseId, fn ($q) => $q->where(fn ($q) => $q->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->get(['expense_date', 'amount']);
 

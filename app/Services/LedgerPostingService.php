@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
+use App\Models\OperationalExpense;
+use App\Models\PaymentMethod;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 
@@ -55,6 +57,148 @@ class LedgerPostingService
 
             return $entry->load('lines.ledgerAccount');
         });
+    }
+
+    public function postOperationalExpense(OperationalExpense $expense, ?int $userId = null): ?JournalEntry
+    {
+        $amount = round((float) $expense->amount, 2);
+
+        return DB::transaction(function () use ($expense, $amount, $userId): ?JournalEntry {
+            $this->reverseSource(
+                'operational_expense',
+                (int) $expense->id,
+                $userId,
+                'Reversa automatica antes de repostear gasto operativo.',
+            );
+
+            if ($amount <= 0 || ! $expense->affects_income_statement) {
+                return null;
+            }
+
+            $expenseAccount = $expense->ledgerAccount
+                ?? $expense->categoryRecord?->defaultLedgerAccount
+                ?? $this->accountByCode('5000', 'Operating Expenses');
+
+            $creditAccount = $this->creditAccountForExpense($expense);
+            $memo = trim((string) ($expense->description ?: $expense->category_label ?: 'Gasto operativo'));
+
+            $entry = JournalEntry::create([
+                'source_type' => 'operational_expense',
+                'source_id' => $expense->id,
+                'warehouse_id' => $expense->warehouse_id,
+                'occurred_at' => $expense->paid_at ?? $expense->business_datetime ?? $expense->created_at ?? now(),
+                'status' => 'posted',
+                'memo' => 'Gasto operativo: '.$memo,
+                'created_by' => $userId ?? $expense->created_by,
+            ]);
+
+            $entry->lines()->create([
+                'ledger_account_id' => $expenseAccount->id,
+                'third_party_type' => $expense->supplier_id ? 'supplier' : null,
+                'third_party_id' => $expense->supplier_id,
+                'debit' => $amount,
+                'credit' => 0,
+                'metadata' => [
+                    'expense_id' => $expense->id,
+                    'category' => $expense->category,
+                    'status' => $expense->status,
+                    'payment_method' => $expense->payment_method,
+                ],
+            ]);
+
+            $entry->lines()->create([
+                'ledger_account_id' => $creditAccount->id,
+                'third_party_type' => $expense->supplier_id ? 'supplier' : null,
+                'third_party_id' => $expense->supplier_id,
+                'debit' => 0,
+                'credit' => $amount,
+                'metadata' => [
+                    'expense_id' => $expense->id,
+                    'category' => $expense->category,
+                    'status' => $expense->status,
+                    'payment_method' => $expense->payment_method,
+                ],
+            ]);
+
+            return $entry->load('lines.ledgerAccount');
+        });
+    }
+
+    public function reverseSource(string $sourceType, int $sourceId, ?int $userId = null, ?string $memo = null): ?JournalEntry
+    {
+        $entries = JournalEntry::query()
+            ->with('lines.ledgerAccount')
+            ->where('source_type', $sourceType)
+            ->where('source_id', $sourceId)
+            ->where('status', 'posted')
+            ->get();
+
+        if ($entries->isEmpty()) {
+            return null;
+        }
+
+        return DB::transaction(function () use ($entries, $sourceType, $sourceId, $userId, $memo): ?JournalEntry {
+            $lastReversal = null;
+
+            foreach ($entries as $entry) {
+                $reversal = JournalEntry::create([
+                    'source_type' => $sourceType.'_reversal',
+                    'source_id' => $sourceId,
+                    'warehouse_id' => $entry->warehouse_id,
+                    'occurred_at' => now(),
+                    'status' => 'posted',
+                    'memo' => $memo ?? 'Reversa de asiento '.$entry->id,
+                    'created_by' => $userId ?? $entry->created_by,
+                ]);
+
+                foreach ($entry->lines as $line) {
+                    $reversal->lines()->create([
+                        'ledger_account_id' => $line->ledger_account_id,
+                        'third_party_type' => $line->third_party_type,
+                        'third_party_id' => $line->third_party_id,
+                        'debit' => round((float) $line->credit, 2),
+                        'credit' => round((float) $line->debit, 2),
+                        'metadata' => [
+                            'reverses_journal_entry_id' => $entry->id,
+                            'source_type' => $sourceType,
+                            'source_id' => $sourceId,
+                        ],
+                    ]);
+                }
+
+                $entry->update(['status' => 'reversed']);
+                $lastReversal = $reversal->load('lines.ledgerAccount');
+            }
+
+            return $lastReversal;
+        });
+    }
+
+    private function creditAccountForExpense(OperationalExpense $expense): LedgerAccount
+    {
+        if (($expense->status ?? 'paid') !== 'paid' || ! (bool) ($expense->affects_cash_flow ?? true)) {
+            return $this->accountByCode('2100', 'Accounts Payable / Accrued Expenses');
+        }
+
+        $bucket = PaymentMethod::liquidityBucket($expense->payment_method);
+
+        if ($bucket === PaymentMethod::LIQUIDITY_CASH) {
+            return $this->accountByCode('1100', 'Cash');
+        }
+
+        return $this->accountByCode('1110', 'Bank');
+    }
+
+    private function accountByCode(string $code, string $name): LedgerAccount
+    {
+        return LedgerAccount::firstOrCreate(
+            ['code' => $code],
+            [
+                'name' => $name,
+                'type' => $this->inferAccountType($code),
+                'is_active' => true,
+            ],
+        );
     }
 
     private function inferAccountType(string $code): string
