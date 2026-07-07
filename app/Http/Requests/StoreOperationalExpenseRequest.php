@@ -28,10 +28,21 @@ class StoreOperationalExpenseRequest extends FormRequest
         return [
             'warehouse_id' => ['nullable', 'exists:warehouses,id'],
             'expense_date' => ['required', 'date'],
-            'category' => ['required', 'string', Rule::in(array_keys(OperationalExpense::CATEGORIES))],
+            'category' => ['nullable', 'string', 'max:80'],
+            'category_id' => ['nullable', 'exists:operational_expense_categories,id'],
+            'custom_category_name' => ['nullable', 'string', 'max:100'],
+            'subcategory' => ['nullable', 'string', 'max:100'],
+            'supplier_id' => ['nullable', 'exists:suppliers,id'],
+            'ledger_account_id' => ['nullable', 'exists:ledger_accounts,id'],
             'description' => ['nullable', 'string', 'max:255'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'payment_method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes())],
+            'payment_method' => ['nullable', 'required_if:status,paid', 'string', Rule::in(PaymentMethod::realMoneyCodes())],
+            'recurrence' => ['nullable', 'string', Rule::in(array_keys(OperationalExpense::RECURRENCES))],
+            'status' => ['nullable', 'string', Rule::in(array_keys(OperationalExpense::STATUSES))],
+            'paid_at' => ['nullable', 'date'],
+            'affects_cash_flow' => ['nullable', 'boolean'],
+            'affects_income_statement' => ['nullable', 'boolean'],
+            'expense_kind' => ['nullable', 'string', Rule::in(array_keys(OperationalExpense::EXPENSE_KINDS))],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string'],
         ];
@@ -42,11 +53,9 @@ class StoreOperationalExpenseRequest extends FormRequest
         return [
             'expense_date.required' => 'La fecha del gasto es obligatoria.',
             'expense_date.date' => 'La fecha del gasto no es valida.',
-            'category.required' => 'La categoria del gasto es obligatoria.',
-            'category.in' => 'La categoria del gasto no es valida.',
             'amount.required' => 'El monto del gasto es obligatorio.',
             'amount.min' => 'El monto del gasto debe ser mayor a cero.',
-            'payment_method.required' => 'El metodo de pago del gasto es obligatorio.',
+            'payment_method.required_if' => 'El metodo de pago del gasto es obligatorio cuando el gasto esta pagado.',
             'payment_method.in' => 'El metodo de pago no es valido.',
         ];
     }

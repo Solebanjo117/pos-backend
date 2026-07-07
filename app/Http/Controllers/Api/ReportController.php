@@ -8,6 +8,9 @@ use App\Http\Requests\IncomeStatementReportRequest;
 use App\Http\Requests\LedgerTrialBalanceReportRequest;
 use App\Http\Requests\SalesByClientReportRequest;
 use App\Http\Requests\StoreFinancialAdjustmentRequest;
+use App\Models\JournalEntry;
+use App\Models\LedgerAccount;
+use App\Services\AccountingReportService;
 use App\Services\FinancialDrilldownService;
 use App\Services\FinancialSnapshotService;
 use App\Services\ReportService;
@@ -24,15 +27,19 @@ class ReportController extends Controller
 
     protected FinancialDrilldownService $financialDrilldownService;
 
+    protected AccountingReportService $accountingReportService;
+
     public function __construct(
         ReportService $reportService,
         FinancialSnapshotService $financialSnapshotService,
         FinancialDrilldownService $financialDrilldownService,
+        AccountingReportService $accountingReportService,
     )
     {
         $this->reportService = $reportService;
         $this->financialSnapshotService = $financialSnapshotService;
         $this->financialDrilldownService = $financialDrilldownService;
+        $this->accountingReportService = $accountingReportService;
     }
 
     /**
@@ -238,6 +245,46 @@ class ReportController extends Controller
         return response()->json($report);
     }
 
+    public function accountingJournal(Request $request): JsonResponse
+    {
+        $validated = $this->validateAccountingFilters($request);
+
+        return response()->json($this->accountingReportService->journal($validated));
+    }
+
+    public function accountingEntry(JournalEntry $entry): JsonResponse
+    {
+        return response()->json($this->accountingReportService->entry($entry));
+    }
+
+    public function accountingAccounts(Request $request): JsonResponse
+    {
+        $validated = $this->validateAccountingFilters($request);
+
+        return response()->json($this->accountingReportService->accounts($validated));
+    }
+
+    public function accountingAccountLedger(Request $request, LedgerAccount $account): JsonResponse
+    {
+        $validated = $this->validateAccountingFilters($request);
+
+        return response()->json($this->accountingReportService->accountLedger($account, $validated));
+    }
+
+    public function accountingTAccount(Request $request, LedgerAccount $account): JsonResponse
+    {
+        $validated = $this->validateAccountingFilters($request);
+
+        return response()->json($this->accountingReportService->tAccount($account, $validated));
+    }
+
+    public function accountingTrialBalance(Request $request): JsonResponse
+    {
+        $validated = $this->validateAccountingFilters($request);
+
+        return response()->json($this->accountingReportService->trialBalance($validated));
+    }
+
     public function customerReferences(Request $request): JsonResponse
     {
         $request->validate([
@@ -440,10 +487,12 @@ class ReportController extends Controller
     public function financialDrilldown(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'metric' => 'required|string|in:sales,sales_total,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,cash,bank,inventory,receivable,accounts_receivable,credit_receivable,sales_pending,payable,accounts_payable,credit_payable,purchase_pending,cogs,profit,gross_profit,net_profit,investment,adjustments',
+            'metric' => 'required|string|in:sales,sales_total,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,operational_expenses,cash,bank,inventory,receivable,accounts_receivable,credit_receivable,sales_pending,payable,accounts_payable,credit_payable,purchase_pending,cogs,profit,gross_profit,net_profit,assets,liabilities,equity,investment,investment_in,investment_out,adjustments',
             'date_from' => 'required|date',
             'date_to' => 'required|date|after_or_equal:date_from',
             'warehouse_id' => 'nullable|exists:warehouses,id',
+            'expense_category' => 'nullable|string|max:100',
+            'expense_group' => 'nullable|string|in:rent,salary,utilities,internet,other',
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
@@ -456,14 +505,14 @@ class ReportController extends Controller
         $journalEntries = DB::table('journal_entries')->count();
         $journalLines = DB::table('journal_lines')->count();
         $ledgerEntries = DB::table('account_ledger_entries')->count();
-        $hasLedger = $journalEntries > 0 && $journalLines > 0 && $ledgerEntries > 0;
+        $hasJournal = $journalEntries > 0 && $journalLines > 0;
 
         return response()->json([
             'ledger' => [
                 'journal_entries' => $journalEntries,
                 'journal_lines' => $journalLines,
                 'account_ledger_entries' => $ledgerEntries,
-                'is_available' => $hasLedger,
+                'is_available' => $hasJournal,
             ],
             'reports' => [
                 ['key' => 'operational_income_statement', 'label' => 'Estado de resultados operativo', 'status' => 'available', 'source' => 'Ventas, COGS y gastos operativos'],
@@ -471,11 +520,11 @@ class ReportController extends Controller
                 ['key' => 'receivables', 'label' => 'Cuentas por cobrar detalladas', 'status' => 'available', 'source' => 'Ventas menos pagos reales'],
                 ['key' => 'payables', 'label' => 'Cuentas por pagar detalladas', 'status' => 'available', 'source' => 'Compras menos pagos reales'],
                 ['key' => 'cash_flow', 'label' => 'Flujo de efectivo operativo', 'status' => 'partial', 'source' => 'Pagos operativos; no es ledger formal'],
-                ['key' => 'general_journal', 'label' => 'Libro Diario formal', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Journal entries' : 'Pendiente de alimentar journal_entries y journal_lines'],
-                ['key' => 'general_ledger', 'label' => 'Mayor General formal', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Account ledger entries' : 'Sin datos contables disponibles'],
-                ['key' => 't_accounts', 'label' => 'Cuentas T formales', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Ledger contable' : 'Disponible en futura fase de contabilidad formal'],
-                ['key' => 'trial_balance', 'label' => 'Trial Balance real', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Journal lines' : 'Requiere ledger contable real'],
-                ['key' => 'formal_balance', 'label' => 'Balance contable formal', 'status' => $hasLedger ? 'available' : 'pending', 'source' => $hasLedger ? 'Ledger contable' : 'No se genera con datos operativos para evitar contabilidad falsa'],
+                ['key' => 'general_journal', 'label' => 'Libro Diario formal', 'status' => $hasJournal ? 'available' : 'pending', 'source' => $hasJournal ? 'Journal entries' : 'Pendiente de alimentar journal_entries y journal_lines'],
+                ['key' => 'general_ledger', 'label' => 'Mayor General formal', 'status' => $hasJournal ? 'available' : 'pending', 'source' => $hasJournal ? 'Journal lines' : 'Sin asientos contables disponibles'],
+                ['key' => 't_accounts', 'label' => 'Cuentas T formales', 'status' => $hasJournal ? 'available' : 'pending', 'source' => $hasJournal ? 'Journal lines' : 'Disponible cuando existan asientos contables'],
+                ['key' => 'trial_balance', 'label' => 'Trial Balance real', 'status' => $hasJournal ? 'available' : 'pending', 'source' => $hasJournal ? 'Journal lines' : 'Requiere journal_entries y journal_lines'],
+                ['key' => 'formal_balance', 'label' => 'Balance contable formal', 'status' => $hasJournal ? 'available' : 'pending', 'source' => $hasJournal ? 'Journal lines' : 'No se genera con datos operativos para evitar contabilidad falsa'],
             ],
         ]);
     }
@@ -549,6 +598,22 @@ class ReportController extends Controller
         return response()->json([
             'success' => true,
             'data' => $this->reportService->listFinancialAdjustments($filters),
+        ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function validateAccountingFilters(Request $request): array
+    {
+        return $request->validate([
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'warehouse_id' => ['nullable', 'exists:warehouses,id'],
+            'source_type' => ['nullable', 'string', 'max:80'],
+            'source_id' => ['nullable', 'integer', 'min:1'],
+            'page' => ['nullable', 'integer', 'min:1'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
         ]);
     }
 }

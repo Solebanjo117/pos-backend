@@ -41,20 +41,23 @@ class FinancialDrilldownService
         $warehouseId = isset($filters['warehouse_id']) ? (int) $filters['warehouse_id'] : null;
         $page = max(1, (int) ($filters['page'] ?? 1));
         $perPage = min(100, max(10, (int) ($filters['per_page'] ?? 25)));
+        $expenseCategory = trim((string) ($filters['expense_category'] ?? '')) ?: null;
+        $expenseGroup = trim((string) ($filters['expense_group'] ?? '')) ?: null;
 
         return match ($metric) {
             'sales', 'sales_total' => $this->sales($metric, $from, $to, $warehouseId, $page, $perPage),
             'payments_received', 'sales_collected' => $this->salesPayments($metric, $from, $to, $warehouseId, $page, $perPage),
             'purchases', 'purchase' => $this->purchases($metric, $from, $to, $warehouseId, $page, $perPage),
             'supplier_payments', 'purchase_paid' => $this->supplierPayments($metric, $from, $to, $warehouseId, $page, $perPage),
-            'expenses' => $this->expenses($metric, $from, $to, $warehouseId, $page, $perPage),
+            'expenses', 'operational_expenses' => $this->expenses($metric, $from, $to, $warehouseId, $page, $perPage, $expenseCategory, $expenseGroup),
             'inventory' => $this->inventory($metric, $to, $warehouseId, $page, $perPage),
             'receivable', 'accounts_receivable', 'credit_receivable', 'sales_pending' => $this->receivables($metric, $to, $warehouseId, $page, $perPage),
             'payable', 'accounts_payable', 'credit_payable', 'purchase_pending' => $this->payables($metric, $to, $warehouseId, $page, $perPage),
             'cogs' => $this->cogs($metric, $from, $to, $warehouseId, $page, $perPage),
             'profit', 'gross_profit', 'net_profit' => $this->profit($metric, $from, $to, $warehouseId, $page, $perPage),
+            'assets', 'liabilities', 'equity' => $this->compositeBalance($metric, $from, $to, $warehouseId, $page, $perPage),
             'cash', 'bank' => $this->liquidity($metric, $from, $to, $warehouseId, $page, $perPage),
-            'investment' => $this->investment($metric, $from, $to, $warehouseId, $page, $perPage),
+            'investment', 'investment_in', 'investment_out' => $this->investment($metric, $from, $to, $warehouseId, $page, $perPage),
             'adjustments' => $this->adjustments($metric, $from, $to, $warehouseId, $page, $perPage),
             default => $this->emptyPayload($metric, 'Metrica no soportada', $page, $perPage, ['metric_not_supported']),
         };
@@ -205,13 +208,18 @@ class FinancialDrilldownService
         return $this->collectionPayload($metric, 'Pagos a proveedores', $this->paymentColumns(), $rows, $page, $perPage);
     }
 
-    private function expenses(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    private function expenses(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage, ?string $expenseCategory = null, ?string $expenseGroup = null): array
     {
-        $expenses = OperationalExpense::query()
-            ->with(['creator'])
-            ->whereDate('expense_date', '>=', $from->toDateString())
-            ->whereDate('expense_date', '<=', $to->toDateString())
-            ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+        $expenses = $this->applyExpenseDrilldownFilters(
+            OperationalExpense::query()
+                ->with(['creator', 'categoryRecord'])
+                ->whereDate('expense_date', '>=', $from->toDateString())
+                ->whereDate('expense_date', '<=', $to->toDateString())
+                ->where(fn (Builder $query) => $query->where('affects_income_statement', true)->orWhereNull('affects_income_statement'))
+                ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId))),
+            $expenseCategory,
+            $expenseGroup,
+        )
             ->orderByDesc('expense_date')
             ->orderByDesc('id')
             ->get();
@@ -220,6 +228,7 @@ class FinancialDrilldownService
             'id' => $expense->id,
             'date' => $expense->expense_date?->toDateString(),
             ...$this->traceFields($expense->created_at, $expense->business_datetime, 'created_at'),
+            'category_code' => $expense->category,
             'category' => $expense->category_label,
             'description' => $expense->description,
             'user' => $expense->creator?->name,
@@ -228,7 +237,14 @@ class FinancialDrilldownService
             'amount' => $this->money($expense->amount),
         ]);
 
-        return $this->collectionPayload($metric, 'Gastos', [
+        $label = 'Gastos';
+        if ($expenseCategory) {
+            $label = 'Gastos: '.($rows->first()['category'] ?? $expenseCategory);
+        } elseif ($expenseGroup) {
+            $label = 'Gastos: '.$this->expenseGroupLabel($expenseGroup);
+        }
+
+        return $this->collectionPayload($metric, $label, [
             ...$this->datetimeColumns(),
             ['key' => 'category', 'label' => 'Categoria'],
             ['key' => 'description', 'label' => 'Concepto'],
@@ -426,6 +442,7 @@ class FinancialDrilldownService
             ->with(['creator'])
             ->whereDate('expense_date', '>=', $from->toDateString())
             ->whereDate('expense_date', '<=', $to->toDateString())
+            ->where(fn (Builder $query) => $query->where('affects_income_statement', true)->orWhereNull('affects_income_statement'))
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->get()
             ->map(fn (OperationalExpense $expense): array => [
@@ -455,6 +472,73 @@ class FinancialDrilldownService
             ['key' => 'cost', 'label' => 'Costo/Gasto', 'type' => 'money'],
             ['key' => 'amount', 'label' => 'Utilidad', 'type' => 'money'],
         ], $detailRows, $page, $perPage);
+    }
+
+    private function compositeBalance(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $balance = $this->snapshots->balanceSheet([
+            'date_from' => $from->toDateString(),
+            'date_to' => $to->toDateString(),
+            'warehouse_id' => $warehouseId,
+        ]);
+
+        $assets = $balance['assets'] ?? [];
+        $liabilities = $balance['liabilities'] ?? [];
+        $totals = $balance['totals'] ?? [];
+
+        $rows = match ($metric) {
+            'assets' => collect([
+                $this->compositeRow('cash', 'Efectivo', 'Cash', $assets['cash'] ?? 0, $to),
+                $this->compositeRow('bank', 'Banco', 'Bank', $assets['bank'] ?? 0, $to),
+                $this->compositeRow('inventory', 'Inventario', 'Inventory lots', $assets['inventory'] ?? 0, $to),
+                $this->compositeRow('receivable', 'Cuentas por cobrar', 'Ventas a credito', $liabilities['accounts_receivable'] ?? 0, $to),
+            ]),
+            'liabilities' => collect([
+                $this->compositeRow('payable', 'Cuentas por pagar', 'Compras a credito', $liabilities['accounts_payable'] ?? 0, $to),
+            ]),
+            default => collect([
+                $this->compositeRow('assets', 'Activos', 'Balance operativo', $totals['total_assets'] ?? 0, $to),
+                $this->compositeRow('liabilities', 'Pasivos', 'Balance operativo', -((float) ($totals['total_liabilities'] ?? 0)), $to),
+            ]),
+        };
+
+        $label = match ($metric) {
+            'assets' => 'Activos',
+            'liabilities' => 'Pasivos',
+            default => 'Patrimonio / balance neto',
+        };
+
+        $forcedTotal = match ($metric) {
+            'assets' => $this->money($totals['total_assets'] ?? $rows->sum('amount')),
+            'liabilities' => $this->money($totals['total_liabilities'] ?? $rows->sum('amount')),
+            default => $this->money($totals['balance'] ?? $rows->sum('amount')),
+        };
+
+        return $this->collectionPayload($metric, $label, [
+            ...$this->datetimeColumns(),
+            ['key' => 'component', 'label' => 'Componente'],
+            ['key' => 'source', 'label' => 'Origen'],
+            ['key' => 'detail_metric', 'label' => 'Detalle'],
+            ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
+        ], $rows, $page, $perPage, $balance['warnings'] ?? [], $forcedTotal);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function compositeRow(string $detailMetric, string $component, string $source, float|int|string $amount, Carbon $to): array
+    {
+        return [
+            'id' => 'component-'.$detailMetric,
+            'date' => $to->toDateString(),
+            'occurred_at' => null,
+            'business_datetime' => null,
+            'datetime_source' => 'computed_balance',
+            'component' => $component,
+            'source' => $source,
+            'detail_metric' => $detailMetric,
+            'amount' => $this->money($amount),
+        ];
     }
 
     private function liquidity(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
@@ -505,6 +589,8 @@ class FinancialDrilldownService
             ->with(['user'])
             ->whereDate('movement_date', '>=', $from->toDateString())
             ->whereDate('movement_date', '<=', $to->toDateString())
+            ->when($metric === 'investment_in', fn (Builder $query) => $query->where('movement_type', CapitalMovement::TYPE_IN))
+            ->when($metric === 'investment_out', fn (Builder $query) => $query->where('movement_type', CapitalMovement::TYPE_OUT))
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->orderByDesc('movement_date')
             ->orderByDesc('id')
@@ -519,7 +605,13 @@ class FinancialDrilldownService
                 'amount' => $this->money($movement->movement_type === CapitalMovement::TYPE_IN ? $movement->amount : -$movement->amount),
             ]);
 
-        return $this->collectionPayload($metric, 'Inversion', [
+        $label = match ($metric) {
+            'investment_in' => 'Inversion - entradas',
+            'investment_out' => 'Inversion - salidas',
+            default => 'Inversion',
+        };
+
+        return $this->collectionPayload($metric, $label, [
             ...$this->datetimeColumns(),
             ['key' => 'type', 'label' => 'Tipo'],
             ['key' => 'user', 'label' => 'Usuario'],
@@ -617,6 +709,7 @@ class FinancialDrilldownService
             ->with(['creator'])
             ->whereDate('expense_date', '>=', $from->toDateString())
             ->whereDate('expense_date', '<=', $to->toDateString())
+            ->where(fn (Builder $query) => $query->where('affects_cash_flow', true)->orWhereNull('affects_cash_flow'))
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->get()
             ->filter(fn (OperationalExpense $expense): bool => $this->paymentBucket($expense->payment_method) === $bucket)
@@ -694,6 +787,51 @@ class FinancialDrilldownService
                 'total' => $paginator->total(),
             ],
         ];
+    }
+
+    private function applyExpenseDrilldownFilters(Builder $query, ?string $expenseCategory, ?string $expenseGroup): Builder
+    {
+        if ($expenseCategory) {
+            return $query->where('category', $expenseCategory);
+        }
+
+        if (! $expenseGroup) {
+            return $query;
+        }
+
+        $categories = $this->expenseGroupCategories($expenseGroup);
+
+        if ($expenseGroup === 'other') {
+            return $query->whereNotIn('category', ['rent', 'payroll', 'electricity', 'utilities', 'software']);
+        }
+
+        return $query->whereIn('category', $categories);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function expenseGroupCategories(string $expenseGroup): array
+    {
+        return match ($expenseGroup) {
+            'rent' => ['rent'],
+            'salary' => ['payroll'],
+            'utilities' => ['utilities', 'electricity'],
+            'internet' => ['software'],
+            default => [],
+        };
+    }
+
+    private function expenseGroupLabel(string $expenseGroup): string
+    {
+        return match ($expenseGroup) {
+            'rent' => 'Rent',
+            'salary' => 'Salary',
+            'utilities' => 'Utilities',
+            'internet' => 'Internet',
+            'other' => 'Otros',
+            default => $expenseGroup,
+        };
     }
 
     private function emptyPayload(string $metric, string $label, int $page, int $perPage, array $warnings = []): array
