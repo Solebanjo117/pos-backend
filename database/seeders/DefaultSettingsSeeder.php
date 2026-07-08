@@ -26,6 +26,15 @@ class DefaultSettingsSeeder extends Seeder
             ['store_logo_url', '', 'string', 'store'],
             ['store_ticket_footer', '¡Gracias por su compra!', 'string', 'store'],
 
+            // Regional/system preferences
+            ['regional_timezone', 'America/Panama', 'string', 'regional'],
+            ['regional_date_format', 'DD/MM/YYYY', 'string', 'regional'],
+            ['regional_time_format', '24h', 'string', 'regional'],
+            ['regional_datetime_format', 'DD/MM/YYYY HH:mm', 'string', 'regional'],
+            ['regional_country', 'Panama', 'string', 'regional'],
+            ['regional_decimal_separator', '.', 'string', 'regional'],
+            ['regional_settings_active', true, 'boolean', 'regional'],
+
             // Pricing & tax
             ['store_tax_rate', 7.0, 'number', 'store'],
             ['pricing_formula', '', 'string', 'pricing'],

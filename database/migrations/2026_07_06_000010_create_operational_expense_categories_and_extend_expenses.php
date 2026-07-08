@@ -77,10 +77,21 @@ return new class extends Migration
             'expense_kind' => 'operational',
         ]);
 
-        DB::table('operational_expenses')
-            ->leftJoin('operational_expense_categories', 'operational_expenses.category', '=', 'operational_expense_categories.slug')
-            ->whereNull('operational_expenses.category_id')
-            ->update(['operational_expenses.category_id' => DB::raw('operational_expense_categories.id')]);
+        if (
+            Schema::hasTable('operational_expense_categories')
+            && Schema::hasTable('operational_expenses')
+            && Schema::hasColumn('operational_expenses', 'category_id')
+        ) {
+            $categories = DB::table('operational_expense_categories')
+                ->pluck('id', 'slug');
+
+            foreach ($categories as $slug => $categoryId) {
+                DB::table('operational_expenses')
+                    ->whereNull('category_id')
+                    ->where('category', $slug)
+                    ->update(['category_id' => $categoryId]);
+            }
+        }
     }
 
     public function down(): void

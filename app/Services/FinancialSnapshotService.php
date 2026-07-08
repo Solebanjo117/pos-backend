@@ -13,6 +13,7 @@ use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
 use App\Models\SalesReturn;
+use App\Support\RegionalDateRange;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -319,12 +320,12 @@ class FinancialSnapshotService
             $sameDayCashPayments = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
                     && (float) $payment->amount > 0
-                    && $payment->paid_at?->toDateString() === $orderDate)
+                    && $this->localDate($payment->paid_at) === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $sameDayBankPayments = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
                     && (float) $payment->amount > 0
-                    && $payment->paid_at?->toDateString() === $orderDate)
+                    && $this->localDate($payment->paid_at) === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $creditMarkers = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => in_array($payment->method, self::NON_CASH_METHODS, true))
@@ -427,11 +428,11 @@ class FinancialSnapshotService
             $total = $this->money($order->total);
             $sameDayCashPayments = $order->payments
                 ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
-                    && $payment->paid_at?->toDateString() === $orderDate)
+                    && $this->localDate($payment->paid_at) === $orderDate)
                 ->sum(fn (PurchaseOrderPayment $payment): float => (float) $payment->amount);
             $sameDayBankPayments = $order->payments
                 ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
-                    && $payment->paid_at?->toDateString() === $orderDate)
+                    && $this->localDate($payment->paid_at) === $orderDate)
                 ->sum(fn (PurchaseOrderPayment $payment): float => (float) $payment->amount);
             $cashPurchases = min($total, $sameDayCashPayments);
             $bankPurchases = min(max($total - $cashPurchases, 0), $sameDayBankPayments);
@@ -484,8 +485,7 @@ class FinancialSnapshotService
         $flows = $this->emptyFlows();
         $payments = SalesOrderPayment::query()
             ->with('salesOrder.items')
-            ->whereDate('paid_at', '<=', $to->toDateString())
-            ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
+            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_CASH_METHODS)
             ->where('amount', '>', 0)
             ->get();
@@ -496,7 +496,7 @@ class FinancialSnapshotService
                 continue;
             }
 
-            if ($payment->paid_at?->toDateString() === $order->date?->toDateString()) {
+            if ($this->localDate($payment->paid_at) === $order->date?->toDateString()) {
                 continue;
             }
 
@@ -523,8 +523,7 @@ class FinancialSnapshotService
         $flows = $this->emptyFlows();
         $payments = PurchaseOrderPayment::query()
             ->with('purchaseOrder')
-            ->whereDate('paid_at', '<=', $to->toDateString())
-            ->when($from, fn (Builder $query) => $query->whereDate('paid_at', '>=', $from->toDateString()))
+            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_CASH_METHODS)
             ->get();
 
@@ -534,7 +533,7 @@ class FinancialSnapshotService
                 continue;
             }
 
-            if ($payment->paid_at?->toDateString() === $order->order_date?->toDateString()) {
+            if ($this->localDate($payment->paid_at) === $order->order_date?->toDateString()) {
                 continue;
             }
 
@@ -861,6 +860,19 @@ class FinancialSnapshotService
     private function paymentBucket(?string $method): ?string
     {
         return PaymentMethod::liquidityBucket($method);
+    }
+
+    /**
+     * @return array{0: Carbon, 1: Carbon}
+     */
+    private function timestampBounds(?Carbon $from, Carbon $to): array
+    {
+        return RegionalDateRange::utcBounds($from ?? '1900-01-01', $to);
+    }
+
+    private function localDate(?Carbon $timestamp): ?string
+    {
+        return $timestamp?->copy()->setTimezone(RegionalDateRange::timezone())->toDateString();
     }
 
     /**
