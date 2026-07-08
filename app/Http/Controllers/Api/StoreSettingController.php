@@ -6,9 +6,11 @@ use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Models\Setting;
 use App\Services\PricingFormulaService;
+use DateTimeZone;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class StoreSettingController extends Controller
 {
@@ -20,11 +22,7 @@ class StoreSettingController extends Controller
      */
     public function index(): JsonResponse
     {
-        $settings = Setting::where('group', 'store')
-            ->orWhere('group', 'pricing')
-            ->orWhere('group', 'quotes')
-            ->orWhere('group', 'modules')
-            ->orWhere('group', 'sku')
+        $settings = Setting::whereIn('group', $this->settingGroups())
             ->get(['*']);
 
         $map = $settings->mapWithKeys(fn ($s) => [$s->key => $s->getTypedValue()]);
@@ -39,6 +37,9 @@ class StoreSettingController extends Controller
     public function update(Request $request): JsonResponse
     {
         $this->normalizeIntegerPercentField($request, 'store_tax_rate');
+        $this->normalizeUppercaseField($request, 'store_currency');
+
+        $request->validate($this->validationRules());
 
         $allowed = [
             'store_name', 'store_tagline', 'store_owner_name',
@@ -51,6 +52,13 @@ class StoreSettingController extends Controller
             'require_stock_for_quotes',
             'modules_work_orders_enabled',
             'sku_format',
+            'regional_timezone',
+            'regional_date_format',
+            'regional_time_format',
+            'regional_datetime_format',
+            'regional_country',
+            'regional_decimal_separator',
+            'regional_settings_active',
         ];
 
         foreach ($allowed as $key) {
@@ -59,12 +67,13 @@ class StoreSettingController extends Controller
                     in_array($key, ['pricing_formula', 'price_rounding_increment']) => 'pricing',
                     str_starts_with($key, 'modules_') => 'modules',
                     str_starts_with($key, 'quote_') || $key === 'require_stock_for_quotes' => 'quotes',
+                    str_starts_with($key, 'regional_') => 'regional',
                     $key === 'sku_format' => 'sku',
                     default => 'store',
                 };
                 $type = match (true) {
                     in_array($key, ['quote_expiration_days', 'store_tax_rate', 'price_rounding_increment']) => 'number',
-                    in_array($key, ['modules_work_orders_enabled', 'require_stock_for_quotes']) => 'boolean',
+                    in_array($key, ['modules_work_orders_enabled', 'require_stock_for_quotes', 'regional_settings_active']) => 'boolean',
                     $key === 'sku_format' => 'json',
                     default => 'string',
                 };
@@ -78,7 +87,7 @@ class StoreSettingController extends Controller
 
         return response()->json([
             'message' => 'Configuración guardada correctamente',
-            'data' => Setting::whereIn('group', ['store', 'pricing', 'quotes', 'modules', 'sku'])->get(['*'])->mapWithKeys(fn ($s) => [$s->key => $s->getTypedValue()]),
+            'data' => Setting::whereIn('group', $this->settingGroups())->get(['*'])->mapWithKeys(fn ($s) => [$s->key => $s->getTypedValue()]),
         ]);
     }
 
@@ -154,5 +163,44 @@ class StoreSettingController extends Controller
         if (is_numeric($value)) {
             $request->merge([$field => (int) round((float) $value)]);
         }
+    }
+
+    private function normalizeUppercaseField(Request $request, string $field): void
+    {
+        if ($request->has($field) && is_string($request->input($field))) {
+            $request->merge([$field => strtoupper(trim((string) $request->input($field)))]);
+        }
+    }
+
+    /**
+     * @return array<string, array<int, mixed>>
+     */
+    private function validationRules(): array
+    {
+        return [
+            'store_currency' => ['sometimes', 'required', 'string', 'size:3', 'regex:/^[A-Z]{3}$/'],
+            'regional_timezone' => ['sometimes', 'required', 'string', Rule::in(DateTimeZone::listIdentifiers())],
+            'regional_date_format' => ['sometimes', 'required', 'string', Rule::in(['DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD'])],
+            'regional_time_format' => ['sometimes', 'required', 'string', Rule::in(['12h', '24h'])],
+            'regional_datetime_format' => ['sometimes', 'required', 'string', Rule::in([
+                'DD/MM/YYYY HH:mm',
+                'DD/MM/YYYY hh:mm A',
+                'MM/DD/YYYY HH:mm',
+                'MM/DD/YYYY hh:mm A',
+                'YYYY-MM-DD HH:mm',
+                'YYYY-MM-DD hh:mm A',
+            ])],
+            'regional_country' => ['sometimes', 'required', 'string', 'max:80'],
+            'regional_decimal_separator' => ['sometimes', 'required', 'string', Rule::in(['.', ','])],
+            'regional_settings_active' => ['sometimes', 'boolean'],
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function settingGroups(): array
+    {
+        return ['store', 'pricing', 'quotes', 'modules', 'sku', 'regional'];
     }
 }

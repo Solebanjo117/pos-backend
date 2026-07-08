@@ -12,6 +12,7 @@ use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
+use App\Support\RegionalDateRange;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
@@ -107,8 +108,7 @@ class FinancialDrilldownService
     {
         $payments = SalesOrderPayment::query()
             ->with(['salesOrder.customer', 'salesOrder.items', 'creator'])
-            ->whereDate('paid_at', '>=', $from->toDateString())
-            ->whereDate('paid_at', '<=', $to->toDateString())
+            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->where('amount', '>', 0)
             ->whereHas('salesOrder', fn (Builder $query) => $query->whereIn('status', self::SALES_STATUSES))
@@ -184,8 +184,7 @@ class FinancialDrilldownService
     {
         $payments = PurchaseOrderPayment::query()
             ->with(['purchaseOrder.supplier', 'user'])
-            ->whereDate('paid_at', '>=', $from->toDateString())
-            ->whereDate('paid_at', '<=', $to->toDateString())
+            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereHas('purchaseOrder', fn (Builder $query) => $query->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('purchaseOrder', fn (Builder $purchase) => $purchase->where('warehouse_id', $warehouseId)))
@@ -653,8 +652,7 @@ class FinancialDrilldownService
     {
         return SalesOrderPayment::query()
             ->with(['salesOrder.customer', 'salesOrder.items', 'salesReturn', 'creator'])
-            ->whereDate('paid_at', '>=', $from->toDateString())
-            ->whereDate('paid_at', '<=', $to->toDateString())
+            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereHas('salesOrder', fn (Builder $query) => $query->whereIn('status', self::SALES_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('salesOrder.items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))
@@ -684,8 +682,7 @@ class FinancialDrilldownService
     {
         return PurchaseOrderPayment::query()
             ->with(['purchaseOrder.supplier', 'user'])
-            ->whereDate('paid_at', '>=', $from->toDateString())
-            ->whereDate('paid_at', '<=', $to->toDateString())
+            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereHas('purchaseOrder', fn (Builder $query) => $query->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('purchaseOrder', fn (Builder $purchase) => $purchase->where('warehouse_id', $warehouseId)))
@@ -832,6 +829,14 @@ class FinancialDrilldownService
             'other' => 'Otros',
             default => $expenseGroup,
         };
+    }
+
+    /**
+     * @return array{0: Carbon, 1: Carbon}
+     */
+    private function timestampBounds(Carbon $from, Carbon $to): array
+    {
+        return RegionalDateRange::utcBounds($from, $to);
     }
 
     private function emptyPayload(string $metric, string $label, int $page, int $perPage, array $warnings = []): array

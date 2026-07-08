@@ -19,6 +19,7 @@ use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
 use App\Models\SalesReturn;
 use App\Models\Warehouse;
+use App\Support\RegionalDateRange;
 use Carbon\Carbon;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
@@ -710,8 +711,10 @@ class ReportService
      */
     public function generateMovementHistoryReport(array $filters): array
     {
+        [$from, $to] = RegionalDateRange::utcBounds($filters['date_from'], $filters['date_to']);
+
         $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'lotAllocations.lot'])
-            ->whereBetween('created_at', [$filters['date_from'], $filters['date_to']]);
+            ->whereBetween('created_at', [$from, $to]);
 
         // Apply filters
         if (! empty($filters['product_id'])) {
@@ -764,7 +767,7 @@ class ReportService
 
             return [
                 'id' => $movement->id,
-                'date' => $movement->created_at->format('Y-m-d H:i:s'),
+                'date' => $movement->created_at->toIso8601String(),
                 'product_id' => $movement->product_id,
                 'product_name' => $movement->product->name,
                 'product_sku' => $movement->product->sku_base,
@@ -963,7 +966,10 @@ class ReportService
         };
 
         return $movements->groupBy(function ($movement) use ($format) {
-            return $movement->created_at->format($format);
+            return $movement->created_at
+                ->copy()
+                ->setTimezone(RegionalDateRange::timezone())
+                ->format($format);
         })->map(function ($items, $date) {
             $inbound = $items->where('movement_type', 'in')->sum('quantity');
             $outbound = $items->where('movement_type', 'out')->sum('quantity');
@@ -1064,8 +1070,9 @@ class ReportService
         }
 
         // Cash-basis: Fetch payments for the given period
+        [$timestampFrom, $timestampTo] = RegionalDateRange::utcBounds($filters['date_from'], $filters['date_to']);
         $paymentsQuery = \App\Models\SalesOrderPayment::with('salesOrder.items')
-            ->whereBetween('paid_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
+            ->whereBetween('paid_at', [$timestampFrom, $timestampTo])
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->where('amount', '>', 0)
             ->whereHas('salesOrder', fn ($query) => $query->whereIn('status', ['confirmed', 'processing', 'completed']));
@@ -1079,7 +1086,9 @@ class ReportService
         $payments = $paymentsQuery->get();
 
         foreach ($payments as $payment) {
-            $paymentDate = \Carbon\Carbon::parse($payment->paid_at)->format('Y-m-d');
+            $paymentDate = \Carbon\Carbon::parse($payment->paid_at)
+                ->setTimezone(RegionalDateRange::timezone())
+                ->format('Y-m-d');
 
             if (! isset($timeline[$paymentDate])) {
                 $timeline[$paymentDate] = [
@@ -1103,11 +1112,11 @@ class ReportService
         $refundsQuery = SalesReturn::query()
             ->with('items.salesOrderItem')
             ->where('status', 'approved')
-            ->where(function ($query) use ($filters): void {
-                $query->whereBetween('approved_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
-                    ->orWhere(function ($legacy) use ($filters): void {
+            ->where(function ($query) use ($timestampFrom, $timestampTo): void {
+                $query->whereBetween('approved_at', [$timestampFrom, $timestampTo])
+                    ->orWhere(function ($legacy) use ($timestampFrom, $timestampTo): void {
                         $legacy->whereNull('approved_at')
-                            ->whereBetween('updated_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+                            ->whereBetween('updated_at', [$timestampFrom, $timestampTo]);
                     });
             });
 
@@ -1461,14 +1470,15 @@ class ReportService
             $timeline[$date]['orders_count'] += 1;
         }
 
+        [$timestampFrom, $timestampTo] = RegionalDateRange::utcBounds($filters['date_from'], $filters['date_to']);
         $refundsQuery = SalesReturn::query()
             ->with('items.salesOrderItem')
             ->where('status', 'approved')
-            ->where(function ($query) use ($filters): void {
-                $query->whereBetween('approved_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59'])
-                    ->orWhere(function ($legacy) use ($filters): void {
+            ->where(function ($query) use ($timestampFrom, $timestampTo): void {
+                $query->whereBetween('approved_at', [$timestampFrom, $timestampTo])
+                    ->orWhere(function ($legacy) use ($timestampFrom, $timestampTo): void {
                         $legacy->whereNull('approved_at')
-                            ->whereBetween('updated_at', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
+                            ->whereBetween('updated_at', [$timestampFrom, $timestampTo]);
                     });
             });
 
@@ -2151,8 +2161,7 @@ class ReportService
      */
     public function generateZReport(string $date, ?int $warehouseId = null, ?int $userId = null): array
     {
-        $startOfDay = \Carbon\Carbon::parse($date)->startOfDay();
-        $endOfDay = \Carbon\Carbon::parse($date)->endOfDay();
+        [$startOfDay, $endOfDay] = RegionalDateRange::utcBounds($date, $date);
         $sessions = \App\Models\PosSession::with('user')
             ->whereBetween('opened_at', [$startOfDay, $endOfDay])
             ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
