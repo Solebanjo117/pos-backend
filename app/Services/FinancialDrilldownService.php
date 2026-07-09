@@ -405,7 +405,7 @@ class FinancialDrilldownService
             'amount' => $this->money((float) $item->unit_cost * (int) $item->quantity),
         ]);
 
-        return $this->collectionPayload($metric, 'COGS', $this->itemColumns('Costo'), $rows, $page, $perPage);
+        return $this->collectionPayload($metric, 'Costo', $this->itemColumns('Costo'), $rows, $page, $perPage);
     }
 
     private function profit(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array

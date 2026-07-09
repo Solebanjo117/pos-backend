@@ -477,7 +477,7 @@ class DashboardService
             ['key' => 'total_revenue', 'label' => 'Ingresos Totales', 'route' => '/reports/financial', 'tone' => 'blue', 'format' => 'currency'],
             ['key' => 'accounts_receivable', 'label' => 'Cuentas por Cobrar', 'route' => '/ar', 'tone' => 'orange', 'format' => 'currency'],
             ['key' => 'net_profit', 'label' => 'Utilidad Neta', 'route' => '/reports/financial', 'tone' => 'emerald', 'format' => 'currency'],
-            ['key' => 'cogs_expenses', 'label' => 'Gastos / COGS', 'route' => '/reports/financial', 'tone' => 'red', 'format' => 'currency'],
+            ['key' => 'cogs_expenses', 'label' => 'Gastos / Costo', 'route' => '/reports/financial', 'tone' => 'red', 'format' => 'currency'],
             ['key' => 'cash_collected', 'label' => 'Caja Cobrada', 'route' => '/reports/z-report', 'tone' => 'green', 'format' => 'currency'],
             ['key' => 'inventory_value', 'label' => 'Valor Inventario', 'route' => '/inventory', 'tone' => 'indigo', 'format' => 'currency'],
             ['key' => 'pending_orders', 'label' => 'Ordenes Pendientes', 'route' => '/sales-orders', 'tone' => 'sky', 'format' => 'integer'],
