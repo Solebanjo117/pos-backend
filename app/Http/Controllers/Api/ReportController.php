@@ -515,7 +515,7 @@ class ReportController extends Controller
                 'is_available' => $hasJournal,
             ],
             'reports' => [
-                ['key' => 'operational_income_statement', 'label' => 'Estado de resultados operativo', 'status' => 'available', 'source' => 'Ventas, COGS y gastos operativos'],
+                ['key' => 'operational_income_statement', 'label' => 'Estado de resultados operativo', 'status' => 'available', 'source' => 'Ventas, costo y gastos operativos'],
                 ['key' => 'operational_balance', 'label' => 'Balance operativo', 'status' => 'available', 'source' => 'Snapshots, inventario, CxC y CxP'],
                 ['key' => 'receivables', 'label' => 'Cuentas por cobrar detalladas', 'status' => 'available', 'source' => 'Ventas menos pagos reales'],
                 ['key' => 'payables', 'label' => 'Cuentas por pagar detalladas', 'status' => 'available', 'source' => 'Compras menos pagos reales'],
