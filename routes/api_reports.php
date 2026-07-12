@@ -3,6 +3,11 @@
 use App\Http\Controllers\Api\ReportController;
 use Illuminate\Support\Facades\Route;
 
+Route::prefix('reports')->middleware(['role:admin,manager,cashier', 'warehouse_context'])->group(function () {
+    Route::get('/z-report', [ReportController::class, 'zReport']);
+    Route::get('/z-report/export', [ReportController::class, 'exportZReport']);
+});
+
 Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context'])->group(function () {
     Route::get('/stock-levels', [ReportController::class, 'stockLevels']);
     Route::get('/movement-history', [ReportController::class, 'movementHistory']);
@@ -16,9 +21,6 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/sales-by-client/export/{format}', [ReportController::class, 'exportSalesByClient']);
     Route::get('/brand-profitability', [ReportController::class, 'brandProfitability']);
     Route::get('/category-profitability', [ReportController::class, 'categoryProfitability']);
-    Route::get('/z-report', [ReportController::class, 'zReport']);
-    Route::get('/z-report/export', [ReportController::class, 'exportZReport']);
-
     Route::get('/daily-summary', [ReportController::class, 'dailySummary']);
     Route::get('/financial-snapshots', [ReportController::class, 'financialSnapshots']);
     Route::get('/financial-weekly', [ReportController::class, 'financialWeekly']);

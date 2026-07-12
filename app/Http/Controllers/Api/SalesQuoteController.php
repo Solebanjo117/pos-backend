@@ -499,6 +499,39 @@ class SalesQuoteController extends Controller
         ]);
     }
 
+    public function openAtCashier(Request $request, int $id): JsonResponse
+    {
+        $quote = SalesQuote::query()
+            ->with(['customer', 'warehouse', 'items.product', 'items.variant.brand'])
+            ->findOrFail($id);
+
+        if ($quote->status !== 'sent_to_cashier' || $quote->converted_order_id !== null) {
+            return response()->json(['message' => 'Esta cotizacion ya no esta disponible en la cola.'], 422);
+        }
+
+        $warehouseId = $request->header('X-Warehouse-Id') ?? $request->user()?->current_warehouse_id;
+        if ($warehouseId && (int) $quote->warehouse_id !== (int) $warehouseId) {
+            return response()->json(['message' => 'La cotizacion pertenece a otra sucursal.'], 403);
+        }
+
+        $hasOpenSession = \App\Models\PosSession::query()
+            ->where('user_id', $request->user()->id)
+            ->where('warehouse_id', $quote->warehouse_id)
+            ->where('status', 'open')
+            ->exists();
+        if (! $hasOpenSession) {
+            return response()->json(['message' => 'Debe abrir Caja antes de cobrar esta venta.'], 422);
+        }
+
+        activity()
+            ->performedOn($quote)
+            ->causedBy($request->user())
+            ->withProperties(['warehouse_id' => $quote->warehouse_id])
+            ->log('cashier_opened');
+
+        return response()->json(['data' => $quote]);
+    }
+
     /**
      * DELETE /api/sales-quotes/{id}
      */

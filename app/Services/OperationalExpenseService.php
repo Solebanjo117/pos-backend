@@ -3,9 +3,12 @@
 namespace App\Services;
 
 use App\Models\CashMovement;
+use App\Models\Customer;
 use App\Models\OperationalExpense;
+use App\Models\OperationalExpenseBeneficiary;
 use App\Models\OperationalExpenseCategory;
 use App\Models\PosSession;
+use App\Models\Supplier;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -44,6 +47,8 @@ class OperationalExpenseService
                 'categoryRecord.defaultLedgerAccount',
                 'ledgerAccount',
                 'supplier',
+                'customer',
+                'beneficiary',
             ]));
 
             return $expense->fresh([
@@ -53,6 +58,8 @@ class OperationalExpenseService
                 'posSession',
                 'categoryRecord',
                 'supplier',
+                'customer',
+                'beneficiary',
                 'ledgerAccount',
             ]);
         });
@@ -110,6 +117,8 @@ class OperationalExpenseService
                 'categoryRecord.defaultLedgerAccount',
                 'ledgerAccount',
                 'supplier',
+                'customer',
+                'beneficiary',
             ]));
 
             return $expense->fresh([
@@ -119,6 +128,8 @@ class OperationalExpenseService
                 'posSession',
                 'categoryRecord',
                 'supplier',
+                'customer',
+                'beneficiary',
                 'ledgerAccount',
             ]);
         });
@@ -151,6 +162,7 @@ class OperationalExpenseService
      */
     private function normalizeExpenseData(array $data, ?OperationalExpense $existing = null): array
     {
+        $data = $this->normalizeParty($data, $existing);
         $category = $this->resolveCategory($data, $existing);
         $status = $data['status'] ?? $existing?->status ?? 'paid';
 
@@ -179,6 +191,7 @@ class OperationalExpenseService
         }
 
         unset($data['custom_category_name']);
+        unset($data['party_type'], $data['party_id']);
 
         return $data;
     }
@@ -236,6 +249,8 @@ class OperationalExpenseService
             'category_id' => $expense->category_id,
             'subcategory' => $expense->subcategory,
             'supplier_id' => $expense->supplier_id,
+            'customer_id' => $expense->customer_id,
+            'beneficiary_id' => $expense->beneficiary_id,
             'ledger_account_id' => $expense->ledger_account_id,
             'description' => $expense->description,
             'amount' => $expense->amount,
@@ -250,6 +265,53 @@ class OperationalExpenseService
             'notes' => $expense->notes,
             'business_datetime' => $expense->business_datetime,
         ];
+    }
+
+    /** @param array<string, mixed> $data @return array<string, mixed> */
+    private function normalizeParty(array $data, ?OperationalExpense $existing = null): array
+    {
+        if (array_key_exists('party_type', $data) || array_key_exists('party_id', $data)) {
+            $type = $data['party_type'] ?? null;
+            $id = $data['party_id'] ?? null;
+
+            $data['customer_id'] = null;
+            $data['supplier_id'] = null;
+            $data['beneficiary_id'] = null;
+
+            if ($type !== null || $id !== null) {
+                if (! in_array($type, ['customer', 'supplier', 'beneficiary'], true) || ! is_numeric($id)) {
+                    throw new \InvalidArgumentException('Seleccione una persona o empresa valida.');
+                }
+
+                $model = match ($type) {
+                    'customer' => Customer::query()->where('status', 'active')->find($id),
+                    'supplier' => Supplier::query()->where('status', 'active')->find($id),
+                    'beneficiary' => OperationalExpenseBeneficiary::query()->where('is_active', true)->find($id),
+                };
+
+                if (! $model) {
+                    throw new \InvalidArgumentException('La persona o empresa seleccionada no esta disponible.');
+                }
+
+                $data[$type === 'beneficiary' ? 'beneficiary_id' : $type.'_id'] = (int) $id;
+            }
+        } else {
+            $data['customer_id'] = $data['customer_id'] ?? $existing?->customer_id;
+            $data['supplier_id'] = $data['supplier_id'] ?? $existing?->supplier_id;
+            $data['beneficiary_id'] = $data['beneficiary_id'] ?? $existing?->beneficiary_id;
+        }
+
+        $partyIds = array_filter([
+            $data['customer_id'] ?? null,
+            $data['supplier_id'] ?? null,
+            $data['beneficiary_id'] ?? null,
+        ], fn ($value) => $value !== null && $value !== '');
+
+        if (count($partyIds) > 1) {
+            throw new \InvalidArgumentException('Un gasto solo puede relacionarse con una persona o empresa.');
+        }
+
+        return $data;
     }
 
     /**

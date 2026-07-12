@@ -6,11 +6,15 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreOperationalExpenseRequest;
 use App\Http\Requests\UpdateOperationalExpenseRequest;
 use App\Models\OperationalExpense;
+use App\Models\OperationalExpenseBeneficiary;
 use App\Models\OperationalExpenseCategory;
 use App\Models\PaymentMethod;
+use App\Models\Customer;
+use App\Models\Supplier;
 use App\Services\OperationalExpenseService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 
 class OperationalExpenseController extends Controller
 {
@@ -25,14 +29,22 @@ class OperationalExpenseController extends Controller
             'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
             'category' => ['nullable', 'string'],
             'warehouse_id' => ['nullable', 'exists:warehouses,id'],
+            'expense_kind' => ['nullable', 'string', 'in:operational,administrative,financial,other'],
+            'party_type' => ['nullable', 'string', 'in:customer,supplier,beneficiary'],
+            'party_id' => ['nullable', 'integer', 'min:1', 'required_with:party_type'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
         ]);
 
         $query = OperationalExpense::query()
-            ->with(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'ledgerAccount'])
+            ->with(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'customer', 'beneficiary', 'ledgerAccount'])
             ->when($validated['date_from'] ?? null, fn ($query, $date) => $query->whereDate('expense_date', '>=', $date))
             ->when($validated['date_to'] ?? null, fn ($query, $date) => $query->whereDate('expense_date', '<=', $date))
-            ->when($validated['category'] ?? null, fn ($query, $category) => $query->where('category', $category))
+            ->when($validated['category'] ?? null, fn ($query, $category) => $query->where('operational_expenses.category', $category))
+            ->when($validated['expense_kind'] ?? null, fn ($query, $kind) => $query->where('operational_expenses.expense_kind', $kind))
+            ->when($validated['party_type'] ?? null, function ($query, $type) use ($validated) {
+                $column = $type === 'beneficiary' ? 'beneficiary_id' : $type.'_id';
+                $query->where('operational_expenses.'.$column, $validated['party_id']);
+            })
             ->when(array_key_exists('warehouse_id', $validated), function ($query) use ($validated) {
                 if ($validated['warehouse_id'] === null) {
                     $query->whereNull('warehouse_id');
@@ -46,6 +58,31 @@ class OperationalExpenseController extends Controller
         $summary = [
             'total_amount' => round((float) (clone $query)->sum('amount'), 2),
             'count' => (clone $query)->count(),
+            'by_category' => (clone $query)
+                ->selectRaw('operational_expenses.category, SUM(operational_expenses.amount) as total_amount, COUNT(*) as count')
+                ->groupBy('operational_expenses.category')
+                ->orderByDesc('total_amount')
+                ->get(),
+            'by_party' => (clone $query)
+                ->leftJoin('customers as expense_customers', 'expense_customers.id', '=', 'operational_expenses.customer_id')
+                ->leftJoin('suppliers as expense_suppliers', 'expense_suppliers.id', '=', 'operational_expenses.supplier_id')
+                ->leftJoin('operational_expense_beneficiaries as expense_beneficiaries', 'expense_beneficiaries.id', '=', 'operational_expenses.beneficiary_id')
+                ->selectRaw("operational_expenses.customer_id, operational_expenses.supplier_id, operational_expenses.beneficiary_id, COALESCE(expense_customers.name, expense_suppliers.name, expense_beneficiaries.name, 'Sin beneficiario') as party_name, SUM(operational_expenses.amount) as total_amount, COUNT(*) as count")
+                ->groupBy('operational_expenses.customer_id', 'operational_expenses.supplier_id', 'operational_expenses.beneficiary_id', 'expense_customers.name', 'expense_suppliers.name', 'expense_beneficiaries.name')
+                ->orderByDesc('total_amount')
+                ->get()
+                ->map(function ($row): array {
+                    $type = $row->customer_id ? 'customer' : ($row->supplier_id ? 'supplier' : ($row->beneficiary_id ? 'beneficiary' : null));
+                    $id = $row->customer_id ?? $row->supplier_id ?? $row->beneficiary_id;
+
+                    return [
+                        'party_type' => $type,
+                        'party_id' => $id ? (int) $id : null,
+                        'party_name' => $row->party_name,
+                        'total_amount' => round((float) $row->total_amount, 2),
+                        'count' => (int) $row->count,
+                    ];
+                }),
         ];
 
         $expenses = $query
@@ -90,14 +127,14 @@ class OperationalExpenseController extends Controller
 
         return response()->json([
             'message' => 'Gasto operativo registrado exitosamente.',
-            'data' => $expense->load(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'ledgerAccount']),
+            'data' => $expense->load(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'customer', 'beneficiary', 'ledgerAccount']),
         ], 201);
     }
 
     public function show(OperationalExpense $operationalExpense): JsonResponse
     {
         return response()->json([
-            'data' => $operationalExpense->load(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'ledgerAccount']),
+            'data' => $operationalExpense->load(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'customer', 'beneficiary', 'ledgerAccount']),
         ]);
     }
 
@@ -116,7 +153,7 @@ class OperationalExpenseController extends Controller
 
         return response()->json([
             'message' => 'Gasto operativo actualizado exitosamente.',
-            'data' => $operationalExpense->fresh(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'ledgerAccount']),
+            'data' => $operationalExpense->fresh(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'customer', 'beneficiary', 'ledgerAccount']),
         ]);
     }
 
@@ -167,5 +204,36 @@ class OperationalExpenseController extends Controller
             ])
             ->values()
             ->all();
+    }
+
+    public function parties(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'q' => ['nullable', 'string', 'max:100'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:50'],
+        ]);
+        $search = trim((string) ($validated['q'] ?? ''));
+        $searchPattern = '%'.Str::lower($search).'%';
+        $limit = (int) ($validated['limit'] ?? 20);
+
+        $map = fn ($record, string $type): array => [
+            'type' => $type,
+            'id' => (int) $record->id,
+            'name' => (string) $record->name,
+        ];
+
+        $customers = Customer::query()->where('status', 'active')
+            ->when($search, fn ($query) => $query->whereRaw('LOWER(name) LIKE ?', [$searchPattern]))
+            ->limit($limit)->get(['id', 'name'])->map(fn ($item) => $map($item, 'customer'));
+        $suppliers = Supplier::query()->where('status', 'active')
+            ->when($search, fn ($query) => $query->whereRaw('LOWER(name) LIKE ?', [$searchPattern]))
+            ->limit($limit)->get(['id', 'name'])->map(fn ($item) => $map($item, 'supplier'));
+        $beneficiaries = OperationalExpenseBeneficiary::query()->where('is_active', true)
+            ->when($search, fn ($query) => $query->whereRaw('LOWER(name) LIKE ?', [$searchPattern]))
+            ->limit($limit)->get(['id', 'name'])->map(fn ($item) => $map($item, 'beneficiary'));
+
+        return response()->json([
+            'data' => $customers->concat($suppliers)->concat($beneficiaries)->sortBy('name')->take($limit)->values(),
+        ]);
     }
 }

@@ -111,6 +111,33 @@ class PosCheckoutRequest extends FormRequest
             'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
             'items.*.seller_id' => 'nullable|exists:users,id',
+            'items.*.source_quote_item_id' => 'nullable|integer|exists:sales_quote_items,id',
         ];
+    }
+
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator): void {
+            if ($this->user()?->role !== 'cashier') {
+                return;
+            }
+
+            if (! $this->filled('source_quote_id')) {
+                $validator->errors()->add('source_quote_id', 'Caja solo puede cobrar ventas abiertas desde la cola.');
+            }
+
+            $items = $this->input('items', []);
+            if (! is_array($items) || $items === []) {
+                $validator->errors()->add('items', 'La venta de la cola no contiene articulos para cobrar.');
+
+                return;
+            }
+
+            foreach ($items as $index => $item) {
+                if (empty($item['source_quote_item_id'])) {
+                    $validator->errors()->add("items.{$index}.source_quote_item_id", 'Cada articulo debe provenir de la cotizacion enviada a Caja.');
+                }
+            }
+        });
     }
 }

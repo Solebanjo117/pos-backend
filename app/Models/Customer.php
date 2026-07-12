@@ -66,6 +66,11 @@ class Customer extends Model
         return $this->hasMany(SalesOrder::class);
     }
 
+    public function operationalExpenses(): HasMany
+    {
+        return $this->hasMany(OperationalExpense::class);
+    }
+
     public function vehicles(): HasMany
     {
         return $this->hasMany(CustomerVehicle::class);

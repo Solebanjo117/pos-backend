@@ -55,6 +55,11 @@ class Supplier extends Model
         return $this->hasMany(PurchaseOrder::class);
     }
 
+    public function operationalExpenses(): HasMany
+    {
+        return $this->hasMany(OperationalExpense::class);
+    }
+
     /**
      * Get brands associated with this supplier.
      */
