@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\FinancialDailySnapshot;
 use App\Models\PaymentMethod;
 use App\Models\InventoryLot;
 use App\Models\Product;
@@ -166,12 +167,20 @@ it('reuses cached snapshots for past days but keeps today fresh', function (): v
     // Recomputing the same closed past day must reuse the cached snapshot.
     $second = $service->computeDay($pastDate, $warehouse->id);
     expect($second->computed_at?->equalTo($firstComputedAt))->toBeTrue();
+    expect(FinancialDailySnapshot::query()
+        ->where('warehouse_id', $warehouse->id)
+        ->whereDate('date', $pastDate)
+        ->count())->toBe(1);
 
     // Today must always be (re)computed.
     $todayFirst = $service->computeDay(now()->toDateString(), $warehouse->id);
     $todaySecond = $service->computeDay(now()->toDateString(), $warehouse->id);
     expect($todaySecond->computed_at)->not->toBeNull()
         ->and($todaySecond->computed_at?->greaterThanOrEqualTo($todayFirst->computed_at))->toBeTrue();
+    expect(FinancialDailySnapshot::query()
+        ->where('warehouse_id', $warehouse->id)
+        ->whereDate('date', now()->toDateString())
+        ->count())->toBe(1);
 });
 
 it('returns financial drilldown rows and marks formal accounting reports pending without ledger data', function (): void {
@@ -226,6 +235,57 @@ it('returns financial drilldown rows and marks formal accounting reports pending
         ->assertOk()
         ->assertJsonPath('ledger.is_available', false)
         ->assertJsonPath('reports.5.status', 'pending');
+});
+
+it('keeps inventory trace fields internal and paginates drilldowns with supported page sizes', function (): void {
+    [$admin, $warehouse, $product, $variant] = dailySummaryContext();
+
+    foreach (range(1, 31) as $index) {
+        InventoryLot::create([
+            'product_id' => $product->id,
+            'variant_id' => $variant->id,
+            'warehouse_id' => $warehouse->id,
+            'source_type' => 'opening_balance',
+            'source_id' => $index,
+            'received_quantity' => 1,
+            'quantity_available' => 1,
+            'unit_cost_base' => 1,
+            'tax_per_unit' => 0,
+            'misc_per_unit' => 0,
+            'landed_unit_cost' => 1,
+            'received_at' => '2026-05-04 09:00:00',
+        ]);
+    }
+
+    foreach ([10, 25, 50, 100] as $perPage) {
+        $response = $this->actingAs($admin)
+            ->getJson('/api/v1/reports/financial-drilldown?metric=inventory&date_from=2026-05-04&date_to=2026-05-04&warehouse_id='.$warehouse->id.'&per_page='.$perPage)
+            ->assertOk()
+            ->assertJsonPath('meta.per_page', $perPage)
+            ->assertJsonPath('meta.total', 31)
+            ->assertJsonPath('meta.last_page', (int) ceil(31 / $perPage));
+
+        expect($response->json('rows'))->toHaveCount(min(31, $perPage));
+    }
+
+    $firstPage = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-drilldown?metric=inventory&date_from=2026-05-04&date_to=2026-05-04&warehouse_id='.$warehouse->id.'&per_page=10&page=1')
+        ->assertOk();
+    $secondPage = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-drilldown?metric=inventory&date_from=2026-05-04&date_to=2026-05-04&warehouse_id='.$warehouse->id.'&per_page=10&page=2')
+        ->assertOk();
+
+    $columns = collect($firstPage->json('columns'))->keyBy('key');
+    $firstRow = $firstPage->json('rows.0');
+    $firstIds = collect($firstPage->json('rows'))->pluck('id');
+    $secondIds = collect($secondPage->json('rows'))->pluck('id');
+
+    expect($columns->keys()->all())
+        ->not->toContain('warehouse', 'user')
+        ->and($columns['business_datetime']['label'])->toBe('Fecha/Hora operativa')
+        ->and(array_key_exists('warehouse', $firstRow))->toBeTrue()
+        ->and(array_key_exists('user', $firstRow))->toBeTrue()
+        ->and($firstIds->intersect($secondIds))->toHaveCount(0);
 });
 
 it('maps yappy payments and bank adjustments into Banco', function (): void {

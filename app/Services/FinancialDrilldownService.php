@@ -286,8 +286,6 @@ class FinancialDrilldownService
             ['key' => 'sku', 'label' => 'SKU'],
             ['key' => 'brand', 'label' => 'Marca'],
             ['key' => 'category', 'label' => 'Categoria'],
-            ['key' => 'warehouse', 'label' => 'Almacen'],
-            ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'quantity', 'label' => 'Stock'],
             ['key' => 'unit_cost', 'label' => 'Costo', 'type' => 'money'],
             ['key' => 'amount', 'label' => 'Valor', 'type' => 'money'],
@@ -899,7 +897,7 @@ class FinancialDrilldownService
     {
         return [
             ['key' => 'occurred_at', 'label' => 'Fecha/Hora', 'type' => 'datetime'],
-            ['key' => 'business_datetime', 'label' => 'Operativa', 'type' => 'datetime'],
+            ['key' => 'business_datetime', 'label' => 'Fecha/Hora operativa', 'type' => 'datetime'],
         ];
     }
 

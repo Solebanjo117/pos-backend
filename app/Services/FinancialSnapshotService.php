@@ -16,6 +16,7 @@ use App\Models\SalesReturn;
 use App\Support\RegionalDateRange;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Collection;
 
 class FinancialSnapshotService
@@ -62,12 +63,28 @@ class FinancialSnapshotService
             return $existing->fresh();
         }
 
-        return FinancialDailySnapshot::query()
-            ->create(array_merge([
-                'warehouse_id' => $warehouseId,
-                'date' => $dateString,
-            ], $payload))
-            ->fresh();
+        try {
+            return FinancialDailySnapshot::query()
+                ->create(array_merge([
+                    'warehouse_id' => $warehouseId,
+                    'date' => $dateString,
+                ], $payload))
+                ->fresh();
+        } catch (UniqueConstraintViolationException $exception) {
+            // Concurrent report requests can calculate the same day before
+            // either insert is visible. The unique key decides which row wins.
+            $concurrentSnapshot = $this->snapshotQuery($warehouseId)
+                ->whereDate('date', $dateString)
+                ->first();
+
+            if (! $concurrentSnapshot) {
+                throw $exception;
+            }
+
+            $concurrentSnapshot->fill($payload)->save();
+
+            return $concurrentSnapshot->fresh();
+        }
     }
 
     /**

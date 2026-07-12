@@ -29,6 +29,10 @@ return new class extends Migration
             DB::statement('ALTER TABLE financial_adjustments ALTER COLUMN type TYPE VARCHAR(50)');
         } elseif ($driver === 'mysql') {
             DB::statement('ALTER TABLE financial_adjustments MODIFY type VARCHAR(50) NOT NULL');
+        } elseif ($driver === 'sqlite') {
+            Schema::table('financial_adjustments', function (Blueprint $table): void {
+                $table->string('type', 50)->change();
+            });
         }
 
         Schema::table('financial_daily_snapshots', function (Blueprint $table): void {
