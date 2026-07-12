@@ -38,7 +38,7 @@ function operationalExpenseAdminContext(): array
 it('creates and filters operational expenses', function () {
     [$admin, $warehouse] = operationalExpenseAdminContext();
 
-    $session = PosSession::create([
+    PosSession::create([
         'user_id' => $admin->id,
         'warehouse_id' => $warehouse->id,
         'opened_at' => now()->subHour(),
@@ -62,14 +62,14 @@ it('creates and filters operational expenses', function () {
         ->assertJsonPath('data.category', 'rent')
         ->assertJsonPath('data.category_label', 'Alquiler')
         ->assertJsonPath('data.warehouse.id', $warehouse->id)
-        ->assertJsonPath('data.pos_session_id', $session->id)
+        ->assertJsonPath('data.pos_session_id', null)
         ->assertJsonPath('data.cash_movement_id', null);
 
     $this->assertDatabaseHas('operational_expenses', [
         'category' => 'rent',
         'reference_number' => 'REC-001',
         'warehouse_id' => $warehouse->id,
-        'pos_session_id' => $session->id,
+        'pos_session_id' => null,
     ]);
 
     $this->actingAs($admin)
@@ -120,7 +120,7 @@ it('registers cash operational expenses as cash drawer withdrawals', function ()
         ->assertJsonPath('summary.expected_cash', 54.75);
 });
 
-it('registers non cash operational expenses as method withdrawals in the open session', function () {
+it('keeps non cash operational expenses outside the cash session', function () {
     [$admin, $warehouse] = operationalExpenseAdminContext();
 
     $session = PosSession::create([
@@ -141,7 +141,7 @@ it('registers non cash operational expenses as method withdrawals in the open se
         'reference_number' => 'ACH-1',
         'warehouse_id' => $warehouse->id,
     ])->assertCreated()
-        ->assertJsonPath('data.pos_session_id', $session->id)
+        ->assertJsonPath('data.pos_session_id', null)
         ->assertJsonPath('data.cash_movement_id', null);
 
     expect(CashMovement::count())->toBe(0);
@@ -152,18 +152,15 @@ it('registers non cash operational expenses as method withdrawals in the open se
 
     $transferRow = collect($response->json('summary.reconciliation_rows'))->firstWhere('code', 'transfer');
 
-    expect($transferRow)->not->toBeNull()
-        ->and((float) $transferRow['withdrawals'])->toBe(-32.75)
-        ->and((float) $transferRow['expected_total'])->toBe(-32.75);
+    expect($transferRow)->toBeNull();
 
     $this->actingAs($admin)
         ->getJson('/api/v1/pos-sessions/'.$session->id)
         ->assertOk()
-        ->assertJsonPath('operational_expenses.0.category', 'software')
-        ->assertJsonPath('operational_expenses.0.pos_session_id', $session->id);
+        ->assertJsonCount(0, 'operational_expenses');
 });
 
-it('rejects operational expenses without an open cash session in the warehouse', function () {
+it('allows non cash operational expenses without an open cash session', function () {
     [$admin, $warehouse] = operationalExpenseAdminContext();
 
     $this->actingAs($admin)->postJson('/api/v1/operational-expenses', [
@@ -173,8 +170,9 @@ it('rejects operational expenses without an open cash session in the warehouse',
         'amount' => 32.75,
         'payment_method' => 'transfer',
         'warehouse_id' => $warehouse->id,
-    ])->assertUnprocessable()
-        ->assertJsonValidationErrors('payment_method');
+    ])->assertCreated()
+        ->assertJsonPath('data.pos_session_id', null)
+        ->assertJsonPath('data.cash_movement_id', null);
 });
 
 it('syncs and deletes cash movements while the operational expense session is open', function () {
@@ -253,7 +251,7 @@ it('rejects operational expense changes after the linked cash session is closed'
         ->and(CashMovement::count())->toBe(1);
 });
 
-it('rejects non cash operational expense changes after the linked session is closed', function () {
+it('allows non cash expense changes after an unrelated cash session is closed', function () {
     [$admin, $warehouse] = operationalExpenseAdminContext();
 
     $session = PosSession::create([
@@ -282,12 +280,12 @@ it('rejects non cash operational expense changes after the linked session is clo
 
     $this->actingAs($admin)->putJson("/api/v1/operational-expenses/{$expense->id}", [
         'amount' => 30,
-    ])->assertUnprocessable();
+    ])->assertOk();
 
     $this->actingAs($admin)->deleteJson("/api/v1/operational-expenses/{$expense->id}")
-        ->assertUnprocessable();
+        ->assertOk();
 
-    expect(OperationalExpense::count())->toBe(1)
+    expect(OperationalExpense::count())->toBe(0)
         ->and(CashMovement::count())->toBe(0);
 });
 
@@ -302,7 +300,23 @@ it('validates operational expense payloads', function () {
             'payment_method' => 'bitcoin',
         ])
         ->assertStatus(422)
-        ->assertJsonValidationErrors(['expense_date', 'category', 'amount', 'payment_method']);
+        ->assertJsonValidationErrors(['expense_date', 'amount', 'payment_method']);
+});
+
+it('uses the safe other category default when category is omitted', function () {
+    [$admin, $warehouse] = operationalExpenseAdminContext();
+
+    $this->actingAs($admin)
+        ->postJson('/api/v1/operational-expenses', [
+            'expense_date' => '2026-05-10',
+            'description' => 'Gasto sin categoria explicita',
+            'amount' => 12.5,
+            'payment_method' => 'transfer',
+            'warehouse_id' => $warehouse->id,
+        ])
+        ->assertCreated()
+        ->assertJsonPath('data.category', 'other')
+        ->assertJsonPath('data.pos_session_id', null);
 });
 
 it('includes global and warehouse operational expenses in financial net profit', function () {

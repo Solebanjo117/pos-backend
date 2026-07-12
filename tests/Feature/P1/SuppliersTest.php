@@ -69,6 +69,30 @@ it('associates supplied variants with supplier purchase metadata', function () {
         'variant_id' => $variant->id,
         'is_preferred' => true,
     ]);
+
+    $this->actingAs($buyer)
+        ->postJson("/api/v1/suppliers/{$supplier->id}/variants", [
+            'variant_id' => $variant->id,
+            'supplier_cost' => 13.25,
+            'lead_time_days' => 5,
+            'minimum_order_quantity' => 2,
+            'is_preferred' => true,
+        ])
+        ->assertCreated()
+        ->assertJsonPath('data.0.supplier_cost', 13.25)
+        ->assertJsonPath('data.0.minimum_order_quantity', 2);
+
+    expect(ProductSupplier::query()
+        ->where('supplier_id', $supplier->id)
+        ->where('variant_id', $variant->id)
+        ->count())->toBe(1);
+
+    $this->assertDatabaseHas('product_suppliers', [
+        'supplier_id' => $supplier->id,
+        'variant_id' => $variant->id,
+        'supplier_cost' => 13.25,
+        'minimum_order_quantity' => 2,
+    ]);
 });
 
 it('returns purchase order warnings for variants not supplied by the selected supplier', function () {
