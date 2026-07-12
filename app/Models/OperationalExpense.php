@@ -61,6 +61,8 @@ class OperationalExpense extends Model
         'category_id',
         'subcategory',
         'supplier_id',
+        'customer_id',
+        'beneficiary_id',
         'ledger_account_id',
         'description',
         'amount',
@@ -85,7 +87,7 @@ class OperationalExpense extends Model
         'affects_income_statement' => 'boolean',
     ];
 
-    protected $appends = ['category_label', 'payment_method_label'];
+    protected $appends = ['category_label', 'payment_method_label', 'party'];
 
     public function warehouse(): BelongsTo
     {
@@ -117,6 +119,16 @@ class OperationalExpense extends Model
         return $this->belongsTo(Supplier::class);
     }
 
+    public function customer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class);
+    }
+
+    public function beneficiary(): BelongsTo
+    {
+        return $this->belongsTo(OperationalExpenseBeneficiary::class, 'beneficiary_id');
+    }
+
     public function ledgerAccount(): BelongsTo
     {
         return $this->belongsTo(LedgerAccount::class);
@@ -130,5 +142,26 @@ class OperationalExpense extends Model
     public function getPaymentMethodLabelAttribute(): ?string
     {
         return $this->payment_method === null ? null : PaymentMethod::getNameByCode($this->payment_method);
+    }
+
+    /** @return array{type: string, id: int, name: string}|null */
+    public function getPartyAttribute(): ?array
+    {
+        $party = match (true) {
+            $this->customer_id !== null => ['type' => 'customer', 'model' => $this->customer],
+            $this->supplier_id !== null => ['type' => 'supplier', 'model' => $this->supplier],
+            $this->beneficiary_id !== null => ['type' => 'beneficiary', 'model' => $this->beneficiary],
+            default => null,
+        };
+
+        if (! $party || ! $party['model']) {
+            return null;
+        }
+
+        return [
+            'type' => $party['type'],
+            'id' => (int) $party['model']->id,
+            'name' => (string) $party['model']->name,
+        ];
     }
 }

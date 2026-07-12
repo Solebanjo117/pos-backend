@@ -1912,7 +1912,7 @@ class ReportService
         $warehouseId = $filters['warehouse_id'] ?? null;
 
         $query = OperationalExpense::query()
-            ->with('categoryRecord')
+            ->with(['categoryRecord', 'customer', 'supplier', 'beneficiary'])
             ->whereDate('expense_date', '>=', $filters['date_from'])
             ->whereDate('expense_date', '<=', $filters['date_to'])
             ->where(fn ($query) => $query
@@ -1943,6 +1943,23 @@ class ReportService
                     ];
                 })
                 ->sortBy('category')
+                ->values()
+                ->all(),
+            'by_party' => $expenses
+                ->groupBy(fn (OperationalExpense $expense): string => ($expense->party['type'] ?? 'none').':'.($expense->party['id'] ?? 0))
+                ->map(function ($items): array {
+                    /** @var OperationalExpense $first */
+                    $first = $items->first();
+
+                    return [
+                        'party_type' => $first->party['type'] ?? null,
+                        'party_id' => $first->party['id'] ?? null,
+                        'party_name' => $first->party['name'] ?? 'Sin beneficiario',
+                        'amount' => round((float) $items->sum('amount'), 2),
+                        'count' => $items->count(),
+                    ];
+                })
+                ->sortBy('party_name')
                 ->values()
                 ->all(),
             'timeline' => $expenses

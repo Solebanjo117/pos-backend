@@ -380,8 +380,9 @@ class ReportController extends Controller
         ]);
 
         $date = $request->input('date', now()->toDateString());
-        $warehouseId = $request->input('warehouse_id');
-        $userId = $request->input('user_id');
+        $isCashier = $request->user()?->role === 'cashier';
+        $warehouseId = $isCashier ? $request->user()?->current_warehouse_id : $request->input('warehouse_id');
+        $userId = $isCashier ? $request->user()?->id : $request->input('user_id');
         $report = $this->reportService->generateZReport($date, $warehouseId, $userId);
 
         return response()->json($report);
@@ -399,8 +400,9 @@ class ReportController extends Controller
         ]);
 
         $date = $request->input('date', now()->toDateString());
-        $warehouseId = $request->input('warehouse_id');
-        $userId = $request->input('user_id');
+        $isCashier = $request->user()?->role === 'cashier';
+        $warehouseId = $isCashier ? $request->user()?->current_warehouse_id : $request->input('warehouse_id');
+        $userId = $isCashier ? $request->user()?->id : $request->input('user_id');
         $report = $this->reportService->generateZReport($date, $warehouseId, $userId);
 
         // Ideally handled by PdfExportService, but for now we format a simple response or use a view if available.

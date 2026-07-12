@@ -81,6 +81,7 @@ class LedgerPostingService
 
             $creditAccount = $this->creditAccountForExpense($expense);
             $memo = trim((string) ($expense->description ?: $expense->category_label ?: 'Gasto operativo'));
+            [$thirdPartyType, $thirdPartyId] = $this->expenseThirdParty($expense);
 
             $entry = JournalEntry::create([
                 'source_type' => 'operational_expense',
@@ -94,8 +95,8 @@ class LedgerPostingService
 
             $entry->lines()->create([
                 'ledger_account_id' => $expenseAccount->id,
-                'third_party_type' => $expense->supplier_id ? 'supplier' : null,
-                'third_party_id' => $expense->supplier_id,
+                'third_party_type' => $thirdPartyType,
+                'third_party_id' => $thirdPartyId,
                 'debit' => $amount,
                 'credit' => 0,
                 'metadata' => [
@@ -108,8 +109,8 @@ class LedgerPostingService
 
             $entry->lines()->create([
                 'ledger_account_id' => $creditAccount->id,
-                'third_party_type' => $expense->supplier_id ? 'supplier' : null,
-                'third_party_id' => $expense->supplier_id,
+                'third_party_type' => $thirdPartyType,
+                'third_party_id' => $thirdPartyId,
                 'debit' => 0,
                 'credit' => $amount,
                 'metadata' => [
@@ -122,6 +123,17 @@ class LedgerPostingService
 
             return $entry->load('lines.ledgerAccount');
         });
+    }
+
+    /** @return array{0: string|null, 1: int|null} */
+    private function expenseThirdParty(OperationalExpense $expense): array
+    {
+        return match (true) {
+            $expense->customer_id !== null => ['customer', (int) $expense->customer_id],
+            $expense->supplier_id !== null => ['supplier', (int) $expense->supplier_id],
+            $expense->beneficiary_id !== null => ['beneficiary', (int) $expense->beneficiary_id],
+            default => [null, null],
+        };
     }
 
     public function reverseSource(string $sourceType, int $sourceId, ?int $userId = null, ?string $memo = null): ?JournalEntry

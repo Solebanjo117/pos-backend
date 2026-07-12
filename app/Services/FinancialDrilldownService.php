@@ -211,7 +211,7 @@ class FinancialDrilldownService
     {
         $expenses = $this->applyExpenseDrilldownFilters(
             OperationalExpense::query()
-                ->with(['creator', 'categoryRecord'])
+                ->with(['creator', 'categoryRecord', 'customer', 'supplier', 'beneficiary'])
                 ->whereDate('expense_date', '>=', $from->toDateString())
                 ->whereDate('expense_date', '<=', $to->toDateString())
                 ->where(fn (Builder $query) => $query->where('affects_income_statement', true)->orWhereNull('affects_income_statement'))
@@ -230,6 +230,7 @@ class FinancialDrilldownService
             'category_code' => $expense->category,
             'category' => $expense->category_label,
             'description' => $expense->description,
+            'party' => $expense->party['name'] ?? 'Sin beneficiario',
             'user' => $expense->creator?->name,
             'method' => $expense->payment_method_label,
             'reference' => $expense->reference_number,
@@ -247,6 +248,7 @@ class FinancialDrilldownService
             ...$this->datetimeColumns(),
             ['key' => 'category', 'label' => 'Categoria'],
             ['key' => 'description', 'label' => 'Concepto'],
+            ['key' => 'party', 'label' => 'Cliente/Proveedor/Beneficiario'],
             ['key' => 'user', 'label' => 'Usuario'],
             ['key' => 'method', 'label' => 'Metodo'],
             ['key' => 'reference', 'label' => 'Referencia'],

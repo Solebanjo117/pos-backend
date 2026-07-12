@@ -26,7 +26,9 @@ function setupCustomerBalanceTest(): array
     ]);
 
     $user = User::factory()->create([
-        'role' => 'cashier',
+        // Balance behavior is role-agnostic; sellers retain manual sale access,
+        // while cashier checkout is covered by CashierCheckoutRestrictionTest.
+        'role' => 'seller',
         'current_warehouse_id' => $warehouse->id,
         'is_active' => true,
     ]);

@@ -149,6 +149,7 @@ class SalesOrderController extends Controller
                 'items.*.seller_id' => 'nullable|exists:users,id',
                 'items.*.is_custom_line' => 'nullable|boolean',
                 'items.*.custom_description' => 'nullable|string|max:255',
+                'items.*.source_quote_item_id' => 'nullable|integer|exists:sales_quote_items,id',
             ]);
 
             if (! empty($validated['items'])) {

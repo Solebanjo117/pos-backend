@@ -5,10 +5,14 @@ namespace App\Services;
 use App\Helpers\TaxRateHelper;
 use App\Models\Product;
 use App\Models\ProductInventory;
+use App\Models\PosSession;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\SalesQuote;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class SalesOrderService
 {
@@ -80,7 +84,17 @@ class SalesOrderService
     public function create(array $data): SalesOrder
     {
         return DB::transaction(function () use ($data) {
-            $userId = $data['user_id'] ?? \Illuminate\Support\Facades\Auth::id();
+            $isCashier = Auth::user()?->role === 'cashier';
+            $sourceQuote = null;
+
+            if ($isCashier) {
+                [$data, $sourceQuote, $existingOrder] = $this->prepareCashierCheckout($data);
+                if ($existingOrder) {
+                    return $existingOrder;
+                }
+            }
+
+            $userId = $isCashier ? Auth::id() : ($data['user_id'] ?? Auth::id());
 
             if (! $userId) {
                 throw new \Exception('No se pudo determinar el usuario. Por favor, inicie sesión nuevamente.');
@@ -93,7 +107,7 @@ class SalesOrderService
             }
 
             // Check for active pos session for this user and warehouse
-            $sessionQuery = \App\Models\PosSession::where('user_id', $userId)
+            $sessionQuery = PosSession::where('user_id', $userId)
                 ->where('status', 'open');
 
             if ($warehouseId) {
@@ -217,10 +231,18 @@ class SalesOrderService
 
             // ── Convert Sales Quote if applicable ──
             if (! empty($data['source_quote_id'])) {
-                $quote = \App\Models\SalesQuote::find($data['source_quote_id']);
+                $quote = $sourceQuote ?? SalesQuote::query()->lockForUpdate()->find($data['source_quote_id']);
                 if ($quote) {
-                    $quote->markCollected();
-                    $quote->update(['converted_order_id' => $order->id]);
+                    $quote->update([
+                        'status' => 'collected',
+                        'converted_order_id' => $order->id,
+                    ]);
+
+                    activity()
+                        ->performedOn($quote)
+                        ->causedBy(Auth::user())
+                        ->withProperties(['sales_order_id' => $order->id])
+                        ->log('cashier_collected');
                 }
             }
 
@@ -228,6 +250,81 @@ class SalesOrderService
 
             return $order;
         });
+    }
+
+    /**
+     * Cashiers may change only the customer and line taxes. Commercial line data
+     * is rebuilt from the locked quote so direct API calls cannot alter a sale.
+     *
+     * @param array<string, mixed> $data
+     * @return array{0: array<string, mixed>, 1: SalesQuote, 2: SalesOrder|null}
+     */
+    private function prepareCashierCheckout(array $data): array
+    {
+        $quoteId = (int) ($data['source_quote_id'] ?? 0);
+        $quote = SalesQuote::query()
+            ->with(['items'])
+            ->lockForUpdate()
+            ->find($quoteId);
+
+        if (! $quote) {
+            throw ValidationException::withMessages(['source_quote_id' => 'La venta de la cola ya no esta disponible.']);
+        }
+
+        if ($quote->converted_order_id) {
+            return [$data, $quote, SalesOrder::with(['customer', 'items.product', 'payments'])->findOrFail($quote->converted_order_id)];
+        }
+
+        if ($quote->status !== 'sent_to_cashier') {
+            throw ValidationException::withMessages(['source_quote_id' => 'La cotizacion no esta disponible en la cola de Caja.']);
+        }
+
+        $session = PosSession::query()
+            ->where('user_id', Auth::id())
+            ->where('warehouse_id', $quote->warehouse_id)
+            ->where('status', 'open')
+            ->latest()
+            ->first();
+
+        if (! $session) {
+            throw ValidationException::withMessages(['source_quote_id' => 'Debe abrir Caja en la sucursal de la cotizacion antes de cobrar.']);
+        }
+
+        $submitted = collect($data['items'] ?? [])->keyBy(fn (array $item): int => (int) ($item['source_quote_item_id'] ?? 0));
+        if ($submitted->count() !== $quote->items->count() || $submitted->keys()->contains(0)) {
+            throw ValidationException::withMessages(['items' => 'Los articulos deben coincidir exactamente con la venta enviada a Caja.']);
+        }
+
+        $quoteIds = $quote->items->pluck('id')->map(fn ($id): int => (int) $id)->sort()->values();
+        $submittedIds = $submitted->keys()->map(fn ($id): int => (int) $id)->sort()->values();
+        if ($quoteIds->all() !== $submittedIds->all()) {
+            throw ValidationException::withMessages(['items' => 'No se pueden agregar, quitar ni sustituir articulos en Caja.']);
+        }
+
+        $data['user_id'] = Auth::id();
+        $data['warehouse_id'] = $quote->warehouse_id;
+        $data['status'] = 'confirmed';
+        $data['discount_amount'] = (float) $quote->discount_amount;
+        $data['items'] = $quote->items->map(function ($quoteItem) use ($submitted): array {
+            $incoming = $submitted->get($quoteItem->id, []);
+
+            return [
+                'product_id' => $quoteItem->product_id,
+                'variant_id' => $quoteItem->is_custom_line ? null : $quoteItem->variant_id,
+                'warehouse_id' => $quoteItem->warehouse_id,
+                'quantity' => (int) $quoteItem->quantity,
+                'unit_price' => (float) $quoteItem->unit_price,
+                'discount_percent' => (float) $quoteItem->discount_percent,
+                'discount_amount' => (float) $quoteItem->discount_amount,
+                'tax_percent' => isset($incoming['tax_percent']) ? (int) round((float) $incoming['tax_percent']) : (int) $quoteItem->tax_percent,
+                'seller_id' => null,
+                'notes' => $quoteItem->notes,
+                'is_custom_line' => (bool) $quoteItem->is_custom_line,
+                'custom_description' => $quoteItem->custom_description,
+            ];
+        })->all();
+
+        return [$data, $quote, null];
     }
 
     /**
