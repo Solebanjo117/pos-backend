@@ -12,7 +12,9 @@ use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
 use App\Services\AccountingReportService;
 use App\Services\FinancialDrilldownService;
+use App\Services\FinancialReconciliationService;
 use App\Services\FinancialSnapshotService;
+use App\Services\OperationalAnalyticsService;
 use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -34,12 +36,62 @@ class ReportController extends Controller
         FinancialSnapshotService $financialSnapshotService,
         FinancialDrilldownService $financialDrilldownService,
         AccountingReportService $accountingReportService,
-    )
-    {
+        private readonly OperationalAnalyticsService $operationalAnalyticsService,
+        private readonly FinancialReconciliationService $financialReconciliationService,
+    ) {
         $this->reportService = $reportService;
         $this->financialSnapshotService = $financialSnapshotService;
         $this->financialDrilldownService = $financialDrilldownService;
         $this->accountingReportService = $accountingReportService;
+    }
+
+    public function salesByProduct(Request $request): JsonResponse
+    {
+        return response()->json($this->operationalAnalyticsService->salesByProduct($this->operationalFilters($request)));
+    }
+
+    public function purchasesBySupplier(Request $request): JsonResponse
+    {
+        return response()->json($this->operationalAnalyticsService->purchasesBySupplier($this->operationalFilters($request)));
+    }
+
+    public function creditNotes(Request $request): JsonResponse
+    {
+        return response()->json($this->operationalAnalyticsService->creditNotes($this->operationalFilters($request)));
+    }
+
+    public function valuedInventory(Request $request): JsonResponse
+    {
+        return response()->json($this->operationalAnalyticsService->valuedInventory($this->operationalFilters($request, false)));
+    }
+
+    public function financialReconciliation(Request $request): JsonResponse
+    {
+        $filters = $request->validate([
+            'date_from' => ['required', 'date'],
+            'date_to' => ['required', 'date', 'after_or_equal:date_from'],
+            'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
+        ]);
+
+        return response()->json($this->financialReconciliationService->reconcile($filters));
+    }
+
+    /** @return array<string, mixed> */
+    private function operationalFilters(Request $request, bool $withDateFrom = true): array
+    {
+        $rules = [
+            'date_to' => ['nullable', 'date'],
+            'warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
+            'search' => ['nullable', 'string', 'max:120'],
+            'per_page' => ['nullable', 'integer', 'in:10,25,50,100'],
+            'page' => ['nullable', 'integer', 'min:1'],
+        ];
+        if ($withDateFrom) {
+            $rules['date_from'] = ['nullable', 'date'];
+            $rules['date_to'][] = 'after_or_equal:date_from';
+        }
+
+        return $request->validate($rules);
     }
 
     /**
@@ -489,7 +541,7 @@ class ReportController extends Controller
     public function financialDrilldown(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'metric' => 'required|string|in:sales,sales_total,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,operational_expenses,cash,bank,inventory,receivable,accounts_receivable,credit_receivable,sales_pending,payable,accounts_payable,credit_payable,purchase_pending,cogs,profit,gross_profit,net_profit,assets,liabilities,equity,investment,investment_in,investment_out,adjustments',
+            'metric' => 'required|string|in:sales,sales_total,sales_gross,sales_discounts,sales_returns,sales_net,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,operational_expenses,cash,bank,inventory,inventory_bridge,inventory_in,inventory_out,receivable,accounts_receivable,credit_receivable,sales_pending,receivables_generated,payable,accounts_payable,credit_payable,purchase_pending,payables_generated,cogs,cogs_gross,cogs_returns,cogs_net,profit,gross_profit,net_profit,assets,liabilities,equity,customer_credits,pending_refunds,retained_earnings,investment,investment_in,investment_out,adjustments',
             'date_from' => 'required|date',
             'date_to' => 'required|date|after_or_equal:date_from',
             'warehouse_id' => 'nullable|exists:warehouses,id',

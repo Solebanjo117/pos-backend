@@ -5,6 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class OperationalExpense extends Model
 {
@@ -32,9 +34,13 @@ class OperationalExpense extends Model
     ];
 
     public const STATUSES = [
+        'draft' => 'Borrador',
         'paid' => 'Pagado',
         'pending' => 'Pendiente',
         'scheduled' => 'Programado',
+        'queued' => 'En caja',
+        'cancelled' => 'Cancelado',
+        'reversed' => 'Reversado',
     ];
 
     public const RECURRENCES = [
@@ -66,10 +72,19 @@ class OperationalExpense extends Model
         'ledger_account_id',
         'description',
         'amount',
+        'estimated_amount',
+        'final_amount',
+        'variance_amount',
+        'variance_reason',
         'payment_method',
+        'planned_payment_method',
         'recurrence',
         'status',
         'paid_at',
+        'due_at',
+        'queued_at',
+        'cancelled_at',
+        'reversed_at',
         'affects_cash_flow',
         'affects_income_statement',
         'expense_kind',
@@ -81,13 +96,20 @@ class OperationalExpense extends Model
     protected $casts = [
         'expense_date' => 'date',
         'amount' => 'decimal:2',
+        'estimated_amount' => 'decimal:2',
+        'final_amount' => 'decimal:2',
+        'variance_amount' => 'decimal:2',
         'business_datetime' => 'datetime',
         'paid_at' => 'datetime',
+        'due_at' => 'datetime',
+        'queued_at' => 'datetime',
+        'cancelled_at' => 'datetime',
+        'reversed_at' => 'datetime',
         'affects_cash_flow' => 'boolean',
         'affects_income_statement' => 'boolean',
     ];
 
-    protected $appends = ['category_label', 'payment_method_label', 'party'];
+    protected $appends = ['category_label', 'payment_method_label', 'party', 'capabilities'];
 
     public function warehouse(): BelongsTo
     {
@@ -134,6 +156,16 @@ class OperationalExpense extends Model
         return $this->belongsTo(LedgerAccount::class);
     }
 
+    public function events(): HasMany
+    {
+        return $this->hasMany(OperationalExpenseEvent::class)->latest();
+    }
+
+    public function queueEntries(): MorphMany
+    {
+        return $this->morphMany(CashierQueueEntry::class, 'source');
+    }
+
     public function getCategoryLabelAttribute(): string
     {
         return $this->categoryRecord?->name ?? self::CATEGORIES[$this->category] ?? $this->category;
@@ -150,6 +182,7 @@ class OperationalExpense extends Model
         $party = match (true) {
             $this->customer_id !== null => ['type' => 'customer', 'model' => $this->customer],
             $this->supplier_id !== null => ['type' => 'supplier', 'model' => $this->supplier],
+            $this->beneficiary_id !== null && $this->beneficiary?->user_id !== null => ['type' => 'staff', 'model' => $this->beneficiary],
             $this->beneficiary_id !== null => ['type' => 'beneficiary', 'model' => $this->beneficiary],
             default => null,
         };
@@ -160,8 +193,20 @@ class OperationalExpense extends Model
 
         return [
             'type' => $party['type'],
-            'id' => (int) $party['model']->id,
+            'id' => (int) ($party['type'] === 'staff' ? $party['model']->user_id : $party['model']->id),
+            'related_id' => (int) $party['model']->id,
             'name' => (string) $party['model']->name,
+        ];
+    }
+
+    /** @return array{can_edit: bool, can_send_to_cashier: bool, can_cancel: bool, can_reverse: bool} */
+    public function getCapabilitiesAttribute(): array
+    {
+        return [
+            'can_edit' => in_array($this->status, ['draft', 'pending', 'scheduled'], true),
+            'can_send_to_cashier' => in_array($this->status, ['pending', 'scheduled'], true),
+            'can_cancel' => in_array($this->status, ['draft', 'pending', 'scheduled', 'queued'], true),
+            'can_reverse' => $this->status === 'paid',
         ];
     }
 }

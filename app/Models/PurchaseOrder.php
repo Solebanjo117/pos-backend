@@ -146,18 +146,7 @@ class PurchaseOrder extends Model
      */
     public static function generatePoNumber(): string
     {
-        $date = now()->format('Ymd');
-
-        // Get the maximum sequence for today, INCLUDING soft-deleted records
-        // to avoid UNIQUE constraint violations
-        $lastPo = self::withTrashed()
-            ->whereDate('created_at', now()->toDateString())
-            ->orderBy('id', 'desc')
-            ->first();
-
-        $sequence = $lastPo ? (int) substr($lastPo->po_number, -4) + 1 : 1;
-
-        return 'PO-'.$date.'-'.str_pad($sequence, 4, '0', STR_PAD_LEFT);
+        return app(\App\Services\DocumentSequenceService::class)->nextPurchaseOrderFolio();
     }
 
     /**

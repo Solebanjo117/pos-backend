@@ -21,6 +21,11 @@ class InventoryFifoService
     {
         return DB::transaction(function () use ($data) {
             $quantity = max(0, (int) $data['quantity']);
+            $quantityBefore = $this->aggregateQuantity(
+                (int) $data['product_id'],
+                $data['variant_id'] ?? null,
+                (int) $data['warehouse_id'],
+            );
 
             $movement = InventoryMovement::create([
                 'movement_type' => 'in',
@@ -29,6 +34,8 @@ class InventoryFifoService
                 'variant_id' => $data['variant_id'] ?? null,
                 'warehouse_id' => (int) $data['warehouse_id'],
                 'quantity' => $quantity,
+                'quantity_before' => $quantityBefore,
+                'quantity_after' => $quantityBefore + $quantity,
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -89,6 +96,7 @@ class InventoryFifoService
 
             $availableQuantity = $this->availableLotQuantity($productId, $variantId, $warehouseId);
             $quantityToConsume = min($requestedQuantity, $availableQuantity);
+            $quantityBefore = $this->aggregateQuantity($productId, $variantId, $warehouseId);
 
             if (($data['strict'] ?? false) && $quantityToConsume < $requestedQuantity) {
                 throw new \Exception('Stock insuficiente para consumir FIFO.');
@@ -110,6 +118,8 @@ class InventoryFifoService
                 'warehouse_id' => $warehouseId,
                 'destination_warehouse_id' => $data['destination_warehouse_id'] ?? null,
                 'quantity' => $quantityToConsume,
+                'quantity_before' => $quantityBefore,
+                'quantity_after' => max(0, $quantityBefore - $quantityToConsume),
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -227,6 +237,7 @@ class InventoryFifoService
                 throw new \Exception("No se puede cancelar la OC: stock insuficiente para revertir la recepción de {$productName}. Disponible en sus lotes: {$availableFromReceipt}, recibido originalmente: {$quantityToReverse}. Revise el inventario.");
             }
 
+            $quantityBefore = $this->aggregateQuantity($item->product_id, $item->variant_id, $purchaseOrder->warehouse_id);
             $movement = InventoryMovement::create([
                 'movement_type' => 'out',
                 'reason' => $data['reason'] ?? 'purchase_order_cancelled',
@@ -234,6 +245,8 @@ class InventoryFifoService
                 'variant_id' => $item->variant_id,
                 'warehouse_id' => $purchaseOrder->warehouse_id,
                 'quantity' => $quantityToReverse,
+                'quantity_before' => $quantityBefore,
+                'quantity_after' => max(0, $quantityBefore - $quantityToReverse),
                 'reference_type' => 'purchase_order_cancelled',
                 'reference_id' => $purchaseOrder->id,
                 'notes' => $data['notes'] ?? "Cancelación PO {$purchaseOrder->po_number}",
@@ -275,35 +288,94 @@ class InventoryFifoService
 
     public function restoreFromOutboundMovement(InventoryMovement $outboundMovement, array $data = []): ?InventoryMovement
     {
-        return DB::transaction(function () use ($outboundMovement, $data) {
-            $allocations = $outboundMovement->lotAllocations()->with('lot')->get();
-            $quantityToRestore = (int) $allocations->sum('quantity');
+        $quantity = (int) $outboundMovement->lotAllocations()->sum('quantity');
+
+        return $this->restoreQuantityFromOutboundMovement($outboundMovement, $quantity, $data);
+    }
+
+    public function restoreQuantityFromOutboundMovement(
+        InventoryMovement $outboundMovement,
+        int $quantity,
+        array $data = [],
+    ): ?InventoryMovement {
+        return $this->restoreOutboundQuantities([[
+            'movement' => $outboundMovement,
+            'quantity' => $quantity,
+        ]], $data);
+    }
+
+    /**
+     * @param  array<int, array{movement: InventoryMovement, quantity: int}>  $requests
+     */
+    public function restoreOutboundQuantities(array $requests, array $data = []): ?InventoryMovement
+    {
+        return DB::transaction(function () use ($requests, $data): ?InventoryMovement {
+            $firstMovement = $requests[0]['movement'] ?? null;
+            if (! $firstMovement) {
+                return null;
+            }
+
+            $quantityToRestore = 0;
+            foreach ($requests as $request) {
+                $movement = $request['movement'];
+                if (
+                    (int) $movement->product_id !== (int) $firstMovement->product_id
+                    || (int) ($movement->variant_id ?? 0) !== (int) ($firstMovement->variant_id ?? 0)
+                    || (int) $movement->warehouse_id !== (int) $firstMovement->warehouse_id
+                ) {
+                    throw new \InvalidArgumentException('Los movimientos FIFO agrupados deben pertenecer al mismo inventario.');
+                }
+
+                $allocations = $movement->lotAllocations()
+                    ->with('lot')
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
+                $remaining = min(
+                    max(0, (int) $request['quantity']),
+                    (int) $allocations->sum('quantity'),
+                );
+                $quantityToRestore += $remaining;
+
+                foreach ($allocations as $allocation) {
+                    if ($remaining <= 0) {
+                        break;
+                    }
+
+                    $restored = min($remaining, (int) $allocation->quantity);
+                    $allocation->lot->increment('quantity_available', $restored);
+                    $remaining -= $restored;
+                }
+            }
 
             if ($quantityToRestore <= 0) {
                 return null;
             }
 
-            foreach ($allocations as $allocation) {
-                $allocation->lot->increment('quantity_available', (int) $allocation->quantity);
-            }
-
+            $quantityBefore = $this->aggregateQuantity(
+                $firstMovement->product_id,
+                $firstMovement->variant_id,
+                $firstMovement->warehouse_id,
+            );
             $movement = InventoryMovement::create([
                 'movement_type' => 'in',
                 'reason' => $data['reason'] ?? 'fifo_restore',
-                'product_id' => $outboundMovement->product_id,
-                'variant_id' => $outboundMovement->variant_id,
-                'warehouse_id' => $outboundMovement->warehouse_id,
+                'product_id' => $firstMovement->product_id,
+                'variant_id' => $firstMovement->variant_id,
+                'warehouse_id' => $firstMovement->warehouse_id,
                 'quantity' => $quantityToRestore,
+                'quantity_before' => $quantityBefore,
+                'quantity_after' => $quantityBefore + $quantityToRestore,
                 'reference_type' => $data['reference_type'] ?? 'inventory_restore',
-                'reference_id' => $data['reference_id'] ?? $outboundMovement->reference_id,
+                'reference_id' => $data['reference_id'] ?? $firstMovement->reference_id,
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? Auth::id(),
             ]);
 
             $this->addAggregateStock(
-                $outboundMovement->product_id,
-                $outboundMovement->variant_id,
-                $outboundMovement->warehouse_id,
+                $firstMovement->product_id,
+                $firstMovement->variant_id,
+                $firstMovement->warehouse_id,
                 $quantityToRestore
             );
 
@@ -323,6 +395,11 @@ class InventoryFifoService
         return DB::transaction(function () use ($outboundMovement, $destinationWarehouseId, $userId) {
             $allocations = $outboundMovement->lotAllocations()->with('lot')->get();
             $quantity = (int) $allocations->sum('quantity');
+            $quantityBefore = $this->aggregateQuantity(
+                $outboundMovement->product_id,
+                $outboundMovement->variant_id,
+                $destinationWarehouseId,
+            );
 
             $movement = InventoryMovement::create([
                 'product_id' => $outboundMovement->product_id,
@@ -331,6 +408,8 @@ class InventoryFifoService
                 'destination_warehouse_id' => $outboundMovement->warehouse_id,
                 'movement_type' => 'in',
                 'quantity' => $quantity,
+                'quantity_before' => $quantityBefore,
+                'quantity_after' => $quantityBefore + $quantity,
                 'reference_type' => $outboundMovement->reference_type,
                 'reference_id' => $outboundMovement->reference_id,
                 'reason' => $outboundMovement->reason,
@@ -389,6 +468,7 @@ class InventoryFifoService
             return null;
         }
 
+        $quantityBefore = $this->aggregateQuantity($productId, $variantId, $warehouseId);
         $movement = InventoryMovement::create([
             'movement_type' => 'in',
             'reason' => 'opening_balance',
@@ -396,6 +476,8 @@ class InventoryFifoService
             'variant_id' => $variantId,
             'warehouse_id' => $warehouseId,
             'quantity' => $missingQuantity,
+            'quantity_before' => $quantityBefore,
+            'quantity_after' => $quantityBefore + $missingQuantity,
             'reference_type' => 'opening_balance',
             'notes' => 'Saldo inicial FIFO',
             'user_id' => Auth::id(),
@@ -492,6 +574,23 @@ class InventoryFifoService
             )
             ->orderBy('received_at')
             ->orderBy('id');
+    }
+
+    private function aggregateQuantity(int $productId, ?int $variantId, int $warehouseId): int
+    {
+        $inventory = ProductInventory::query()
+            ->where('warehouse_id', $warehouseId)
+            ->when(
+                $variantId,
+                fn ($query) => $query->where('variant_id', $variantId),
+                fn ($query) => $query->where('product_id', $productId)->whereNull('variant_id'),
+            )
+            ->lockForUpdate()
+            ->first();
+
+        return $inventory
+            ? (int) $inventory->quantity_available + (int) $inventory->quantity_reserved
+            : 0;
     }
 
     private function addAggregateStock(int $productId, ?int $variantId, int $warehouseId, int $quantity): void

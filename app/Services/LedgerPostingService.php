@@ -65,13 +65,23 @@ class LedgerPostingService
 
         return DB::transaction(function () use ($expense, $amount, $userId): ?JournalEntry {
             $this->reverseSource(
+                'operational_expense_payment',
+                (int) $expense->id,
+                $userId,
+                'Reversa automatica antes de repostear pago de gasto.',
+            );
+            $this->reverseSource(
                 'operational_expense',
                 (int) $expense->id,
                 $userId,
                 'Reversa automatica antes de repostear gasto operativo.',
             );
 
-            if ($amount <= 0 || ! $expense->affects_income_statement) {
+            if (
+                $amount <= 0
+                || ! $expense->affects_income_statement
+                || in_array($expense->status, ['draft', 'cancelled', 'reversed'], true)
+            ) {
                 return null;
             }
 
@@ -79,7 +89,7 @@ class LedgerPostingService
                 ?? $expense->categoryRecord?->defaultLedgerAccount
                 ?? $this->accountByCode('5000', 'Operating Expenses');
 
-            $creditAccount = $this->creditAccountForExpense($expense);
+            $creditAccount = $this->accountByCode('2100', 'Accounts Payable / Accrued Expenses');
             $memo = trim((string) ($expense->description ?: $expense->category_label ?: 'Gasto operativo'));
             [$thirdPartyType, $thirdPartyId] = $this->expenseThirdParty($expense);
 
@@ -87,7 +97,7 @@ class LedgerPostingService
                 'source_type' => 'operational_expense',
                 'source_id' => $expense->id,
                 'warehouse_id' => $expense->warehouse_id,
-                'occurred_at' => $expense->paid_at ?? $expense->business_datetime ?? $expense->created_at ?? now(),
+                'occurred_at' => $expense->business_datetime ?? $expense->expense_date ?? $expense->created_at ?? now(),
                 'status' => 'posted',
                 'memo' => 'Gasto operativo: '.$memo,
                 'created_by' => $userId ?? $expense->created_by,
@@ -121,8 +131,50 @@ class LedgerPostingService
                 ],
             ]);
 
-            return $entry->load('lines.ledgerAccount');
+            $entry = $entry->load('lines.ledgerAccount');
+
+            if ($expense->status === 'paid' && (bool) ($expense->affects_cash_flow ?? true)) {
+                $this->postOperationalExpensePayment($expense, $creditAccount, $userId);
+            }
+
+            return $entry;
         });
+    }
+
+    private function postOperationalExpensePayment(OperationalExpense $expense, LedgerAccount $payableAccount, ?int $userId): JournalEntry
+    {
+        $bucket = PaymentMethod::liquidityBucket($expense->payment_method);
+        $liquidityAccount = $bucket === PaymentMethod::LIQUIDITY_CASH
+            ? $this->accountByCode('1100', 'Cash')
+            : $this->accountByCode('1110', 'Bank');
+        [$thirdPartyType, $thirdPartyId] = $this->expenseThirdParty($expense);
+
+        return $this->postManualEntry([
+            'source_type' => 'operational_expense_payment',
+            'source_id' => $expense->id,
+            'warehouse_id' => $expense->warehouse_id,
+            'occurred_at' => $expense->paid_at ?? now(),
+            'memo' => 'Pago de gasto: '.($expense->description ?: $expense->category_label),
+            'created_by' => $userId ?? $expense->created_by,
+            'lines' => [
+                [
+                    'account_code' => $payableAccount->code,
+                    'account_name' => $payableAccount->name,
+                    'third_party_type' => $thirdPartyType,
+                    'third_party_id' => $thirdPartyId,
+                    'debit' => (float) $expense->amount,
+                    'credit' => 0,
+                ],
+                [
+                    'account_code' => $liquidityAccount->code,
+                    'account_name' => $liquidityAccount->name,
+                    'third_party_type' => $thirdPartyType,
+                    'third_party_id' => $thirdPartyId,
+                    'debit' => 0,
+                    'credit' => (float) $expense->amount,
+                ],
+            ],
+        ]);
     }
 
     /** @return array{0: string|null, 1: int|null} */

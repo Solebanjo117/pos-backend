@@ -3,8 +3,10 @@
 namespace App\Services;
 
 use App\Models\CapitalMovement;
+use App\Models\Customer;
 use App\Models\FinancialAdjustment;
 use App\Models\InventoryLot;
+use App\Models\InventoryLotAllocation;
 use App\Models\OperationalExpense;
 use App\Models\PaymentMethod;
 use App\Models\PurchaseOrder;
@@ -12,6 +14,7 @@ use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesReturn;
 use App\Support\RegionalDateRange;
 use Carbon\Carbon;
 use DateTimeInterface;
@@ -47,16 +50,23 @@ class FinancialDrilldownService
 
         return match ($metric) {
             'sales', 'sales_total' => $this->sales($metric, $from, $to, $warehouseId, $page, $perPage),
+            'sales_gross', 'sales_discounts', 'sales_returns', 'sales_net' => $this->statementSales($metric, $from, $to, $warehouseId, $page, $perPage),
             'payments_received', 'sales_collected' => $this->salesPayments($metric, $from, $to, $warehouseId, $page, $perPage),
             'purchases', 'purchase' => $this->purchases($metric, $from, $to, $warehouseId, $page, $perPage),
             'supplier_payments', 'purchase_paid' => $this->supplierPayments($metric, $from, $to, $warehouseId, $page, $perPage),
             'expenses', 'operational_expenses' => $this->expenses($metric, $from, $to, $warehouseId, $page, $perPage, $expenseCategory, $expenseGroup),
             'inventory' => $this->inventory($metric, $to, $warehouseId, $page, $perPage),
+            'inventory_bridge' => $this->inventoryBridge($metric, $from, $to, $warehouseId, $page, $perPage),
+            'inventory_in', 'inventory_out' => $this->inventoryFlowDetails($metric, $from, $to, $warehouseId, $page, $perPage),
             'receivable', 'accounts_receivable', 'credit_receivable', 'sales_pending' => $this->receivables($metric, $to, $warehouseId, $page, $perPage),
             'payable', 'accounts_payable', 'credit_payable', 'purchase_pending' => $this->payables($metric, $to, $warehouseId, $page, $perPage),
+            'receivables_generated' => $this->receivablesGenerated($metric, $from, $to, $warehouseId, $page, $perPage),
+            'payables_generated' => $this->payablesGenerated($metric, $from, $to, $warehouseId, $page, $perPage),
             'cogs' => $this->cogs($metric, $from, $to, $warehouseId, $page, $perPage),
+            'cogs_gross', 'cogs_returns', 'cogs_net' => $this->statementCogs($metric, $from, $to, $warehouseId, $page, $perPage),
             'profit', 'gross_profit', 'net_profit' => $this->profit($metric, $from, $to, $warehouseId, $page, $perPage),
             'assets', 'liabilities', 'equity' => $this->compositeBalance($metric, $from, $to, $warehouseId, $page, $perPage),
+            'customer_credits', 'pending_refunds', 'retained_earnings' => $this->balanceComponent($metric, $from, $to, $warehouseId, $page, $perPage),
             'cash', 'bank' => $this->liquidity($metric, $from, $to, $warehouseId, $page, $perPage),
             'investment', 'investment_in', 'investment_out' => $this->investment($metric, $from, $to, $warehouseId, $page, $perPage),
             'adjustments' => $this->adjustments($metric, $from, $to, $warehouseId, $page, $perPage),
@@ -76,11 +86,9 @@ class FinancialDrilldownService
             ->orderByDesc('id')
             ->get();
 
-        $rows = $orders->map(function (SalesOrder $order) use ($warehouseId, $to): array {
+        $rows = $orders->map(function (SalesOrder $order) use ($warehouseId): array {
             $total = $this->salesOrderScopedTotal($order, $warehouseId);
             $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $total);
-            $returned = $this->approvedReturnAmountForOrder($order, $to, $warehouseId);
-            $effectiveTotal = $this->money(max(0, $total - $returned));
             $paid = $this->money($order->payments
                 ->whereNotIn('method', self::NON_MONEY_METHODS)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio));
@@ -94,14 +102,32 @@ class FinancialDrilldownService
                 'user' => $order->user?->name,
                 'status' => $order->status_label ?? $order->status,
                 'method' => $order->payment_method,
-                'total' => $effectiveTotal,
+                'total' => $total,
                 'paid' => $paid,
-                'pending' => $this->money(max(0, $effectiveTotal - $paid)),
-                'amount' => $effectiveTotal,
+                'pending' => $this->money(max(0, $total - $paid)),
+                'amount' => $total,
             ];
         });
 
-        return $this->collectionPayload($metric, 'Ventas', $this->salesColumns(), $rows, $page, $perPage);
+        $returnRows = $this->approvedReturnsInRange($from, $to, $warehouseId)
+            ->map(fn (SalesReturn $return): array => [
+                'id' => 'return-'.$return->id,
+                'date' => ($return->approved_at ?? $return->updated_at)?->toDateString(),
+                ...$this->traceFields($return->approved_at ?? $return->updated_at, null, $return->approved_at ? 'approved_at' : 'updated_at'),
+                'document' => $return->return_number,
+                'party' => $return->customer?->name ?? 'Cliente general',
+                'user' => $return->approver?->name,
+                'status' => 'Devolucion aprobada',
+                'method' => $return->refund_method,
+                'total' => $this->money(-1 * (float) $return->total_amount),
+                'paid' => $this->money(-1 * (float) $return->money_refund_amount),
+                'pending' => 0.0,
+                'amount' => $this->money(-1 * (float) $return->total_amount),
+            ]);
+
+        $adjustmentRows = $this->salesAdjustmentRows($from, $to, $warehouseId);
+
+        return $this->collectionPayload($metric, 'Ventas', $this->salesColumns(), $rows->concat($returnRows)->concat($adjustmentRows)->values(), $page, $perPage);
     }
 
     private function salesPayments(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
@@ -136,6 +162,133 @@ class FinancialDrilldownService
         });
 
         return $this->collectionPayload($metric, 'Pagos recibidos', $this->paymentColumns(), $rows, $page, $perPage);
+    }
+
+    private function statementSales(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $items = SalesOrderItem::query()
+            ->with(['salesOrder.customer', 'salesOrder.user', 'product', 'variant'])
+            ->whereHas('salesOrder', fn (Builder $query) => $query
+                ->whereIn('status', self::SALES_STATUSES)
+                ->whereDate('date', '>=', $from->toDateString())
+                ->whereDate('date', '<=', $to->toDateString()))
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->get();
+
+        $grossRows = $items->map(fn (SalesOrderItem $item): array => [
+            'id' => 'gross-'.$item->id,
+            'date' => $item->salesOrder?->date?->toDateString(),
+            ...$this->traceFields($item->salesOrder?->created_at, $item->salesOrder?->business_datetime, 'created_at'),
+            'document' => $item->salesOrder?->order_number,
+            'party' => $item->salesOrder?->customer?->name ?? 'Cliente general',
+            'user' => $item->salesOrder?->user?->name,
+            'type' => 'Venta bruta',
+            'description' => $item->product_name,
+            'amount' => $this->money((float) $item->total + (float) $item->discount_amount),
+        ]);
+        $discountRows = $items
+            ->filter(fn (SalesOrderItem $item): bool => (float) $item->discount_amount > 0)
+            ->map(fn (SalesOrderItem $item): array => [
+                'id' => 'discount-'.$item->id,
+                'date' => $item->salesOrder?->date?->toDateString(),
+                ...$this->traceFields($item->salesOrder?->created_at, $item->salesOrder?->business_datetime, 'created_at'),
+                'document' => $item->salesOrder?->order_number,
+                'party' => $item->salesOrder?->customer?->name ?? 'Cliente general',
+                'user' => $item->salesOrder?->user?->name,
+                'type' => 'Descuento',
+                'description' => $item->product_name,
+                'amount' => $this->money(-1 * (float) $item->discount_amount),
+            ]);
+        $returnRows = $this->approvedReturnsInRange($from, $to, $warehouseId)
+            ->map(fn (SalesReturn $return): array => [
+                'id' => 'return-'.$return->id,
+                'date' => ($return->approved_at ?? $return->updated_at)?->toDateString(),
+                ...$this->traceFields($return->approved_at ?? $return->updated_at, null, $return->approved_at ? 'approved_at' : 'updated_at'),
+                'document' => $return->return_number,
+                'party' => $return->customer?->name ?? 'Cliente general',
+                'user' => $return->approver?->name,
+                'type' => 'Devolucion / nota de credito',
+                'description' => $return->reason,
+                'amount' => $this->money(-1 * (float) $return->total_amount),
+            ]);
+
+        $rows = match ($metric) {
+            'sales_gross' => $grossRows,
+            'sales_discounts' => $discountRows,
+            'sales_returns' => $returnRows,
+            default => $grossRows->concat($discountRows)->concat($returnRows)->values(),
+        };
+
+        return $this->collectionPayload($metric, match ($metric) {
+            'sales_gross' => 'Ventas brutas',
+            'sales_discounts' => 'Descuentos',
+            'sales_returns' => 'Devoluciones / notas de credito',
+            default => 'Ventas netas',
+        }, [
+            ...$this->datetimeColumns(),
+            ['key' => 'document', 'label' => 'Documento'],
+            ['key' => 'party', 'label' => 'Cliente'],
+            ['key' => 'user', 'label' => 'Usuario'],
+            ['key' => 'type', 'label' => 'Tipo'],
+            ['key' => 'description', 'label' => 'Detalle'],
+            ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
+        ], $rows, $page, $perPage);
+    }
+
+    private function statementCogs(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $items = SalesOrderItem::query()
+            ->with(['salesOrder.customer', 'salesOrder.user', 'product', 'variant'])
+            ->whereHas('salesOrder', fn (Builder $query) => $query
+                ->whereIn('status', self::SALES_STATUSES)
+                ->whereDate('date', '>=', $from->toDateString())
+                ->whereDate('date', '<=', $to->toDateString()))
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->get();
+
+        $grossRows = $items->map(fn (SalesOrderItem $item): array => [
+            'id' => 'cogs-'.$item->id,
+            'date' => $item->salesOrder?->date?->toDateString(),
+            ...$this->traceFields($item->salesOrder?->created_at, $item->salesOrder?->business_datetime, 'created_at'),
+            'document' => $item->salesOrder?->order_number,
+            'party' => $item->salesOrder?->customer?->name ?? 'Cliente general',
+            'user' => $item->salesOrder?->user?->name,
+            'type' => 'Costo vendido',
+            'description' => $item->product_name,
+            'amount' => $this->money((float) $item->unit_cost * (int) $item->quantity),
+        ]);
+        $returnRows = $this->approvedReturnsInRange($from, $to, $warehouseId)
+            ->flatMap(fn (SalesReturn $return): array => $return->items->map(fn ($item): array => [
+                'id' => 'return-cogs-'.$return->id.'-'.$item->id,
+                'date' => ($return->approved_at ?? $return->updated_at)?->toDateString(),
+                ...$this->traceFields($return->approved_at ?? $return->updated_at, null, $return->approved_at ? 'approved_at' : 'updated_at'),
+                'document' => $return->return_number,
+                'party' => $return->customer?->name ?? 'Cliente general',
+                'user' => $return->approver?->name,
+                'type' => 'Reversion de costo',
+                'description' => $item->salesOrderItem?->product_name,
+                'amount' => $this->money(-1 * (float) ($item->salesOrderItem?->unit_cost ?? 0) * (int) $item->quantity),
+            ])->all());
+
+        $rows = match ($metric) {
+            'cogs_gross' => $grossRows,
+            'cogs_returns' => $returnRows,
+            default => $grossRows->concat($returnRows)->values(),
+        };
+
+        return $this->collectionPayload($metric, match ($metric) {
+            'cogs_gross' => 'Costo de productos vendidos',
+            'cogs_returns' => 'Reversion de costo por devoluciones',
+            default => 'Costo neto',
+        }, [
+            ...$this->datetimeColumns(),
+            ['key' => 'document', 'label' => 'Documento'],
+            ['key' => 'party', 'label' => 'Cliente'],
+            ['key' => 'user', 'label' => 'Usuario'],
+            ['key' => 'type', 'label' => 'Tipo'],
+            ['key' => 'description', 'label' => 'Producto'],
+            ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
+        ], $rows, $page, $perPage);
     }
 
     private function purchases(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
@@ -294,6 +447,103 @@ class FinancialDrilldownService
         ], $rows, $page, $perPage, ['inventory_historical_value_uses_current_fifo_lot_availability']);
     }
 
+    private function inventoryBridge(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $summary = $this->snapshots->rangeSummary([
+            'date_from' => $from->toDateString(),
+            'date_to' => $to->toDateString(),
+            'warehouse_id' => $warehouseId,
+        ]);
+        $totals = $summary['totals'] ?? [];
+        $inbound = $this->inventoryInboundRows($from, $to, $warehouseId)->sum('amount');
+        $outbound = $this->inventoryOutboundRows($from, $to, $warehouseId)->sum('amount');
+        $opening = $this->money($totals['opening_inventory'] ?? 0);
+        $closing = $this->money($totals['closing_inventory'] ?? 0);
+
+        $rows = collect([
+            $this->inventoryBridgeRow('opening', 'Inventario inicial', 'Saldo FIFO al inicio', $opening, null, $from),
+            $this->inventoryBridgeRow('in', 'Entradas', 'Compras, devoluciones y ajustes positivos', $inbound, 'inventory_in', $to),
+            $this->inventoryBridgeRow('out', 'Salidas', 'Ventas, mermas y ajustes negativos', -$outbound, 'inventory_out', $to),
+            $this->inventoryBridgeRow('closing', 'Inventario final', 'Saldo FIFO al cierre', $closing, 'inventory', $to),
+        ]);
+
+        return $this->collectionPayload($metric, 'Puente de inventario FIFO', [
+            ['key' => 'component', 'label' => 'Componente'],
+            ['key' => 'source', 'label' => 'Origen'],
+            ['key' => 'detail_metric', 'label' => 'Detalle'],
+            ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
+        ], $rows, $page, $perPage, array_merge($summary['warnings'] ?? [], [
+            'opening_plus_period_movements_may_include_cost_corrections_already_reflected_in_fifo_closing',
+        ]), $closing);
+    }
+
+    private function inventoryFlowDetails(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $rows = $metric === 'inventory_in'
+            ? $this->inventoryInboundRows($from, $to, $warehouseId)
+            : $this->inventoryOutboundRows($from, $to, $warehouseId);
+
+        return $this->collectionPayload($metric, $metric === 'inventory_in' ? 'Entradas de inventario' : 'Salidas de inventario', [
+            ...$this->datetimeColumns(),
+            ['key' => 'source', 'label' => 'Origen'],
+            ['key' => 'product', 'label' => 'Producto'],
+            ['key' => 'quantity', 'label' => 'Cantidad'],
+            ['key' => 'unit_cost', 'label' => 'Costo', 'type' => 'money'],
+            ['key' => 'amount', 'label' => 'Valor', 'type' => 'money'],
+        ], $rows, $page, $perPage);
+    }
+
+    private function inventoryInboundRows(Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return InventoryLot::query()
+            ->with(['product', 'sourceMovement'])
+            ->whereBetween('received_at', $this->timestampBounds($from, $to))
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->get()
+            ->map(fn (InventoryLot $lot): array => [
+                'id' => 'lot-'.$lot->id,
+                'date' => $lot->received_at?->toDateString(),
+                ...$this->traceFields($lot->received_at, $lot->sourceMovement?->business_datetime, 'received_at'),
+                'source' => $lot->source_type ?: $lot->sourceMovement?->reference_type ?: 'Entrada',
+                'product' => $lot->product?->name,
+                'quantity' => (int) $lot->received_quantity,
+                'unit_cost' => $this->money($lot->landed_unit_cost),
+                'amount' => $this->money((float) $lot->received_quantity * (float) $lot->landed_unit_cost),
+            ]);
+    }
+
+    private function inventoryOutboundRows(Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return InventoryLotAllocation::query()
+            ->with(['lot.product', 'movement'])
+            ->whereHas('movement', fn (Builder $query) => $query
+                ->whereBetween('created_at', $this->timestampBounds($from, $to))
+                ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId)))
+            ->get()
+            ->map(fn (InventoryLotAllocation $allocation): array => [
+                'id' => 'allocation-'.$allocation->id,
+                'date' => $allocation->movement?->created_at?->toDateString(),
+                ...$this->traceFields($allocation->movement?->created_at, $allocation->movement?->business_datetime, 'created_at'),
+                'source' => $allocation->movement?->reason ?: $allocation->movement?->reference_type ?: 'Salida',
+                'product' => $allocation->lot?->product?->name,
+                'quantity' => (int) $allocation->quantity,
+                'unit_cost' => $this->money($allocation->unit_cost),
+                'amount' => $this->money($allocation->total_cost),
+            ]);
+    }
+
+    private function inventoryBridgeRow(string $id, string $component, string $source, float $amount, ?string $detailMetric, Carbon $date): array
+    {
+        return [
+            'id' => 'inventory-'.$id,
+            'date' => $date->toDateString(),
+            'component' => $component,
+            'source' => $source,
+            'detail_metric' => $detailMetric,
+            'amount' => $this->money($amount),
+        ];
+    }
+
     private function receivables(string $metric, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
     {
         $orders = SalesOrder::query()
@@ -333,6 +583,148 @@ class FinancialDrilldownService
         })->filter(fn (array $row): bool => $row['pending'] > 0)->values();
 
         return $this->collectionPayload($metric, 'Cuentas por cobrar', $this->salesColumns(), $rows, $page, $perPage);
+    }
+
+    private function receivablesGenerated(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $orders = SalesOrder::query()
+            ->with(['customer', 'payments', 'items', 'user'])
+            ->whereIn('status', self::SALES_STATUSES)
+            ->whereDate('date', '>=', $from->toDateString())
+            ->whereDate('date', '<=', $to->toDateString())
+            ->when($warehouseId, fn (Builder $query) => $query->whereHas('items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))
+            ->get();
+
+        $rows = $orders->map(function (SalesOrder $order) use ($warehouseId): array {
+            $scopedTotal = $this->salesOrderScopedTotal($order, $warehouseId);
+            $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $scopedTotal);
+            $orderDate = $order->date?->toDateString();
+            $cash = $order->payments
+                ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash' && $this->localDate($payment->paid_at) === $orderDate)
+                ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
+            $bank = $order->payments
+                ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank' && $this->localDate($payment->paid_at) === $orderDate)
+                ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
+            $markers = $order->payments
+                ->whereIn('method', self::NON_MONEY_METHODS)
+                ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
+            $cash = min($scopedTotal, $cash);
+            $bank = min(max($scopedTotal - $cash, 0), $bank);
+            $credit = $markers > 0
+                ? min(max($scopedTotal - $cash - $bank, 0), $markers)
+                : max($scopedTotal - $cash - $bank, 0);
+
+            return [
+                'id' => 'sale-'.$order->id,
+                'date' => $orderDate,
+                ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
+                'document' => $order->order_number,
+                'party' => $order->customer?->name ?? 'Cliente general',
+                'user' => $order->user?->name,
+                'type' => 'Venta a credito',
+                'method' => 'Credito',
+                'amount' => $this->money($credit),
+            ];
+        })->filter(fn (array $row): bool => abs($row['amount']) > 0.0001);
+
+        $returnRows = SalesReturn::query()
+            ->with(['customer', 'settler'])
+            ->where('status', 'approved')
+            ->where('settlement_status', 'settled')
+            ->whereNotNull('settled_at')
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->whereBetween('settled_at', $this->timestampBounds($from, $to))
+            ->get()
+            ->map(fn (SalesReturn $return): array => [
+                'id' => 'return-'.$return->id,
+                'date' => $return->settled_at?->toDateString(),
+                ...$this->traceFields($return->settled_at, null, 'settled_at'),
+                'document' => $return->return_number,
+                'party' => $return->customer?->name ?? 'Cliente general',
+                'user' => $return->settler?->name,
+                'type' => 'Nota de credito CxC',
+                'method' => 'CxC',
+                'amount' => $this->money(-1 * (float) $return->receivable_applied_amount),
+            ])->filter(fn (array $row): bool => abs($row['amount']) > 0.0001);
+
+        $adjustmentRows = $this->creditAdjustmentRows(FinancialAdjustment::TYPE_ACCOUNTS_RECEIVABLE, $from, $to, $warehouseId);
+
+        return $this->collectionPayload($metric, 'CxC generado', $this->creditFlowColumns(), $rows->concat($returnRows)->concat($adjustmentRows)->values(), $page, $perPage);
+    }
+
+    private function payablesGenerated(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        $orders = PurchaseOrder::query()
+            ->with(['supplier', 'payments', 'user'])
+            ->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES)
+            ->whereDate('order_date', '>=', $from->toDateString())
+            ->whereDate('order_date', '<=', $to->toDateString())
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->get();
+
+        $rows = $orders->map(function (PurchaseOrder $order): array {
+            $total = $this->money($order->total);
+            $orderDate = $order->order_date?->toDateString();
+            $cash = $order->payments
+                ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash' && $this->localDate($payment->paid_at) === $orderDate)
+                ->sum('amount');
+            $bank = $order->payments
+                ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank' && $this->localDate($payment->paid_at) === $orderDate)
+                ->sum('amount');
+            $cash = min($total, (float) $cash);
+            $bank = min(max($total - $cash, 0), (float) $bank);
+
+            return [
+                'id' => 'purchase-'.$order->id,
+                'date' => $orderDate,
+                ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
+                'document' => $order->po_number,
+                'party' => $order->supplier?->name ?? 'Proveedor general',
+                'user' => $order->user?->name,
+                'type' => 'Compra a credito',
+                'method' => 'Credito proveedor',
+                'amount' => $this->money(max(0, $total - $cash - $bank)),
+            ];
+        })->filter(fn (array $row): bool => abs($row['amount']) > 0.0001);
+
+        $adjustmentRows = $this->creditAdjustmentRows(FinancialAdjustment::TYPE_ACCOUNTS_PAYABLE, $from, $to, $warehouseId);
+
+        return $this->collectionPayload($metric, 'CxP generado', $this->creditFlowColumns(), $rows->concat($adjustmentRows)->values(), $page, $perPage);
+    }
+
+    private function creditAdjustmentRows(string $type, Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return FinancialAdjustment::query()
+            ->with('user')
+            ->where('type', $type)
+            ->whereDate('adjustment_date', '>=', $from->toDateString())
+            ->whereDate('adjustment_date', '<=', $to->toDateString())
+            ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->get()
+            ->map(fn (FinancialAdjustment $adjustment): array => [
+                'id' => 'adjustment-'.$adjustment->id,
+                'date' => $adjustment->adjustment_date?->toDateString(),
+                ...$this->traceFields($adjustment->created_at, $adjustment->business_datetime, 'created_at'),
+                'document' => 'AJ-'.$adjustment->id,
+                'party' => null,
+                'user' => $adjustment->user?->name,
+                'type' => 'Ajuste financiero',
+                'method' => null,
+                'amount' => $this->money($adjustment->amount),
+            ]);
+    }
+
+    private function creditFlowColumns(): array
+    {
+        return [
+            ...$this->datetimeColumns(),
+            ['key' => 'document', 'label' => 'Documento'],
+            ['key' => 'party', 'label' => 'Cliente / proveedor'],
+            ['key' => 'user', 'label' => 'Usuario'],
+            ['key' => 'type', 'label' => 'Tipo'],
+            ['key' => 'method', 'label' => 'Metodo'],
+            ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
+        ];
     }
 
     private function payables(string $metric, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
@@ -405,7 +797,64 @@ class FinancialDrilldownService
             'amount' => $this->money((float) $item->unit_cost * (int) $item->quantity),
         ]);
 
-        return $this->collectionPayload($metric, 'Costo', $this->itemColumns('Costo'), $rows, $page, $perPage);
+        $returnRows = $this->approvedReturnsInRange($from, $to, $warehouseId)
+            ->flatMap(function (SalesReturn $return): array {
+                return $return->items->map(fn ($item): array => [
+                    'id' => 'return-'.$return->id.'-'.$item->id,
+                    'date' => ($return->approved_at ?? $return->updated_at)?->toDateString(),
+                    ...$this->traceFields($return->approved_at ?? $return->updated_at, null, $return->approved_at ? 'approved_at' : 'updated_at'),
+                    'document' => $return->return_number,
+                    'party' => $return->customer?->name ?? 'Cliente general',
+                    'user' => $return->approver?->name,
+                    'product' => $item->salesOrderItem?->product_name,
+                    'sku' => $item->salesOrderItem?->product_sku,
+                    'quantity' => -1 * (int) $item->quantity,
+                    'unit_cost' => $this->money($item->salesOrderItem?->unit_cost ?? 0),
+                    'amount' => $this->money(-1 * (float) ($item->salesOrderItem?->unit_cost ?? 0) * (int) $item->quantity),
+                ])->all();
+            });
+
+        return $this->collectionPayload($metric, 'Costo', $this->itemColumns('Costo'), $rows->concat($returnRows)->values(), $page, $perPage);
+    }
+
+    private function approvedReturnsInRange(Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return SalesReturn::query()
+            ->with(['customer', 'approver', 'items.salesOrderItem.product'])
+            ->where('status', 'approved')
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->where(function (Builder $query) use ($from, $to): void {
+                $query->whereBetween('approved_at', $this->timestampBounds($from, $to))
+                    ->orWhere(function (Builder $legacy) use ($from, $to): void {
+                        $legacy->whereNull('approved_at')->whereBetween('updated_at', $this->timestampBounds($from, $to));
+                    });
+            })
+            ->get();
+    }
+
+    private function salesAdjustmentRows(Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return FinancialAdjustment::query()
+            ->with('user')
+            ->where('type', FinancialAdjustment::TYPE_SALES)
+            ->whereDate('adjustment_date', '>=', $from->toDateString())
+            ->whereDate('adjustment_date', '<=', $to->toDateString())
+            ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->get()
+            ->map(fn (FinancialAdjustment $adjustment): array => [
+                'id' => 'adjustment-'.$adjustment->id,
+                'date' => $adjustment->adjustment_date?->toDateString(),
+                ...$this->traceFields($adjustment->created_at, $adjustment->business_datetime, 'created_at'),
+                'document' => 'AJ-'.$adjustment->id,
+                'party' => null,
+                'user' => $adjustment->user?->name,
+                'status' => 'Ajuste',
+                'method' => null,
+                'total' => $this->money($adjustment->amount),
+                'paid' => 0.0,
+                'pending' => 0.0,
+                'amount' => $this->money($adjustment->amount),
+            ]);
     }
 
     private function profit(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
@@ -483,21 +932,25 @@ class FinancialDrilldownService
 
         $assets = $balance['assets'] ?? [];
         $liabilities = $balance['liabilities'] ?? [];
+        $equity = $balance['equity'] ?? [];
         $totals = $balance['totals'] ?? [];
 
         $rows = match ($metric) {
             'assets' => collect([
                 $this->compositeRow('cash', 'Efectivo', 'Cash', $assets['cash'] ?? 0, $to),
                 $this->compositeRow('bank', 'Banco', 'Bank', $assets['bank'] ?? 0, $to),
-                $this->compositeRow('inventory', 'Inventario', 'Inventory lots', $assets['inventory'] ?? 0, $to),
-                $this->compositeRow('receivable', 'Cuentas por cobrar', 'Ventas a credito', $liabilities['accounts_receivable'] ?? 0, $to),
+                $this->compositeRow('inventory_bridge', 'Inventario', 'FIFO por lotes', $assets['inventory'] ?? 0, $to),
+                $this->compositeRow('receivable', 'Cuentas por cobrar', 'Ventas a credito', $assets['accounts_receivable'] ?? 0, $to),
             ]),
             'liabilities' => collect([
                 $this->compositeRow('payable', 'Cuentas por pagar', 'Compras a credito', $liabilities['accounts_payable'] ?? 0, $to),
+                $this->compositeRow('customer_credits', 'Saldos a favor', 'Clientes con saldo acreedor', $liabilities['customer_credits'] ?? 0, $to),
+                $this->compositeRow('pending_refunds', 'Reembolsos pendientes', 'Devoluciones aprobadas en Caja', $liabilities['pending_refunds'] ?? 0, $to),
             ]),
             default => collect([
-                $this->compositeRow('assets', 'Activos', 'Balance operativo', $totals['total_assets'] ?? 0, $to),
-                $this->compositeRow('liabilities', 'Pasivos', 'Balance operativo', -((float) ($totals['total_liabilities'] ?? 0)), $to),
+                $this->compositeRow('investment', 'Capital aportado', 'Movimientos de capital', $equity['contributed_capital'] ?? 0, $to),
+                $this->compositeRow('profit', 'Utilidad del periodo', 'Estado de resultados', $equity['period_profit'] ?? 0, $to),
+                $this->compositeRow('retained_earnings', 'Resultados acumulados', 'Patrimonio historico derivado', $equity['retained_earnings'] ?? 0, $to),
             ]),
         };
 
@@ -520,6 +973,66 @@ class FinancialDrilldownService
             ['key' => 'detail_metric', 'label' => 'Detalle'],
             ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
         ], $rows, $page, $perPage, $balance['warnings'] ?? [], $forcedTotal);
+    }
+
+    private function balanceComponent(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array
+    {
+        if ($metric === 'customer_credits') {
+            $rows = Customer::query()
+                ->where('current_balance', '<', 0)
+                ->orderBy('name')
+                ->get(['id', 'code', 'name', 'current_balance', 'updated_at'])
+                ->map(fn (Customer $customer): array => [
+                    'id' => $customer->id,
+                    'date' => $to->toDateString(),
+                    ...$this->traceFields($customer->updated_at, null, 'updated_at'),
+                    'document' => $customer->code,
+                    'party' => $customer->name,
+                    'description' => 'Saldo a favor vigente',
+                    'amount' => $this->money(abs((float) $customer->current_balance)),
+                ]);
+        } elseif ($metric === 'pending_refunds') {
+            $rows = SalesReturn::query()
+                ->with(['customer', 'salesOrder'])
+                ->where('status', 'approved')
+                ->where('settlement_status', 'pending')
+                ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+                ->get()
+                ->map(fn (SalesReturn $return): array => [
+                    'id' => $return->id,
+                    'date' => $return->approved_at?->toDateString(),
+                    ...$this->traceFields($return->approved_at, null, 'approved_at'),
+                    'document' => $return->return_number,
+                    'party' => $return->customer?->name,
+                    'description' => 'Reembolso pendiente en Caja',
+                    'amount' => $this->money((float) $return->money_refund_amount + (float) $return->store_credit_amount),
+                ]);
+        } else {
+            $balance = $this->snapshots->balanceSheet([
+                'date_from' => $from->toDateString(),
+                'date_to' => $to->toDateString(),
+                'warehouse_id' => $warehouseId,
+            ]);
+            $equity = $balance['equity'] ?? [];
+            $rows = collect([
+                $this->compositeRow('assets', 'Activos netos', 'Activos verificables', $balance['totals']['total_assets'] ?? 0, $to),
+                $this->compositeRow('liabilities', 'Pasivos', 'Obligaciones verificables', -((float) ($balance['totals']['total_liabilities'] ?? 0)), $to),
+                $this->compositeRow('investment', 'Capital', 'Aportes y retiros', -((float) ($equity['contributed_capital'] ?? 0)), $to),
+                $this->compositeRow('profit', 'Utilidad del periodo', 'Resultado actual', -((float) ($equity['period_profit'] ?? 0)), $to),
+            ]);
+        }
+
+        return $this->collectionPayload($metric, match ($metric) {
+            'customer_credits' => 'Saldos a favor',
+            'pending_refunds' => 'Reembolsos pendientes',
+            default => 'Resultados acumulados',
+        }, [
+            ...$this->datetimeColumns(),
+            ['key' => 'document', 'label' => 'Documento'],
+            ['key' => 'party', 'label' => 'Cliente'],
+            ['key' => 'description', 'label' => 'Detalle'],
+            ['key' => 'amount', 'label' => 'Monto', 'type' => 'money'],
+        ], $rows->values(), $page, $perPage);
     }
 
     /**
@@ -704,6 +1217,7 @@ class FinancialDrilldownService
     {
         return OperationalExpense::query()
             ->with(['creator'])
+            ->where('status', 'paid')
             ->whereDate('expense_date', '>=', $from->toDateString())
             ->whereDate('expense_date', '<=', $to->toDateString())
             ->where(fn (Builder $query) => $query->where('affects_cash_flow', true)->orWhereNull('affects_cash_flow'))
@@ -839,6 +1353,11 @@ class FinancialDrilldownService
         return RegionalDateRange::utcBounds($from, $to);
     }
 
+    private function localDate(?Carbon $timestamp): ?string
+    {
+        return $timestamp?->copy()->setTimezone(RegionalDateRange::timezone())->toDateString();
+    }
+
     private function emptyPayload(string $metric, string $label, int $page, int $perPage, array $warnings = []): array
     {
         return $this->collectionPayload($metric, $label, [], collect(), $page, $perPage, $warnings);
@@ -899,7 +1418,7 @@ class FinancialDrilldownService
     {
         return [
             ['key' => 'occurred_at', 'label' => 'Fecha/Hora', 'type' => 'datetime'],
-            ['key' => 'business_datetime', 'label' => 'Fecha/Hora operativa', 'type' => 'datetime'],
+            ['key' => 'business_datetime', 'label' => 'Fecha y hora', 'type' => 'datetime'],
         ];
     }
 
@@ -952,7 +1471,7 @@ class FinancialDrilldownService
     {
         return $this->money($order->returns
             ->filter(function ($return) use ($to, $warehouseId): bool {
-                if ($return->status !== 'approved') {
+                if ($return->status !== 'approved' || $return->settlement_status !== 'settled') {
                     return false;
                 }
 
@@ -960,11 +1479,11 @@ class FinancialDrilldownService
                     return false;
                 }
 
-                $date = $return->approved_at ?? $return->updated_at ?? $return->created_at;
+                $date = $return->settled_at ?? $return->approved_at ?? $return->updated_at ?? $return->created_at;
 
                 return $date !== null && Carbon::parse($date)->lte($to->copy()->endOfDay());
             })
-            ->sum('total_amount'));
+            ->sum('receivable_applied_amount'));
     }
 
     private function paymentBucket(?string $method): ?string

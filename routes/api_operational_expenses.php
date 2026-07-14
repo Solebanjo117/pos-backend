@@ -17,6 +17,7 @@ Route::prefix('operational-expenses')->middleware('role:admin,manager')->group(f
     Route::post('/', [OperationalExpenseController::class, 'store']);
     Route::get('/{operationalExpense}', [OperationalExpenseController::class, 'show']);
     Route::put('/{operationalExpense}', [OperationalExpenseController::class, 'update']);
+    Route::post('/{operationalExpense}/send-to-cashier', [OperationalExpenseController::class, 'sendToCashier']);
     Route::delete('/{operationalExpense}', [OperationalExpenseController::class, 'destroy']);
 });
 

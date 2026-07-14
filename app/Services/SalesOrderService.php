@@ -16,6 +16,10 @@ use Illuminate\Validation\ValidationException;
 
 class SalesOrderService
 {
+    public function __construct(private readonly CashierQueueService $cashierQueueService)
+    {
+    }
+
     /**
      * Get all sales orders with filters
      */
@@ -90,6 +94,12 @@ class SalesOrderService
             if ($isCashier) {
                 [$data, $sourceQuote, $existingOrder] = $this->prepareCashierCheckout($data);
                 if ($existingOrder) {
+                    $this->cashierQueueService->completeForSource(
+                        SalesQuote::class,
+                        $sourceQuote->id,
+                        Auth::user(),
+                        (float) $existingOrder->total,
+                    );
                     return $existingOrder;
                 }
             }
@@ -243,6 +253,13 @@ class SalesOrderService
                         ->causedBy(Auth::user())
                         ->withProperties(['sales_order_id' => $order->id])
                         ->log('cashier_collected');
+
+                    $this->cashierQueueService->completeForSource(
+                        SalesQuote::class,
+                        $quote->id,
+                        Auth::user(),
+                        (float) $order->total,
+                    );
                 }
             }
 
@@ -718,7 +735,16 @@ class SalesOrderService
     public function cancelOrder(int $id): SalesOrder
     {
         $order = $this->getById($id);
-        $order->cancel();
+        $user = Auth::user();
+        if (! $user) {
+            throw ValidationException::withMessages([
+                'user' => 'Debe existir un usuario autenticado para anular la factura.',
+            ]);
+        }
+
+        $order = app(SalesOrderCancellationService::class)->cancel($order, [
+            'reason' => 'Anulacion solicitada desde el flujo de ventas.',
+        ], $user);
 
         $fresh = $order->fresh();
         $fresh->stockWarnings = [];

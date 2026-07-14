@@ -157,22 +157,7 @@ class SalesQuote extends Model
 
     public static function generateQuoteNumber(): string
     {
-        $prefix = 'COT-';
-        $date = now()->format('Ymd');
-
-        $lastQuote = static::withTrashed()
-            ->where('quote_number', 'like', $prefix.$date.'%')
-            ->orderByDesc('quote_number')
-            ->first();
-
-        if ($lastQuote) {
-            $lastNumber = (int) substr($lastQuote->quote_number, strlen($prefix.$date.'-'));
-            $nextNumber = $lastNumber + 1;
-        } else {
-            $nextNumber = 1;
-        }
-
-        return $prefix.$date.'-'.str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+        return app(\App\Services\DocumentSequenceService::class)->nextCommercialFolio();
     }
 
     public function calculateTotals(): void

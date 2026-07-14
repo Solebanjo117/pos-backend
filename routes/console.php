@@ -11,6 +11,7 @@ Schedule::command('db:backup')->daily()->at('02:00');
 Schedule::command('db:clean-backups')->weekly()->sundays()->at('03:00');
 
 Schedule::command('products:import-reconcile')->everyFiveMinutes()->withoutOverlapping();
+Schedule::command('cashier-queue:sync-due')->everyFiveMinutes()->withoutOverlapping();
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());

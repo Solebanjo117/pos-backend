@@ -175,7 +175,7 @@ it('allows non cash operational expenses without an open cash session', function
         ->assertJsonPath('data.cash_movement_id', null);
 });
 
-it('syncs and deletes cash movements while the operational expense session is open', function () {
+it('keeps paid cash expenses immutable and reverses them with a compensating movement', function () {
     [$admin, $warehouse] = operationalExpenseAdminContext();
 
     PosSession::create([
@@ -201,16 +201,17 @@ it('syncs and deletes cash movements while the operational expense session is op
     $this->actingAs($admin)->putJson("/api/v1/operational-expenses/{$expense->id}", [
         'amount' => 25,
         'description' => 'Mantenimiento local',
-    ])->assertOk();
+    ])->assertUnprocessable();
 
-    expect((float) CashMovement::firstOrFail()->amount)->toBe(25.0)
-        ->and(CashMovement::firstOrFail()->reason)->toBe('Gasto operativo: Mantenimiento local');
+    expect((float) CashMovement::firstOrFail()->amount)->toBe(20.0)
+        ->and(CashMovement::firstOrFail()->reason)->toBe('Gasto operativo: Mantenimiento');
 
     $this->actingAs($admin)->deleteJson("/api/v1/operational-expenses/{$expense->id}")
         ->assertOk();
 
-    expect(OperationalExpense::count())->toBe(0)
-        ->and(CashMovement::count())->toBe(0);
+    expect(OperationalExpense::firstOrFail()->status)->toBe('reversed')
+        ->and(CashMovement::query()->where('type', 'out')->sum('amount'))->toEqual(20)
+        ->and(CashMovement::query()->where('type', 'in')->sum('amount'))->toEqual(20);
 });
 
 it('rejects operational expense changes after the linked cash session is closed', function () {
@@ -251,7 +252,7 @@ it('rejects operational expense changes after the linked cash session is closed'
         ->and(CashMovement::count())->toBe(1);
 });
 
-it('allows non cash expense changes after an unrelated cash session is closed', function () {
+it('keeps paid non cash expenses immutable and reverses them without touching cash', function () {
     [$admin, $warehouse] = operationalExpenseAdminContext();
 
     $session = PosSession::create([
@@ -280,12 +281,12 @@ it('allows non cash expense changes after an unrelated cash session is closed', 
 
     $this->actingAs($admin)->putJson("/api/v1/operational-expenses/{$expense->id}", [
         'amount' => 30,
-    ])->assertOk();
+    ])->assertUnprocessable();
 
     $this->actingAs($admin)->deleteJson("/api/v1/operational-expenses/{$expense->id}")
         ->assertOk();
 
-    expect(OperationalExpense::count())->toBe(0)
+    expect(OperationalExpense::firstOrFail()->status)->toBe('reversed')
         ->and(CashMovement::count())->toBe(0);
 });
 
@@ -716,7 +717,7 @@ it('generates an income statement with customer and supplier credit kept out of 
         ->assertJsonPath('summary.total_operational_expenses', 10)
         ->assertJsonPath('summary.net_profit', -50)
         ->assertJsonPath('sections.0.key', 'income')
-        ->assertJsonPath('sections.0.rows.0.key', 'cash-sales')
+        ->assertJsonPath('sections.0.rows.0.key', 'gross-sales')
         ->assertJsonPath('sections.0.rows.0.amount', 40)
         ->assertJsonPath('sections.4.key', 'open-balances')
         ->assertJsonPath('sections.4.rows.0.key', 'accounts-receivable')

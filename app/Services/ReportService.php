@@ -1166,6 +1166,8 @@ class ReportService
             'summary' => [
                 'total_revenue' => round($totalRevenue, 2),
                 'total_cogs' => round($netCogs, 2),
+                'gross_cogs' => round($totalCogs, 2),
+                'return_cogs' => round($refundCogs, 2),
                 'total_refunds' => round($totalRefunds, 2),
                 'total_operational_expenses' => round($totalOperationalExpenses, 2),
                 'gross_profit' => round($grossProfit, 2),
@@ -1197,6 +1199,9 @@ class ReportService
 
         $incomeTotal = (float) $summary['total_revenue'] - (float) $summary['total_refunds'];
         $costTotal = (float) $summary['total_cogs'];
+        $grossSales = (float) $summary['total_revenue'] + (float) $summary['total_discounts'];
+        $grossCogs = (float) ($summary['gross_cogs'] ?? $summary['total_cogs']);
+        $returnCogs = (float) ($summary['return_cogs'] ?? 0);
         $operationalExpenseTotal = (float) $summary['total_operational_expenses'];
 
         return [
@@ -1213,10 +1218,11 @@ class ReportService
                     'label' => 'Ingresos',
                     'amount' => round($incomeTotal, 2),
                     'rows' => [
-                        $this->statementRow('cash-sales', 'Ventas cobradas', (float) $summary['total_revenue'], 'income', 'Pagos recibidos en el periodo.'),
-                        $this->statementRow('approved-refunds', 'Devoluciones aprobadas', -1 * (float) $summary['total_refunds'], 'expense', 'Contra-ingreso del periodo.'),
+                        $this->statementRow('gross-sales', 'Ventas brutas', $grossSales, 'income', 'Ventas antes de descuentos y devoluciones.'),
+                        $this->statementRow('discounts', 'Descuentos', -1 * (float) $summary['total_discounts'], 'expense', 'Descuentos aplicados a las lineas vendidas.'),
+                        $this->statementRow('approved-refunds', 'Devoluciones / notas de credito', -1 * (float) $summary['total_refunds'], 'expense', 'Contra-ingreso del periodo.'),
+                        $this->statementRow('net-sales', 'Ventas netas', $incomeTotal, 'profit', 'Ventas brutas menos descuentos y devoluciones.'),
                         $this->statementRow('tax-collected', 'ITBM cobrado', (float) $summary['total_tax'], 'neutral', 'Informativo; no altera utilidad neta.'),
-                        $this->statementRow('discounts', 'Descuentos aplicados', -1 * (float) $summary['total_discounts'], 'neutral', 'Informativo del periodo.'),
                     ],
                 ],
                 [
@@ -1224,7 +1230,9 @@ class ReportService
                     'label' => 'Costo de ventas',
                     'amount' => round($costTotal, 2),
                     'rows' => [
-                        $this->statementRow('merchandise-cost', 'Costo de mercancia vendida', $costTotal, 'expense', 'Costo registrado en lineas vendidas.'),
+                        $this->statementRow('gross-cogs', 'Costo de productos vendidos', $grossCogs, 'expense', 'Costo registrado en lineas vendidas.'),
+                        $this->statementRow('return-cogs', 'Reversion por devoluciones', -1 * $returnCogs, 'income', 'Costo reintegrado al inventario por devoluciones aprobadas.'),
+                        $this->statementRow('net-cogs', 'Costo neto', $costTotal, 'expense', 'Costo vendido menos reversiones por devolucion.'),
                     ],
                 ],
                 [
@@ -1522,6 +1530,8 @@ class ReportService
             'summary' => [
                 'total_revenue' => round($totalRevenue, 2),
                 'total_cogs' => round($netCogs, 2),
+                'gross_cogs' => round($totalCogs, 2),
+                'return_cogs' => round($refundCogs, 2),
                 'total_refunds' => round($totalRefunds, 2),
                 'total_operational_expenses' => round($totalOperationalExpenses, 2),
                 'gross_profit' => round($grossProfit, 2),

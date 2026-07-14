@@ -19,6 +19,8 @@ class InventoryMovement extends Model
         'warehouse_id',
         'destination_warehouse_id',
         'quantity',
+        'quantity_before',
+        'quantity_after',
         'reference_type',
         'reference_id',
         'notes',
@@ -30,6 +32,8 @@ class InventoryMovement extends Model
 
     protected $casts = [
         'quantity' => 'integer',
+        'quantity_before' => 'integer',
+        'quantity_after' => 'integer',
         'reference_id' => 'integer',
         'product_batch_id' => 'integer',
         'business_datetime' => 'datetime',

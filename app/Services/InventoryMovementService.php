@@ -87,6 +87,7 @@ class InventoryMovementService
 
         return DB::transaction(function () use ($data) {
             $batchId = null;
+            $inventoryBefore = $this->inventoryQuantity($data['product_id'], $data['warehouse_id'], $data['variant_id'] ?? null);
 
             // Handle Batch Logic
             if (! empty($data['batch_number'])) {
@@ -115,6 +116,8 @@ class InventoryMovementService
                 'product_batch_id' => $batchId,
                 'warehouse_id' => $data['warehouse_id'],
                 'quantity' => $data['quantity'],
+                'quantity_before' => $inventoryBefore,
+                'quantity_after' => $inventoryBefore + (int) $data['quantity'],
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -165,6 +168,9 @@ class InventoryMovementService
             }
 
             $inventory = $query->first();
+            $inventoryBefore = $inventory
+                ? (int) $inventory->quantity_available + (int) $inventory->quantity_reserved
+                : 0;
 
             $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
             if (! $allowNegative && (! $inventory || $inventory->quantity_available < $data['quantity'])) {
@@ -193,6 +199,8 @@ class InventoryMovementService
                 'product_batch_id' => $data['product_batch_id'] ?? null,
                 'warehouse_id' => $data['warehouse_id'],
                 'quantity' => $data['quantity'],
+                'quantity_before' => $inventoryBefore,
+                'quantity_after' => $inventoryBefore - (int) $data['quantity'],
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -258,6 +266,9 @@ class InventoryMovementService
             }
 
             $inventory = $query->first();
+            $inventoryBefore = $inventory
+                ? (int) $inventory->quantity_available + (int) $inventory->quantity_reserved
+                : 0;
 
             $allowNegative = \App\Models\Setting::get('allow_negative_inventory', false);
             if (! $allowNegative && (! $inventory || $inventory->quantity_available < $data['quantity'])) {
@@ -290,6 +301,8 @@ class InventoryMovementService
                 'warehouse_id' => $data['warehouse_id'],
                 'destination_warehouse_id' => $data['destination_warehouse_id'],
                 'quantity' => $data['quantity'],
+                'quantity_before' => $inventoryBefore,
+                'quantity_after' => $inventoryBefore - (int) $data['quantity'],
                 'reference_type' => 'transfer',
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? null,
@@ -373,6 +386,20 @@ class InventoryMovementService
         } elseif ($operation === 'subtract') {
             $inventory->decrement('quantity_available', $quantity);
         }
+    }
+
+    protected function inventoryQuantity(int $productId, int $warehouseId, ?int $variantId = null): int
+    {
+        $inventory = ProductInventory::query()
+            ->where('product_id', $productId)
+            ->where('warehouse_id', $warehouseId)
+            ->when($variantId, fn ($query) => $query->where('variant_id', $variantId), fn ($query) => $query->whereNull('variant_id'))
+            ->lockForUpdate()
+            ->first();
+
+        return $inventory
+            ? (int) $inventory->quantity_available + (int) $inventory->quantity_reserved
+            : 0;
     }
 
     /**

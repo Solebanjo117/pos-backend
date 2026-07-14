@@ -37,6 +37,8 @@ class SalesOrderOperationalDetailService
             'returns.items.seller:id,name',
             'returns.user:id,name',
             'returns.warehouse:id,code,name',
+            'canceller:id,name',
+            'cancellationReturn.creditNote',
         ]);
 
         $returnIds = $order->returns->pluck('id')->all();
@@ -78,6 +80,14 @@ class SalesOrderOperationalDetailService
             'status' => $order->status,
             'status_label' => $order->status_label,
             'payment_status' => $order->payment_status,
+            'payment_display_status' => $this->paymentDisplayStatus($order),
+            'cancelled_at' => $order->cancelled_at?->toISOString(),
+            'cancellation_reason' => $order->cancellation_reason,
+            'cancelled_by' => $order->canceller ? [
+                'id' => $order->canceller->id,
+                'name' => $order->canceller->name,
+            ] : null,
+            'cancellation_return_id' => $order->cancellation_return_id,
             'subtotal' => (float) $order->subtotal,
             'discount_amount' => (float) $order->discount_amount,
             'tax_amount' => (float) $order->tax_amount,
@@ -139,6 +149,21 @@ class SalesOrderOperationalDetailService
     /**
      * @return array<string, mixed>
      */
+    private function paymentDisplayStatus(SalesOrder $order): string
+    {
+        if ($order->status !== 'cancelled') {
+            return $order->payment_status;
+        }
+
+        if (! $order->cancellationReturn) {
+            return 'voided_unpaid';
+        }
+
+        return $order->cancellationReturn->settlement_status === 'settled'
+            ? 'refunded'
+            : 'refund_pending';
+    }
+
     private function itemRow($item): array
     {
         $quantity = max((int) $item->quantity, 0);
