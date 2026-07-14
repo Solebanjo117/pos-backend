@@ -34,6 +34,8 @@ class InventoryMovementResource extends JsonResource
                 ] : null;
             }),
             'quantity' => $this->quantity,
+            'quantity_before' => $this->quantity_before,
+            'quantity_after' => $this->quantity_after,
             'reference_type' => $this->reference_type,
             'reference_id' => $this->reference_id,
             'reason' => $this->reason,

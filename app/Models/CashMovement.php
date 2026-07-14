@@ -10,13 +10,24 @@ class CashMovement extends Model
         'pos_session_id',
         'user_id',
         'type',
+        'subtype',
         'amount',
+        'balance_before',
+        'balance_after',
         'reason',
+        'reference_number',
+        'payment_method',
         'notes',
+        'source_type',
+        'source_id',
+        'business_datetime',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
+        'balance_before' => 'decimal:2',
+        'balance_after' => 'decimal:2',
+        'business_datetime' => 'datetime',
     ];
 
     public function posSession()

@@ -8,6 +8,7 @@ use App\Models\ProductInventory;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
 use App\Models\SalesOrder;
+use App\Models\SalesOrderPayment;
 use App\Models\SalesReturn;
 use App\Models\SalesReturnItem;
 use App\Models\Supplier;
@@ -19,6 +20,7 @@ use App\Services\InventoryTransferService;
 use App\Services\ProductService;
 use App\Services\PurchaseOrderService;
 use App\Services\SalesOrderService;
+use App\Services\SalesReturnService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -215,11 +217,19 @@ it('exposes neutral inventory history for a product variant by warehouse with le
         ->assertJsonPath('data.purchase_movements.0.quantity', 10)
         ->assertJsonPath('data.purchase_movements.0.source_lots.0.quantity', 10)
         ->assertJsonPath('data.purchase_movements.0.fifo_lots.0.quantity', 10)
+        ->assertJsonCount(3, 'data.movement_timeline')
         ->assertJsonPath('data.sale_movements.0.quantity', 12)
         ->assertJsonPath('data.sale_movements.0.lot_allocations.0.quantity', 10)
         ->assertJsonPath('data.sale_movements.0.lot_allocations.1.quantity', 2)
         ->assertJsonPath('data.sale_movements.0.fifo_allocations.0.quantity', 10)
         ->assertJsonPath('data.sale_movements.0.fifo_allocations.1.quantity', 2);
+
+    $saleTimeline = collect($response->json('data.movement_timeline'))
+        ->firstWhere('reference_type', 'sale');
+    expect($saleTimeline)->not->toBeNull()
+        ->and($saleTimeline['quantity_before'])->toBe(20)
+        ->and($saleTimeline['quantity_after'])->toBe(8)
+        ->and($saleTimeline['user']['id'])->toBe($context['user']->id);
 
     $this->getJson(
         "/api/v1/products/{$context['product']->id}/variants/{$context['variant']->id}/fifo-history?warehouse_id={$context['warehouse']->id}"
@@ -398,6 +408,13 @@ it('approved sales returns create inbound fifo lots instead of adjusting aggrega
 
     $salesOrderItem = $order->items()->firstOrFail();
     $salesOrderItem->forceFill(['unit_cost' => 4.75])->save();
+    SalesOrderPayment::create([
+        'sales_order_id' => $order->id,
+        'amount' => $order->total,
+        'method' => 'cash',
+        'paid_at' => now(),
+        'created_by' => $context['user']->id,
+    ]);
 
     $return = SalesReturn::create([
         'sales_order_id' => $order->id,
@@ -406,7 +423,7 @@ it('approved sales returns create inbound fifo lots instead of adjusting aggrega
         'status' => 'pending',
         'reason' => 'Cliente devolvio producto',
         'total_amount' => 9,
-        'refund_method' => 'balance',
+        'refund_method' => 'cash',
     ]);
 
     SalesReturnItem::create([
@@ -419,7 +436,7 @@ it('approved sales returns create inbound fifo lots instead of adjusting aggrega
         'subtotal' => 9,
     ]);
 
-    expect($return->approve())->toBeTrue();
+    expect(app(SalesReturnService::class)->approve($return, $context['user'])->status)->toBe('approved');
 
     $returnLot = InventoryLot::query()
         ->where('source_type', 'sales_return')

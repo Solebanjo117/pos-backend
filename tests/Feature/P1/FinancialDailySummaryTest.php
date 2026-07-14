@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\Customer;
 use App\Models\FinancialDailySnapshot;
 use App\Models\PaymentMethod;
 use App\Models\InventoryLot;
@@ -11,6 +12,7 @@ use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesReturn;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
@@ -282,7 +284,7 @@ it('keeps inventory trace fields internal and paginates drilldowns with supporte
 
     expect($columns->keys()->all())
         ->not->toContain('warehouse', 'user')
-        ->and($columns['business_datetime']['label'])->toBe('Fecha/Hora operativa')
+        ->and($columns['business_datetime']['label'])->toBe('Fecha y hora')
         ->and(array_key_exists('warehouse', $firstRow))->toBeTrue()
         ->and(array_key_exists('user', $firstRow))->toBeTrue()
         ->and($firstIds->intersect($secondIds))->toHaveCount(0);
@@ -363,4 +365,220 @@ it('maps yappy payments and bank adjustments into Banco', function (): void {
         ->getJson('/api/v1/reports/financial-drilldown?metric=bank&date_from=2026-05-05&date_to=2026-05-05&warehouse_id='.$warehouse->id)
         ->assertOk()
         ->assertJsonPath('total', 115);
+});
+
+it('reports daily generated receivables and payables with matching drilldowns', function (): void {
+    [$admin, $warehouse, $product, $variant] = dailySummaryContext();
+
+    $supplier = Supplier::create([
+        'name' => 'Proveedor credito diario',
+        'email' => 'credito-diario@example.test',
+    ]);
+    PurchaseOrder::create([
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $admin->id,
+        'status' => 'received',
+        'payment_status' => 'pending',
+        'order_date' => '2026-05-06',
+        'subtotal' => 120,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 120,
+    ]);
+
+    $order = SalesOrder::create([
+        'order_number' => 'SO-CREDIT-GENERATED',
+        'user_id' => $admin->id,
+        'date' => '2026-05-06',
+        'status' => 'completed',
+        'subtotal' => 90,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 90,
+        'payment_status' => 'pending',
+    ]);
+    SalesOrderItem::create([
+        'sales_order_id' => $order->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 90,
+        'unit_cost' => 35,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 90,
+        'total' => 90,
+    ]);
+
+    $summary = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/daily-summary?date_from=2026-05-06&date_to=2026-05-06&warehouse_id='.$warehouse->id)
+        ->assertOk();
+
+    expect((float) $summary->json('rows.0.receivables_generated'))->toBe(90.0)
+        ->and((float) $summary->json('rows.0.payables_generated'))->toBe(120.0)
+        ->and((float) $summary->json('totals.receivables_generated'))->toBe(90.0)
+        ->and((float) $summary->json('totals.payables_generated'))->toBe(120.0);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-drilldown?metric=receivables_generated&date_from=2026-05-06&date_to=2026-05-06&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('total', 90)
+        ->assertJsonPath('rows.0.document', 'SO-CREDIT-GENERATED');
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-drilldown?metric=payables_generated&date_from=2026-05-06&date_to=2026-05-06&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('total', 120);
+
+    $this->actingAs($admin)
+        ->getJson('/api/v1/reports/financial-reconciliation?date_from=2026-05-06&date_to=2026-05-06&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('passed', true)
+        ->assertJsonPath('max_difference', 0)
+        ->assertJsonPath('equations.passed', true)
+        ->assertJsonCount(9, 'metrics');
+});
+
+it('places receivables in assets and reconciles assets with liabilities and equity', function (): void {
+    [$admin, $warehouse, $product, $variant] = dailySummaryContext();
+
+    $creditCustomer = Customer::create([
+        'code' => 'CLI-BS-CREDIT',
+        'name' => 'Cliente por cobrar',
+        'status' => 'active',
+        'current_balance' => 50,
+    ]);
+    Customer::create([
+        'code' => 'CLI-BS-FAVOR',
+        'name' => 'Cliente saldo a favor',
+        'status' => 'active',
+        'current_balance' => -10,
+    ]);
+
+    $paidOrder = SalesOrder::create([
+        'order_number' => 'SO-BS-CASH',
+        'user_id' => $admin->id,
+        'date' => '2026-05-07',
+        'status' => 'completed',
+        'subtotal' => 100,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 100,
+        'payment_status' => 'paid',
+    ]);
+    $paidItem = SalesOrderItem::create([
+        'sales_order_id' => $paidOrder->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 100,
+        'unit_cost' => 20,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 100,
+        'total' => 100,
+    ]);
+    SalesOrderPayment::create([
+        'sales_order_id' => $paidOrder->id,
+        'amount' => 100,
+        'method' => 'cash',
+        'paid_at' => '2026-05-07 09:00:00',
+        'created_by' => $admin->id,
+    ]);
+
+    $creditOrder = SalesOrder::create([
+        'order_number' => 'SO-BS-CREDIT',
+        'customer_id' => $creditCustomer->id,
+        'user_id' => $admin->id,
+        'date' => '2026-05-07',
+        'status' => 'completed',
+        'subtotal' => 50,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 50,
+        'payment_status' => 'pending',
+    ]);
+    SalesOrderItem::create([
+        'sales_order_id' => $creditOrder->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 1,
+        'unit_price' => 50,
+        'unit_cost' => 10,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 50,
+        'total' => 50,
+    ]);
+
+    $supplier = Supplier::create(['name' => 'Proveedor Balance Sheet']);
+    PurchaseOrder::create([
+        'po_number' => 'PO-BS-001',
+        'supplier_id' => $supplier->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $admin->id,
+        'status' => 'received',
+        'payment_status' => 'pending',
+        'order_date' => '2026-05-07',
+        'subtotal' => 40,
+        'tax_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 40,
+    ]);
+    InventoryLot::create([
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'source_type' => 'opening_balance',
+        'received_quantity' => 3,
+        'quantity_available' => 3,
+        'unit_cost_base' => 10,
+        'tax_per_unit' => 0,
+        'misc_per_unit' => 0,
+        'landed_unit_cost' => 10,
+        'received_at' => '2026-05-07 08:00:00',
+    ]);
+    SalesReturn::create([
+        'return_number' => 'DEV-BS-001',
+        'sales_order_id' => $paidOrder->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $admin->id,
+        'status' => 'approved',
+        'settlement_status' => 'pending',
+        'total_amount' => 7,
+        'money_refund_amount' => 5,
+        'store_credit_amount' => 2,
+        'receivable_applied_amount' => 0,
+        'refund_method' => 'cash',
+        'approved_by' => $admin->id,
+        'approved_at' => '2026-05-07 12:00:00',
+    ]);
+
+    $response = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/balance-sheet?date_from=2026-05-07&date_to=2026-05-07&warehouse_id='.$warehouse->id)
+        ->assertOk()
+        ->assertJsonPath('assets.accounts_receivable', 50)
+        ->assertJsonPath('liabilities.accounts_payable', 40)
+        ->assertJsonPath('liabilities.customer_credits', 10)
+        ->assertJsonPath('liabilities.pending_refunds', 7)
+        ->assertJsonPath('totals.reconciliation_difference', 0);
+
+    expect((float) $response->json('totals.total_assets'))
+        ->toBe((float) $response->json('totals.liabilities_and_equity'));
 });

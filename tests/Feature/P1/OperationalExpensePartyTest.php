@@ -85,3 +85,58 @@ it('rejects unavailable parties and multiple legacy party relations', function (
         'supplier_id' => $supplier->id,
     ])->assertUnprocessable();
 });
+
+it('links active staff through a reusable beneficiary and exposes its expense history', function (): void {
+    $seller = User::factory()->create([
+        'name' => 'Juan Vendedor',
+        'role' => 'seller',
+        'is_active' => true,
+        'current_warehouse_id' => $this->warehouse->id,
+    ]);
+
+    $this->getJson('/api/v1/operational-expenses/parties?q=Juan%20Vendedor')
+        ->assertOk()
+        ->assertJsonFragment([
+            'type' => 'staff',
+            'id' => $seller->id,
+            'name' => 'Juan Vendedor',
+        ]);
+
+    $response = $this->postJson('/api/v1/operational-expenses', [
+        'expense_date' => '2026-07-13',
+        'category' => 'payroll',
+        'amount' => 75,
+        'status' => 'pending',
+        'warehouse_id' => $this->warehouse->id,
+        'party_type' => 'staff',
+        'party_id' => $seller->id,
+    ])->assertCreated()
+        ->assertJsonPath('data.party.type', 'staff')
+        ->assertJsonPath('data.party.id', $seller->id)
+        ->assertJsonPath('data.party.name', 'Juan Vendedor');
+
+    $beneficiaryId = $response->json('data.beneficiary_id');
+    $this->assertDatabaseHas('operational_expense_beneficiaries', [
+        'id' => $beneficiaryId,
+        'user_id' => $seller->id,
+        'beneficiary_kind' => 'employee',
+    ]);
+
+    $this->getJson('/api/v1/operational-expenses?party_type=staff&party_id='.$seller->id)
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.party.id', $seller->id)
+        ->assertJsonFragment(['party_name' => 'Juan Vendedor', 'total_amount' => 75]);
+
+    $this->postJson('/api/v1/operational-expenses', [
+        'expense_date' => '2026-07-13',
+        'category' => 'payroll',
+        'amount' => 25,
+        'status' => 'pending',
+        'warehouse_id' => $this->warehouse->id,
+        'party_type' => 'staff',
+        'party_id' => $seller->id,
+    ])->assertCreated();
+
+    expect(OperationalExpenseBeneficiary::query()->where('user_id', $seller->id)->count())->toBe(1);
+});

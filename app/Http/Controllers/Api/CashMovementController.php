@@ -14,7 +14,7 @@ class CashMovementController extends Controller
      */
     public function store(Request $request)
     {
-        $userId = $request->input('user_id') ?? auth()->id();
+        $userId = auth()->id();
 
         if (!$userId) {
             return response()->json(['message' => 'No autorizado. Se requiere user_id en la petición.'], 401);
@@ -22,10 +22,22 @@ class CashMovementController extends Controller
 
         $request->validate([
             'type'   => 'required|in:in,out',
+            'subtype' => 'nullable|in:cash_in,cash_out,deposit,withdrawal,adjustment_positive,adjustment_negative',
             'amount' => 'required|numeric|min:0.01',
             'reason' => 'required|string|max:255',
+            'reference_number' => 'nullable|string|max:120',
+            'business_datetime' => 'nullable|date',
             'notes'  => 'nullable|string|max:1000',
         ]);
+
+        $subtype = $request->input('subtype', $request->type === 'in' ? 'cash_in' : 'cash_out');
+        $expectedType = in_array($subtype, ['cash_in', 'withdrawal', 'adjustment_positive'], true) ? 'in' : 'out';
+        if ($request->type !== $expectedType) {
+            return response()->json(['message' => 'El tipo no coincide con la operacion seleccionada.'], 422);
+        }
+        if (str_starts_with($subtype, 'adjustment_') && auth()->user()?->role !== 'admin') {
+            return response()->json(['message' => 'Solo un administrador puede ajustar el saldo de Caja.'], 403);
+        }
 
         // Find the open session for this user
         $session = PosSession::where('user_id', $userId)
@@ -38,12 +50,23 @@ class CashMovementController extends Controller
             ], 404);
         }
 
+        $in = (float) $session->cashMovements()->where('type', 'in')->sum('amount');
+        $out = (float) $session->cashMovements()->where('type', 'out')->sum('amount');
+        $balanceBefore = round((float) $session->opening_amount + $in - $out, 2);
+        $amount = round((float) $request->amount, 2);
+
         $movement = CashMovement::create([
             'pos_session_id' => $session->id,
             'user_id'        => $userId,
             'type'           => $request->type,
-            'amount'         => $request->amount,
+            'subtype'        => $subtype,
+            'amount'         => $amount,
+            'balance_before' => $balanceBefore,
+            'balance_after'  => round($balanceBefore + ($request->type === 'in' ? $amount : -$amount), 2),
             'reason'         => $request->reason,
+            'reference_number' => $request->reference_number,
+            'payment_method' => 'cash',
+            'business_datetime' => $request->business_datetime ?? now(),
             'notes'          => $request->notes,
         ]);
 

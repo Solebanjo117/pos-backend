@@ -35,12 +35,17 @@ class StoreOperationalExpenseRequest extends FormRequest
             'supplier_id' => ['nullable', 'exists:suppliers,id'],
             'customer_id' => ['nullable', 'exists:customers,id'],
             'beneficiary_id' => ['nullable', 'exists:operational_expense_beneficiaries,id'],
-            'party_type' => ['nullable', Rule::in(['customer', 'supplier', 'beneficiary'])],
+            'party_type' => ['nullable', Rule::in(['customer', 'supplier', 'beneficiary', 'staff'])],
             'party_id' => ['nullable', 'integer', 'min:1', 'required_with:party_type'],
             'ledger_account_id' => ['nullable', 'exists:ledger_accounts,id'],
             'description' => ['nullable', 'string', 'max:255'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'payment_method' => ['nullable', 'required_if:status,paid', 'string', Rule::in(PaymentMethod::realMoneyCodes())],
+            'estimated_amount' => ['nullable', 'numeric', 'min:0.01'],
+            'final_amount' => ['nullable', 'numeric', 'min:0.01'],
+            'variance_reason' => ['nullable', 'string', 'max:500'],
+            'due_at' => ['nullable', 'date'],
+            'payment_method' => ['nullable', 'required_if:status,paid', 'string', Rule::in(PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS))],
+            'planned_payment_method' => ['nullable', 'string', Rule::in(PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS))],
             'recurrence' => ['nullable', 'string', Rule::in(array_keys(OperationalExpense::RECURRENCES))],
             'status' => ['nullable', 'string', Rule::in(array_keys(OperationalExpense::STATUSES))],
             'paid_at' => ['nullable', 'date'],
@@ -49,6 +54,8 @@ class StoreOperationalExpenseRequest extends FormRequest
             'expense_kind' => ['nullable', 'string', Rule::in(array_keys(OperationalExpense::EXPENSE_KINDS))],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string'],
+            'business_datetime' => ['nullable', 'date'],
+            'change_reason' => ['nullable', 'string', 'max:500'],
         ];
     }
 

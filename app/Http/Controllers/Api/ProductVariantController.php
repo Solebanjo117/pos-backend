@@ -161,6 +161,7 @@ class ProductVariantController extends Controller
             'data' => [
                 'summary' => $history['summary'],
                 'lots' => $history['lots']->map(fn (InventoryLot $lot) => $this->serializedHistoryLot($lot))->values(),
+                'movement_timeline' => InventoryMovementResource::collection($history['movement_timeline'])->resolve($request),
                 'purchase_movements' => $history['purchase_movements']->map(fn ($movement) => [
                     ...((new InventoryMovementResource($movement))->resolve($request)),
                     'source_lots' => $movement->sourceLots->map(fn (InventoryLot $lot) => $this->serializedMovementSourceLot($lot))->values(),

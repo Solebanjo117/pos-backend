@@ -12,6 +12,7 @@ use App\Models\SalesQuote;
 use App\Models\Setting;
 use App\Services\SalesQuoteOperationalDetailService;
 use App\Services\SalesQuoteService;
+use App\Services\CashierQueueService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -21,7 +22,8 @@ class SalesQuoteController extends Controller
 {
     public function __construct(
         private SalesQuoteService $salesQuoteService,
-        private SalesQuoteOperationalDetailService $operationalDetailService
+        private SalesQuoteOperationalDetailService $operationalDetailService,
+        private CashierQueueService $cashierQueueService,
     ) {}
 
     /**
@@ -421,6 +423,8 @@ class SalesQuoteController extends Controller
             ], 422);
         }
 
+        $this->cashierQueueService->enqueueSale($quote->fresh());
+
         return response()->json([
             'message' => "Cotización {$quote->quote_number} enviada a Caja",
             'data' => $quote->fresh(),
@@ -437,7 +441,7 @@ class SalesQuoteController extends Controller
      * Flujo normal: draft/sent/sent_to_deposit → sendToCashier() → sent_to_cashier
      * Al remover de cola: sent_to_cashier → sent (estado genérico de "pendiente")
      */
-    public function removeFromCashierQueue(int $id): JsonResponse
+    public function removeFromCashierQueue(Request $request, int $id): JsonResponse
     {
         $quote = SalesQuote::findOrFail($id);
 
@@ -453,6 +457,7 @@ class SalesQuoteController extends Controller
             'status' => 'sent',
             'sent_to_cashier_at' => null,
         ]);
+        $this->cashierQueueService->cancelForSource(SalesQuote::class, $quote->id, $request->user());
 
         return response()->json([
             'message' => "Cotización {$quote->quote_number} removida de la cola de caja",

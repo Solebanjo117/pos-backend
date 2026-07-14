@@ -38,6 +38,10 @@ class SalesOrder extends Model
         'prepared_by',
         'prepared_at',
         'business_datetime',
+        'cancelled_by',
+        'cancelled_at',
+        'cancellation_reason',
+        'cancellation_return_id',
     ];
 
     protected $casts = [
@@ -51,6 +55,7 @@ class SalesOrder extends Model
         'sent_to_warehouse_at' => 'datetime',
         'prepared_at' => 'datetime',
         'business_datetime' => 'datetime',
+        'cancelled_at' => 'datetime',
     ];
 
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'total_returned'];
@@ -100,6 +105,16 @@ class SalesOrder extends Model
     public function returns(): HasMany
     {
         return $this->hasMany(\App\Models\SalesReturn::class, 'sales_order_id');
+    }
+
+    public function canceller(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
+    }
+
+    public function cancellationReturn(): BelongsTo
+    {
+        return $this->belongsTo(SalesReturn::class, 'cancellation_return_id');
     }
 
     // ==================== SCOPES ====================
@@ -198,14 +213,7 @@ class SalesOrder extends Model
      */
     public static function generateOrderNumber(): string
     {
-        $date = now()->format('Ymd');
-        $lastOrder = self::whereDate('created_at', now()->toDateString())
-            ->orderBy('id', 'desc')
-            ->first();
-
-        $sequence = $lastOrder ? (int) substr($lastOrder->order_number, -4) + 1 : 1;
-
-        return 'ORD-'.$date.'-'.str_pad($sequence, 4, '0', STR_PAD_LEFT);
+        return app(\App\Services\DocumentSequenceService::class)->nextCommercialFolio();
     }
 
     /**
@@ -232,7 +240,7 @@ class SalesOrder extends Model
      */
     public function canBeCancelled(): bool
     {
-        return ! in_array($this->status, ['completed', 'cancelled']);
+        return $this->status !== 'cancelled';
     }
 
     /**
@@ -474,117 +482,7 @@ class SalesOrder extends Model
      */
     public function cancel(): bool
     {
-        if (! $this->canBeCancelled()) {
-            return false;
-        }
-
-        // If order was confirmed, revert only the net quantity still outstanding.
-        // Outbound movements come in two flavours:
-        //   1. reference_type = 'sale', reference_id = order_id  (confirm-time deductions)
-        //   2. reference_type = 'post_sale_addition', reference_id = item_id  (post-sale adds)
-        // Items that were already removed via removeItem() are hard-deleted, so their
-        // IDs will NOT appear in $currentItemIds.  Their outbound movements are therefore
-        // automatically excluded, and their stock was already restored at removal time.
-        if ($this->status === 'confirmed' || $this->status === 'processing') {
-            $currentItemIds = $this->items()->pluck('id')->all();
-
-            $deductedMovements = InventoryMovement::query()
-                ->where('movement_type', 'out')
-                ->where(function ($q) use ($currentItemIds) {
-                    // Original confirm deductions
-                    $q->where(function ($q2) {
-                        $q2->where('reference_type', 'sale')
-                            ->where('reference_id', $this->id);
-                    });
-                    // Post-sale additions still present on the order
-                    if (! empty($currentItemIds)) {
-                        $q->orWhere(function ($q2) use ($currentItemIds) {
-                            $q2->where('reference_type', 'post_sale_addition')
-                                ->whereIn('reference_id', $currentItemIds);
-                        });
-                    }
-                })
-                ->get();
-
-            foreach ($deductedMovements as $movement) {
-                $netToRestore = (int) $movement->quantity;
-
-                if ($netToRestore <= 0) {
-                    continue;
-                }
-
-                app(\App\Services\InventoryFifoService::class)->restoreFromOutboundMovement($movement, [
-                    'reference_type' => 'sale_cancelled',
-                    'reference_id' => $this->id,
-                    'notes' => "CancelaciÃ³n de orden {$this->order_number}",
-                    'user_id' => Auth::id(),
-                ]);
-
-            }
-        }
-
-        // If order was draft/pending, release reserved stock back to available
-        if (in_array($this->status, ['draft', 'pending'])) {
-            foreach ($this->items as $item) {
-                if ($item->is_custom_line) {
-                    continue;
-                }
-
-                $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                if ($item->variant_id) {
-                    $query->where('variant_id', $item->variant_id);
-                } else {
-                    $query->where('product_id', $item->product_id);
-                }
-                $inventory = $query->first();
-
-                if ($inventory) {
-                    // Only release what was actually reserved
-                    $reservedToRelease = min($item->quantity, max(0, $inventory->quantity_reserved));
-                    if ($reservedToRelease > 0) {
-                        $inventory->quantity_reserved -= $reservedToRelease;
-                        $inventory->quantity_available += $reservedToRelease;
-                        $inventory->save();
-                    }
-                }
-            }
-        }
-
-        // Revert payments: refund customer balance for each recorded payment
-        $totalRefunded = 0;
-        foreach ($this->payments as $payment) {
-            $totalRefunded += (float) $payment->amount;
-
-            if ($this->customer_id) {
-                $customer = \App\Models\Customer::find($this->customer_id);
-                if ($customer) {
-                    $balanceBefore = (float) $customer->current_balance;
-                    $customer->current_balance = $balanceBefore + (float) $payment->amount;
-                    $customer->save();
-
-                    \App\Models\CustomerTransaction::create([
-                        'customer_id' => $customer->id,
-                        'type' => 'credit_note',
-                        'reference_type' => 'sales_order_cancelled',
-                        'reference_id' => $this->id,
-                        'amount' => $payment->amount,
-                        'balance_before' => $balanceBefore,
-                        'balance_after' => $customer->current_balance,
-                        'description' => "Reembolso por cancelación de orden {$this->order_number} ({$payment->formatted_method})",
-                        'transaction_date' => now(),
-                        'created_by' => Auth::id(),
-                    ]);
-                }
-            }
-        }
-
-        $this->status = 'cancelled';
-        if ($totalRefunded > 0) {
-            $this->payment_status = 'refunded';
-        }
-        $this->save();
-
-        return true;
+        throw new \LogicException('Las anulaciones deben procesarse mediante SalesOrderCancellationService.');
     }
 
     /**

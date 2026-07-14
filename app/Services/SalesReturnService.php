@@ -4,10 +4,13 @@ namespace App\Services;
 
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\CashMovement;
+use App\Models\CashierQueueEntry;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesCreditNote;
 use App\Models\SalesReturn;
 use App\Models\SalesReturnItem;
 use App\Models\User;
@@ -17,6 +20,8 @@ use Illuminate\Validation\ValidationException;
 class SalesReturnService
 {
     public const METHOD_RECEIVABLE = 'receivable';
+
+    public const METHOD_VOID = 'void';
 
     /**
      * @param  array<string, mixed>  $data
@@ -29,7 +34,7 @@ class SalesReturnService
                 ->lockForUpdate()
                 ->firstOrFail();
 
-            if (! in_array($lockedOrder->status, ['confirmed', 'completed'], true)) {
+            if (! in_array($lockedOrder->status, ['confirmed', 'processing', 'completed'], true)) {
                 throw ValidationException::withMessages([
                     'order' => 'Solo se pueden devolver ordenes confirmadas o completadas.',
                 ]);
@@ -82,9 +87,9 @@ class SalesReturnService
         });
     }
 
-    public function approve(SalesReturn $salesReturn, User $user): SalesReturn
+    public function approve(SalesReturn $salesReturn, User $user, bool $restoreOriginalFifo = false): SalesReturn
     {
-        return DB::transaction(function () use ($salesReturn, $user): SalesReturn {
+        return DB::transaction(function () use ($salesReturn, $user, $restoreOriginalFifo): SalesReturn {
             $lockedReturn = SalesReturn::query()
                 ->whereKey($salesReturn->id)
                 ->lockForUpdate()
@@ -108,18 +113,102 @@ class SalesReturnService
 
             $split = $this->financialSplit($lockedReturn, $order);
 
-            if ($split['money_refund_amount'] > 0 && $this->paymentBucket($lockedReturn->refund_method) === PaymentMethod::LIQUIDITY_CASH) {
-                $this->assertOpenSession($user, 'Debe tener una sesion de caja abierta para aprobar un reembolso en efectivo.');
+            $this->restoreInventory($lockedReturn, $user, $restoreOriginalFifo);
+            $lockedReturn->approve($user, $split);
+            $creditNote = $this->createCreditNote($lockedReturn->fresh(), $split, $user);
+
+            if ($this->money(array_sum($split)) <= 0) {
+                $lockedReturn->update([
+                    'settlement_status' => 'settled',
+                    'settled_by' => $user->id,
+                    'settled_at' => now(),
+                    'settlement_method' => self::METHOD_VOID,
+                ]);
+                $creditNote->update([
+                    'status' => 'settled',
+                    'settled_by' => $user->id,
+                    'settled_at' => now(),
+                    'settlement_method' => self::METHOD_VOID,
+                ]);
+            } else {
+                app(CashierQueueService::class)->enqueueReturn($lockedReturn->fresh());
             }
 
-            $this->restoreInventory($lockedReturn, $user);
-            $this->applyCustomerCredit($lockedReturn, $split['receivable_applied_amount'] + $split['store_credit_amount'], $user);
-            $this->createRefundPayment($lockedReturn, $split['money_refund_amount'], $user);
+            return $lockedReturn->fresh()->load('items.product', 'items.variant', 'creditNote');
+        });
+    }
 
-            $lockedReturn->approve($user, $split);
-            $this->updateOrderPaymentStatus($order);
+    /** @param array<string, mixed> $data */
+    public function settleFromQueue(SalesReturn $salesReturn, CashierQueueEntry $entry, array $data, User $user): SalesReturn
+    {
+        return DB::transaction(function () use ($salesReturn, $data, $user): SalesReturn {
+            $return = SalesReturn::query()
+                ->with(['creditNote', 'salesOrder'])
+                ->lockForUpdate()
+                ->findOrFail($salesReturn->id);
 
-            return $lockedReturn->fresh()->load('items.product', 'items.variant');
+            if ($return->settlement_status === 'settled') {
+                return $return;
+            }
+            if ($return->status !== 'approved') {
+                throw new \InvalidArgumentException('La devolucion debe estar aprobada antes de liquidarse.');
+            }
+
+            $method = (string) ($data['payment_method'] ?? $return->refund_method ?? '');
+            $reference = trim((string) ($data['reference_number'] ?? '')) ?: null;
+            $moneyRefund = $this->money($return->money_refund_amount);
+
+            if ($moneyRefund > 0) {
+                if (! in_array($method, PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS), true)) {
+                    throw new \InvalidArgumentException('Seleccione un metodo monetario valido para el reembolso.');
+                }
+
+                if ($this->paymentBucket($method) === PaymentMethod::LIQUIDITY_CASH) {
+                    $session = $this->openSession($user, $return->warehouse_id);
+                    if (! $session) {
+                        throw new \InvalidArgumentException('Debe existir una sesion abierta en esta sucursal para reembolsar efectivo.');
+                    }
+                    $balanceBefore = $this->sessionCashBalance($session);
+                    CashMovement::create([
+                        'pos_session_id' => $session->id,
+                        'user_id' => $user->id,
+                        'type' => 'out',
+                        'subtype' => 'sales_return_refund',
+                        'amount' => $moneyRefund,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $this->money($balanceBefore - $moneyRefund),
+                        'reason' => 'Reembolso de devolucion '.$return->return_number,
+                        'reference_number' => $reference,
+                        'payment_method' => $method,
+                        'source_type' => 'sales_return',
+                        'source_id' => $return->id,
+                        'business_datetime' => now(),
+                    ]);
+                }
+
+                $this->createRefundPayment($return, $moneyRefund, $user, $method, $reference);
+            }
+
+            $creditAmount = $this->money((float) $return->receivable_applied_amount + (float) $return->store_credit_amount);
+            $this->applyCustomerCredit($return, $creditAmount, $user);
+
+            $return->update([
+                'settlement_status' => 'settled',
+                'settled_by' => $user->id,
+                'settled_at' => now(),
+                'settlement_method' => $moneyRefund > 0 ? $method : $return->refund_method,
+                'settlement_reference' => $reference,
+            ]);
+            $return->creditNote?->update([
+                'status' => 'settled',
+                'settled_by' => $user->id,
+                'settled_at' => now(),
+                'settlement_method' => $return->settlement_method,
+                'reference_number' => $reference,
+            ]);
+            $this->updateOrderPaymentStatus($return->salesOrder);
+
+            return $return->fresh(['creditNote', 'salesOrder', 'items.product', 'items.variant']);
         });
     }
 
@@ -248,7 +337,7 @@ class SalesReturnService
     {
         $allowed = array_values(array_unique(array_merge(
             PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS),
-            ['balance', 'store_credit', self::METHOD_RECEIVABLE],
+            ['balance', 'store_credit', self::METHOD_RECEIVABLE, self::METHOD_VOID],
         )));
 
         if (! in_array($method, $allowed, true)) {
@@ -306,6 +395,14 @@ class SalesReturnService
      */
     private function financialSplit(SalesReturn $salesReturn, SalesOrder $order): array
     {
+        if ($salesReturn->refund_method === self::METHOD_VOID) {
+            return [
+                'receivable_applied_amount' => 0.0,
+                'money_refund_amount' => 0.0,
+                'store_credit_amount' => 0.0,
+            ];
+        }
+
         $total = $this->money($salesReturn->total_amount);
         $receivableOpen = $this->orderReceivableBeforeReturn($order, $salesReturn);
         $receivableApplied = $this->money(min($total, $receivableOpen));
@@ -351,16 +448,91 @@ class SalesReturnService
         return $this->money(max(0, (float) $order->total - $approvedReturned - $paid));
     }
 
-    private function restoreInventory(SalesReturn $salesReturn, User $user): void
+    private function restoreInventory(SalesReturn $salesReturn, User $user, bool $restoreOriginalFifo = false): void
     {
-        foreach ($salesReturn->items as $item) {
-            app(InventoryFifoService::class)->receiveStock([
+        if ($restoreOriginalFifo) {
+            $groups = $salesReturn->items->groupBy(fn (SalesReturnItem $item): string => implode(':', [
+                $item->product_id,
+                $item->variant_id ?? 'none',
+                $salesReturn->warehouse_id,
+            ]));
+
+            foreach ($groups as $items) {
+                $requests = [];
+                foreach ($items as $returnItem) {
+                    $outboundMovements = \App\Models\InventoryMovement::query()
+                        ->where('movement_type', 'out')
+                        ->whereHas('lotAllocations', fn ($query) => $query
+                            ->where('sales_order_item_id', $returnItem->sales_order_item_id))
+                        ->with('lotAllocations')
+                        ->orderBy('id')
+                        ->get();
+
+                    $remaining = (int) $returnItem->quantity;
+                    foreach ($outboundMovements as $movement) {
+                        if ($remaining <= 0) {
+                            break;
+                        }
+
+                        $availableToRestore = (int) $movement->lotAllocations->sum('quantity');
+                        $restored = min($remaining, $availableToRestore);
+                        if ($restored > 0) {
+                            $requests[] = ['movement' => $movement, 'quantity' => $restored];
+                        }
+                        $remaining -= $restored;
+                    }
+                }
+
+                if ($requests !== []) {
+                    app(InventoryFifoService::class)->restoreOutboundQuantities($requests, [
+                        'reason' => 'sales_order_cancellation',
+                        'reference_type' => 'sales_return',
+                        'reference_id' => $salesReturn->id,
+                        'notes' => "Anulacion {$salesReturn->return_number} - Orden {$salesReturn->salesOrder?->order_number}",
+                        'user_id' => $user->id,
+                    ]);
+                }
+            }
+
+            return;
+        }
+
+        $groups = $salesReturn->items
+            ->groupBy(fn ($item): string => implode(':', [
+                $item->product_id,
+                $item->variant_id ?? 'none',
+                $salesReturn->warehouse_id,
+            ]));
+
+        foreach ($groups as $items) {
+            $item = $items->first();
+            $quantity = (int) $items->sum('quantity');
+            $weightedCost = $quantity > 0
+                ? (float) $items->sum(fn ($returnItem): float =>
+                    (float) $returnItem->quantity * (float) ($returnItem->salesOrderItem?->unit_cost ?? 0)
+                ) / $quantity
+                : 0.0;
+
+            $this->receiveReturnedStock($salesReturn, $item, $quantity, $user, $weightedCost);
+        }
+    }
+
+    private function receiveReturnedStock(
+        SalesReturn $salesReturn,
+        SalesReturnItem $item,
+        int $quantity,
+        User $user,
+        ?float $unitCost = null,
+    ): void {
+        $unitCost ??= (float) ($item->salesOrderItem?->unit_cost ?? 0);
+
+        app(InventoryFifoService::class)->receiveStock([
                 'product_id' => $item->product_id,
                 'variant_id' => $item->variant_id,
                 'warehouse_id' => $salesReturn->warehouse_id,
-                'quantity' => $item->quantity,
-                'unit_cost_base' => (float) ($item->salesOrderItem?->unit_cost ?? 0),
-                'landed_unit_cost' => (float) ($item->salesOrderItem?->unit_cost ?? 0),
+                'quantity' => $quantity,
+                'unit_cost_base' => $unitCost,
+                'landed_unit_cost' => $unitCost,
                 'reference_type' => 'sales_return',
                 'reference_id' => $salesReturn->id,
                 'source_type' => 'sales_return',
@@ -368,8 +540,7 @@ class SalesReturnService
                 'notes' => "Devolucion {$salesReturn->return_number} - Orden {$salesReturn->salesOrder?->order_number}",
                 'user_id' => $user->id,
                 'received_at' => now(),
-            ]);
-        }
+        ]);
     }
 
     private function applyCustomerCredit(SalesReturn $salesReturn, float $amount, User $user): void
@@ -408,7 +579,33 @@ class SalesReturnService
         ]);
     }
 
-    private function createRefundPayment(SalesReturn $salesReturn, float $amount, User $user): void
+    /** @param array{receivable_applied_amount: float, money_refund_amount: float, store_credit_amount: float} $split */
+    private function createCreditNote(SalesReturn $salesReturn, array $split, User $user): SalesCreditNote
+    {
+        return SalesCreditNote::query()->firstOrCreate(
+            ['sales_return_id' => $salesReturn->id],
+            [
+                'credit_note_number' => app(DocumentSequenceService::class)->nextCommercialFolio(),
+                'sales_order_id' => $salesReturn->sales_order_id,
+                'customer_id' => $salesReturn->customer_id,
+                'total_amount' => $salesReturn->total_amount,
+                'receivable_amount' => $split['receivable_applied_amount'],
+                'refund_amount' => $split['money_refund_amount'],
+                'store_credit_amount' => $split['store_credit_amount'],
+                'status' => 'pending',
+                'issued_by' => $user->id,
+                'issued_at' => now(),
+            ],
+        );
+    }
+
+    private function createRefundPayment(
+        SalesReturn $salesReturn,
+        float $amount,
+        User $user,
+        ?string $method = null,
+        ?string $reference = null,
+    ): void
     {
         $amount = $this->money($amount);
         if ($amount <= 0) {
@@ -419,7 +616,8 @@ class SalesReturnService
             'sales_order_id' => $salesReturn->sales_order_id,
             'sales_return_id' => $salesReturn->id,
             'amount' => -1 * abs($amount),
-            'method' => $salesReturn->refund_method,
+            'method' => $method ?? $salesReturn->refund_method,
+            'reference_number' => $reference,
             'notes' => "Reembolso por devolucion {$salesReturn->return_number}".($salesReturn->refund_notes ? " - {$salesReturn->refund_notes}" : ''),
             'paid_at' => now(),
             'created_by' => $user->id,
@@ -457,6 +655,24 @@ class SalesReturnService
     private function paymentBucket(?string $method): ?string
     {
         return PaymentMethod::liquidityBucket($method);
+    }
+
+    private function openSession(User $user, ?int $warehouseId): ?PosSession
+    {
+        return PosSession::query()
+            ->where('user_id', $user->id)
+            ->when($warehouseId, fn ($query) => $query->where('warehouse_id', $warehouseId))
+            ->where('status', 'open')
+            ->latest()
+            ->first();
+    }
+
+    private function sessionCashBalance(PosSession $session): float
+    {
+        $in = (float) $session->cashMovements()->where('type', 'in')->sum('amount');
+        $out = (float) $session->cashMovements()->where('type', 'out')->sum('amount');
+
+        return $this->money((float) $session->opening_amount + $in - $out);
     }
 
     private function assertOpenSession(User $user, string $message): void

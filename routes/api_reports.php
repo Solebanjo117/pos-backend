@@ -18,6 +18,10 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/ledger-trial-balance', [ReportController::class, 'ledgerTrialBalance']);
     Route::get('/customer-references', [ReportController::class, 'customerReferences']);
     Route::get('/sales-by-client', [ReportController::class, 'salesByClient']);
+    Route::get('/sales-by-product', [ReportController::class, 'salesByProduct']);
+    Route::get('/purchases-by-supplier', [ReportController::class, 'purchasesBySupplier']);
+    Route::get('/credit-notes', [ReportController::class, 'creditNotes']);
+    Route::get('/valued-inventory', [ReportController::class, 'valuedInventory']);
     Route::get('/sales-by-client/export/{format}', [ReportController::class, 'exportSalesByClient']);
     Route::get('/brand-profitability', [ReportController::class, 'brandProfitability']);
     Route::get('/category-profitability', [ReportController::class, 'categoryProfitability']);
@@ -26,6 +30,7 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/financial-weekly', [ReportController::class, 'financialWeekly']);
     Route::get('/balance-sheet', [ReportController::class, 'balanceSheet']);
     Route::get('/financial-drilldown', [ReportController::class, 'financialDrilldown']);
+    Route::get('/financial-reconciliation', [ReportController::class, 'financialReconciliation']);
     Route::get('/financial-advanced-status', [ReportController::class, 'financialAdvancedStatus']);
     Route::get('/accounting/journal', [ReportController::class, 'accountingJournal']);
     Route::get('/accounting/entries/{entry}', [ReportController::class, 'accountingEntry']);
@@ -35,7 +40,7 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/accounting/trial-balance', [ReportController::class, 'accountingTrialBalance']);
     Route::post('/capital-movements', [ReportController::class, 'storeCapitalMovement'])->middleware('throttle:60,1');
     Route::get('/capital-movements', [ReportController::class, 'capitalMovements']);
-    Route::post('/adjustments', [ReportController::class, 'storeAdjustment'])->middleware('throttle:60,1');
+    Route::post('/adjustments', [ReportController::class, 'storeAdjustment'])->middleware(['role:admin', 'throttle:60,1']);
     Route::get('/adjustments', [ReportController::class, 'adjustments']);
 
     Route::get('/stock-levels/export/{format}', [ReportController::class, 'exportStockLevels']);

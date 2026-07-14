@@ -109,7 +109,7 @@ it('confirmed sale with zero stock returns 201, creates order, inventory stays a
 
     $order = SalesOrder::first();
     expect($order)->not->toBeNull();
-    expect($order->status)->toBe('completed');
+    expect($order->status)->toBe('confirmed');
     expect($order->items()->first()->quantity)->toBe(5);
 });
 
@@ -376,7 +376,9 @@ it('cancel sale with zero stock keeps inventory at 0 and does not create artific
     $order = SalesOrder::first();
     expect($order)->not->toBeNull();
 
-    $cancelResponse = $this->postJson("/api/v1/sales-orders/{$order->id}/cancel");
+    $cancelResponse = $this->postJson("/api/v1/sales-orders/{$order->id}/cancel", [
+        'reason' => 'Anulacion de prueba sin inventario',
+    ]);
     $cancelResponse->assertSuccessful();
 
     $inventory = ProductInventory::first();
@@ -422,7 +424,9 @@ it('cancel sale with partial stock only restores actually deducted amount', func
 
     $order = SalesOrder::first();
 
-    $cancelResponse = $this->postJson("/api/v1/sales-orders/{$order->id}/cancel");
+    $cancelResponse = $this->postJson("/api/v1/sales-orders/{$order->id}/cancel", [
+        'reason' => 'Anulacion de prueba con inventario parcial',
+    ]);
     $cancelResponse->assertSuccessful();
 
     $inventoryAfterCancel = ProductInventory::first();
@@ -432,6 +436,7 @@ it('cancel sale with partial stock only restores actually deducted amount', func
         ->where('variant_id', $this->variant->id)
         ->where('warehouse_id', $this->warehouse->id)
         ->where('movement_type', 'in')
+        ->where('reference_type', 'sales_return')
         ->first();
     expect($inMovement)->not->toBeNull();
     expect($inMovement->quantity)->toBe(3);
@@ -484,7 +489,9 @@ it('cancel sale with duplicate item lines restores deducted stock only once', fu
 
     $order = SalesOrder::first();
 
-    $cancelResponse = $this->postJson("/api/v1/sales-orders/{$order->id}/cancel");
+    $cancelResponse = $this->postJson("/api/v1/sales-orders/{$order->id}/cancel", [
+        'reason' => 'Anulacion de prueba con lineas repetidas',
+    ]);
     $cancelResponse->assertSuccessful();
 
     $inventoryAfterCancel = ProductInventory::first();
@@ -493,7 +500,8 @@ it('cancel sale with duplicate item lines restores deducted stock only once', fu
     $inMovements = \App\Models\InventoryMovement::where('product_id', $this->product->id)
         ->where('variant_id', $this->variant->id)
         ->where('warehouse_id', $this->warehouse->id)
-        ->where('movement_type', 'in');
+        ->where('movement_type', 'in')
+        ->where('reference_type', 'sales_return');
 
     expect($inMovements->count())->toBe(1);
     expect((int) $inMovements->sum('quantity'))->toBe(3);

@@ -21,6 +21,7 @@ class InventoryFifoHistoryService
      * @return array{
      *     summary: array<string, mixed>,
      *     lots: EloquentCollection<int, InventoryLot>,
+     *     movement_timeline: EloquentCollection<int, InventoryMovement>,
      *     purchase_movements: EloquentCollection<int, InventoryMovement>,
      *     sale_movements: EloquentCollection<int, InventoryMovement>
      * }
@@ -54,10 +55,16 @@ class InventoryFifoHistoryService
             ->latest('created_at')
             ->limit($perPage)
             ->get();
+        $movementTimeline = $this->movementsQuery($product, $variant, $warehouseId, $filters)
+            ->latest('created_at')
+            ->latest('id')
+            ->limit($perPage)
+            ->get();
 
         return [
             'summary' => $this->summary($product, $variant, $warehouseId),
             'lots' => $lots,
+            'movement_timeline' => $movementTimeline,
             'purchase_movements' => $purchaseMovements,
             'sale_movements' => $saleMovements,
         ];

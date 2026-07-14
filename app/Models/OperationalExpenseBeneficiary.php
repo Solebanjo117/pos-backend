@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Str;
 
 class OperationalExpenseBeneficiary extends Model
@@ -14,6 +15,8 @@ class OperationalExpenseBeneficiary extends Model
     protected $fillable = [
         'name',
         'name_key',
+        'user_id',
+        'beneficiary_kind',
         'type',
         'email',
         'phone',
@@ -24,6 +27,7 @@ class OperationalExpenseBeneficiary extends Model
     protected $casts = ['is_active' => 'boolean'];
 
     protected $attributes = [
+        'beneficiary_kind' => 'other',
         'type' => 'individual',
         'is_active' => true,
     ];
@@ -46,5 +50,10 @@ class OperationalExpenseBeneficiary extends Model
     public function expenses(): HasMany
     {
         return $this->hasMany(OperationalExpense::class, 'beneficiary_id');
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
     }
 }

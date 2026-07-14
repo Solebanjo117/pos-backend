@@ -10,6 +10,7 @@ use App\Models\Inventory;
 use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
 use App\Services\SalesOrderOperationalDetailService;
+use App\Services\SalesOrderCancellationService;
 use App\Services\SalesOrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -486,13 +487,25 @@ class SalesOrderController extends Controller
      * POST /api/sales-orders/{id}/cancel
      * Cancel order and revert inventory
      */
-    public function cancel(int $id): JsonResponse
+    public function cancel(Request $request, int $id, SalesOrderCancellationService $cancellations): JsonResponse
     {
         try {
-            $order = $this->salesOrderService->cancelOrder($id);
+            $validated = $request->validate([
+                'reason' => ['required', 'string', 'min:3', 'max:1000'],
+                'refund_method' => ['nullable', 'string', 'max:80'],
+                'notes' => ['nullable', 'string', 'max:2000'],
+            ]);
+
+            $order = $cancellations->cancel(
+                SalesOrder::query()->findOrFail($id),
+                $validated,
+                $request->user(),
+            );
 
             return response()->json([
-                'message' => 'Orden cancelada exitosamente',
+                'message' => $order->cancellation_return_id
+                    ? 'Factura anulada. La resolucion financiera fue enviada a Caja.'
+                    : 'Orden anulada exitosamente.',
                 'data' => $order,
             ]);
         } catch (\Exception $e) {

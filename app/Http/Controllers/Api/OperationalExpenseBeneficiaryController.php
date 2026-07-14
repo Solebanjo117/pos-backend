@@ -66,6 +66,12 @@ class OperationalExpenseBeneficiaryController extends Controller
         return $request->validate([
             'name' => ['required', 'string', 'max:150'],
             'type' => ['required', Rule::in(['individual', 'company'])],
+            'user_id' => [
+                'nullable',
+                'exists:users,id',
+                Rule::unique('operational_expense_beneficiaries', 'user_id')->ignore($beneficiary?->id),
+            ],
+            'beneficiary_kind' => ['nullable', Rule::in(['employee', 'seller', 'contractor', 'company', 'staff', 'other'])],
             'email' => ['nullable', 'email', 'max:255'],
             'phone' => ['nullable', 'string', 'max:50'],
             'notes' => ['nullable', 'string'],

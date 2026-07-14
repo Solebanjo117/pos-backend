@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\CapitalMovement;
+use App\Models\Customer;
 use App\Models\FinancialAdjustment;
 use App\Models\FinancialDailySnapshot;
 use App\Models\InventoryLot;
@@ -150,6 +151,7 @@ class FinancialSnapshotService
     public function balanceSheet(array $filters): array
     {
         $warehouseId = isset($filters['warehouse_id']) ? (int) $filters['warehouse_id'] : null;
+        $dateFrom = Carbon::parse($filters['date_from'] ?? $filters['date_to'] ?? now()->toDateString())->startOfDay();
         $dateTo = Carbon::parse($filters['date_to'] ?? now()->toDateString())->startOfDay();
 
         $snapshot = $this->computeDay($dateTo, $warehouseId);
@@ -158,8 +160,32 @@ class FinancialSnapshotService
         $inventory = $this->money($snapshot->closing_inventory);
         $accountsReceivable = $this->money($snapshot->accounts_receivable);
         $accountsPayable = $this->money($snapshot->accounts_payable);
+        $customerCredits = $this->money(abs((float) Customer::query()
+            ->where('current_balance', '<', 0)
+            ->sum('current_balance')));
+        $pendingRefunds = $this->money(SalesReturn::query()
+            ->where('status', 'approved')
+            ->where('settlement_status', 'pending')
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->get(['money_refund_amount', 'store_credit_amount'])
+            ->sum(fn (SalesReturn $return): float => (float) $return->money_refund_amount + (float) $return->store_credit_amount));
+        $period = $this->rangeSummary([
+            'date_from' => $dateFrom->toDateString(),
+            'date_to' => $dateTo->toDateString(),
+            'warehouse_id' => $warehouseId,
+        ]);
+        $periodProfit = $this->money($period['totals']['net_profit'] ?? 0);
+        $contributedCapital = $this->money(CapitalMovement::query()
+            ->whereDate('movement_date', '<=', $dateTo->toDateString())
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->get(['movement_type', 'amount'])
+            ->sum(fn (CapitalMovement $movement): float => $movement->movement_type === CapitalMovement::TYPE_IN
+                ? (float) $movement->amount
+                : -((float) $movement->amount)));
         $totalAssets = $this->money($cash + $bank + $inventory + $accountsReceivable);
-        $totalLiabilities = $this->money($accountsPayable);
+        $totalLiabilities = $this->money($accountsPayable + $customerCredits + $pendingRefunds);
+        $totalEquity = $this->money($totalAssets - $totalLiabilities);
+        $retainedEarnings = $this->money($totalEquity - $contributedCapital - $periodProfit);
 
         return [
             'assets' => [
@@ -169,19 +195,35 @@ class FinancialSnapshotService
                 'bank_initial' => $this->money($snapshot->opening_bank ?? 0),
                 'inventory' => $inventory,
                 'inventory_initial' => $this->money($snapshot->opening_inventory),
+                'accounts_receivable' => $accountsReceivable,
             ],
             'liabilities' => [
                 'accounts_payable' => $accountsPayable,
-                'accounts_receivable' => $accountsReceivable,
+                'customer_credits' => $customerCredits,
+                'pending_refunds' => $pendingRefunds,
+            ],
+            'equity' => [
+                'contributed_capital' => $contributedCapital,
+                'period_profit' => $periodProfit,
+                'retained_earnings' => $retainedEarnings,
+                'total_equity' => $totalEquity,
             ],
             'totals' => [
                 'total_assets' => $totalAssets,
                 'total_liabilities' => $totalLiabilities,
-                'balance' => $this->money($totalAssets - $totalLiabilities),
+                'total_equity' => $totalEquity,
+                'liabilities_and_equity' => $this->money($totalLiabilities + $totalEquity),
+                'reconciliation_difference' => $this->money($totalAssets - $totalLiabilities - $totalEquity),
+                'balance' => $totalEquity,
             ],
             'as_of' => $dateTo->toDateString(),
             'warehouse_id' => $warehouseId,
-            'warnings' => $snapshot->validation_warnings ?? [],
+            'warnings' => array_values(array_filter([
+                ...($snapshot->validation_warnings ?? []),
+                $warehouseId && $customerCredits > 0
+                    ? 'Los saldos a favor son globales y no se pueden distribuir por almacen con los datos actuales.'
+                    : null,
+            ])),
         ];
     }
 
@@ -373,7 +415,7 @@ class FinancialSnapshotService
     private function salesReturnFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
     {
         $flows = $this->emptyFlows();
-        $returns = SalesReturn::query()
+        $approvedReturns = SalesReturn::query()
             ->with(['items.salesOrderItem', 'salesOrder.items'])
             ->where('status', 'approved')
             ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
@@ -390,35 +432,39 @@ class FinancialSnapshotService
             })
             ->get();
 
-        foreach ($returns as $return) {
+        foreach ($approvedReturns as $return) {
             $total = $this->money($return->total_amount);
             if ($total <= 0) {
                 continue;
             }
 
             $cogs = $this->money($return->items->sum(fn ($item): float => (float) ($item->salesOrderItem?->unit_cost ?? 0) * (int) $item->quantity));
+            $flows['sales_adjustments'] = $this->money($flows['sales_adjustments'] - $total);
+            $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] - $cogs);
+        }
+
+        $settledReturns = SalesReturn::query()
+            ->where('status', 'approved')
+            ->where('settlement_status', 'settled')
+            ->whereNotNull('settled_at')
+            ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))
+            ->whereDate('settled_at', '<=', $to->toDateString())
+            ->when($from, fn (Builder $query) => $query->whereDate('settled_at', '>=', $from->toDateString()))
+            ->get();
+
+        foreach ($settledReturns as $return) {
             $split = $this->returnSplitAmounts($return);
-            $moneyBucket = $this->paymentBucket($return->refund_method);
-            $moneyAmount = $split['money'];
-            $receivableAmount = $split['receivable'];
-            $storeCreditAmount = $split['store_credit'];
+            $moneyBucket = $this->paymentBucket($return->settlement_method ?? $return->refund_method);
 
-            if ($moneyAmount > 0 && $moneyBucket === 'cash') {
-                $flows['cash_sales'] = $this->money($flows['cash_sales'] - $moneyAmount);
-                $flows['cogs_cash_sales'] = $this->money($flows['cogs_cash_sales'] - ($cogs * ($moneyAmount / $total)));
-            } elseif ($moneyAmount > 0 && $moneyBucket === 'bank') {
-                $flows['bank_sales'] = $this->money($flows['bank_sales'] - $moneyAmount);
-                $flows['cogs_bank_sales'] = $this->money($flows['cogs_bank_sales'] - ($cogs * ($moneyAmount / $total)));
+            if ($split['receivable'] > 0) {
+                $flows['accounts_receivable_adjustments'] = $this->money(
+                    $flows['accounts_receivable_adjustments'] - $split['receivable'],
+                );
             }
-
-            if ($receivableAmount > 0) {
-                $flows['credit_sales'] = $this->money($flows['credit_sales'] - $receivableAmount);
-                $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] - ($cogs * ($receivableAmount / $total)));
-            }
-
-            if ($storeCreditAmount > 0) {
-                $flows['sales_adjustments'] = $this->money($flows['sales_adjustments'] - $storeCreditAmount);
-                $flows['cogs_credit_sales'] = $this->money($flows['cogs_credit_sales'] - ($cogs * ($storeCreditAmount / $total)));
+            if ($split['money'] > 0 && $moneyBucket === 'cash') {
+                $flows['cash_adjustments'] = $this->money($flows['cash_adjustments'] - $split['money']);
+            } elseif ($split['money'] > 0 && $moneyBucket === 'bank') {
+                $flows['bank_adjustments'] = $this->money($flows['bank_adjustments'] - $split['money']);
             }
         }
 
@@ -677,6 +723,8 @@ class FinancialSnapshotService
         $purchases = $this->money($snapshot->cash_purchases + ($snapshot->bank_purchases ?? 0) + $snapshot->credit_purchases + ($snapshot->purchase_adjustments ?? 0));
         $expenses = $this->money($snapshot->expenses + ($snapshot->expense_adjustments ?? 0));
         $cogs = $this->money($snapshot->cogs_cash_sales + ($snapshot->cogs_bank_sales ?? 0) + $snapshot->cogs_credit_sales);
+        $receivablesGenerated = $this->money($snapshot->credit_sales + ($snapshot->accounts_receivable_adjustments ?? 0));
+        $payablesGenerated = $this->money($snapshot->credit_purchases + ($snapshot->accounts_payable_adjustments ?? 0));
 
         return [
             'date' => $snapshot->date?->toDateString(),
@@ -686,16 +734,18 @@ class FinancialSnapshotService
             'inventory' => $this->money($snapshot->closing_inventory),
             'purchase' => $purchases,
             'purchase_paid' => $purchasesPaid,
-            'purchase_pending' => $this->money($snapshot->accounts_payable),
+            'purchase_pending' => $payablesGenerated,
             'expenses' => $expenses,
             'sales' => $sales,
             'sales_total' => $sales,
             'sales_collected' => $salesCollected,
-            'sales_pending' => $this->money($snapshot->accounts_receivable),
+            'sales_pending' => $receivablesGenerated,
             'cogs' => $cogs,
             'profit' => $this->money($snapshot->net_profit),
-            'credit_payable' => $this->money($snapshot->accounts_payable),
-            'credit_receivable' => $this->money($snapshot->accounts_receivable),
+            'credit_payable' => $payablesGenerated,
+            'credit_receivable' => $receivablesGenerated,
+            'payables_generated' => $payablesGenerated,
+            'receivables_generated' => $receivablesGenerated,
             'cogs_credit' => $this->money($snapshot->cogs_credit_sales),
             'investment' => $this->money($snapshot->net_investment),
             'opening_cash' => $this->money($snapshot->opening_cash),
@@ -756,16 +806,18 @@ class FinancialSnapshotService
             'inventory' => $this->money($last?->closing_inventory ?? 0),
             'purchase' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_purchases + (float) ($snapshot->bank_purchases ?? 0) + (float) $snapshot->credit_purchases + (float) ($snapshot->purchase_adjustments ?? 0))),
             'purchase_paid' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_purchases + (float) ($snapshot->bank_purchases ?? 0) + (float) $snapshot->supplier_payments + (float) ($snapshot->supplier_bank_payments ?? 0))),
-            'purchase_pending' => $this->money($last?->accounts_payable ?? 0),
+            'purchase_pending' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_purchases + (float) ($snapshot->accounts_payable_adjustments ?? 0))),
             'expenses' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->expenses + (float) ($snapshot->expense_adjustments ?? 0))),
             'sales' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->credit_sales + (float) ($snapshot->sales_adjustments ?? 0))),
             'sales_total' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->credit_sales + (float) ($snapshot->sales_adjustments ?? 0))),
             'sales_collected' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->customer_payments + (float) ($snapshot->customer_bank_payments ?? 0))),
-            'sales_pending' => $this->money($last?->accounts_receivable ?? 0),
+            'sales_pending' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_sales + (float) ($snapshot->accounts_receivable_adjustments ?? 0))),
             'cogs' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cogs_cash_sales + (float) ($snapshot->cogs_bank_sales ?? 0) + (float) $snapshot->cogs_credit_sales)),
             'profit' => $this->money($snapshots->sum('net_profit')),
-            'credit_payable' => $this->money($last?->accounts_payable ?? 0),
-            'credit_receivable' => $this->money($last?->accounts_receivable ?? 0),
+            'credit_payable' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_purchases + (float) ($snapshot->accounts_payable_adjustments ?? 0))),
+            'credit_receivable' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_sales + (float) ($snapshot->accounts_receivable_adjustments ?? 0))),
+            'payables_generated' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_purchases + (float) ($snapshot->accounts_payable_adjustments ?? 0))),
+            'receivables_generated' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_sales + (float) ($snapshot->accounts_receivable_adjustments ?? 0))),
             'cogs_credit' => $this->money($snapshots->sum('cogs_credit_sales')),
             'investment' => $this->money($snapshots->sum('net_investment')),
             'opening_cash' => $this->money($first?->opening_cash ?? 0),

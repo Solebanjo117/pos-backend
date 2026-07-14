@@ -434,7 +434,9 @@ it('does not double-restore inventory when cancelling an order after a post-sale
 
     // Step 2: cancel the order (only the original 2-unit deduction should be restored)
     $this->actingAs($seller)
-        ->postJson("/api/v1/sales-orders/{$order->id}/cancel")
+        ->postJson("/api/v1/sales-orders/{$order->id}/cancel", [
+            'reason' => 'Anulacion despues de retirar una linea',
+        ])
         ->assertOk();
 
     $stockAfterCancel = $inventory->fresh()->quantity_available;

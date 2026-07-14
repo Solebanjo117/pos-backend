@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\CashierQueueEntry;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
 use App\Models\InventoryMovement;
@@ -274,11 +275,37 @@ it('approves balance returns without an open cash session and records customer c
         ->where('notes', 'like', "%{$pending->return_number}%")
         ->exists())->toBeFalse();
 
+    $this->assertDatabaseMissing('customer_transactions', [
+        'customer_id' => $customer->id,
+        'reference_type' => 'sales_return',
+        'reference_id' => $pending->id,
+        'type' => 'credit_note',
+    ]);
+
+    $this->assertDatabaseHas('sales_credit_notes', [
+        'sales_return_id' => $pending->id,
+        'status' => 'pending',
+    ]);
+
+    $queueEntry = CashierQueueEntry::query()
+        ->where('source_type', SalesReturn::class)
+        ->where('source_id', $pending->id)
+        ->firstOrFail();
+
+    $this->actingAs($user)
+        ->postJson("/api/v1/cashier-queue/{$queueEntry->id}/complete")
+        ->assertOk();
+
     $this->assertDatabaseHas('customer_transactions', [
         'customer_id' => $customer->id,
         'reference_type' => 'sales_return',
         'reference_id' => $pending->id,
         'type' => 'credit_note',
+    ]);
+
+    $this->assertDatabaseHas('sales_credit_notes', [
+        'sales_return_id' => $pending->id,
+        'status' => 'settled',
     ]);
 
     $this->assertDatabaseHas('inventory_movements', [
