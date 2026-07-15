@@ -60,6 +60,7 @@ Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class.':re
     require __DIR__.'/api_tickets.php';
     require __DIR__.'/api_sales_quotes.php';
     require __DIR__.'/api_sales_credit_notes.php';
+    require __DIR__.'/api_transaction_traces.php';
 
     // ---------------------------------------------------------------
     // Work Orders: all authenticated roles

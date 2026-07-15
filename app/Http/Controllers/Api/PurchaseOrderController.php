@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\PurchaseOrder;
 use App\Services\PurchaseOrderService;
 use App\Services\SmartReorderService;
+use App\Services\TransactionTraceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -39,9 +40,10 @@ class PurchaseOrderController extends Controller
      * GET /api/v1/purchase-orders/{id}
      * Get single purchase order
      */
-    public function show(int $id): JsonResponse
+    public function show(Request $request, int $id, TransactionTraceService $traceService): JsonResponse
     {
         $order = $this->purchaseOrderService->getOperationalDetail($id);
+        $order['trace'] = $traceService->get('purchase_order', $id, $request->user(), 1, 50);
 
         return response()->json(['data' => $order]);
     }

@@ -21,6 +21,7 @@ class InventoryMovement extends Model
         'quantity',
         'quantity_before',
         'quantity_after',
+        'movement_group_uuid',
         'reference_type',
         'reference_id',
         'notes',

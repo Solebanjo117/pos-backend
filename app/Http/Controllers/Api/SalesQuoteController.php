@@ -10,9 +10,10 @@ use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesQuote;
 use App\Models\Setting;
+use App\Services\CashierQueueService;
 use App\Services\SalesQuoteOperationalDetailService;
 use App\Services\SalesQuoteService;
-use App\Services\CashierQueueService;
+use App\Services\TransactionTraceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -88,13 +89,15 @@ class SalesQuoteController extends Controller
     /**
      * GET /api/sales-quotes/{id}/operational-detail
      */
-    public function operationalDetail(int $id): JsonResponse
+    public function operationalDetail(Request $request, int $id, TransactionTraceService $traceService): JsonResponse
     {
         $quote = SalesQuote::findOrFail($id);
+        $data = $this->operationalDetailService->build($quote);
+        $data['trace'] = $traceService->get('sales_quote', $quote->id, $request->user(), 1, 50);
 
         return response()->json([
             'success' => true,
-            'data' => $this->operationalDetailService->build($quote),
+            'data' => $data,
         ]);
     }
 

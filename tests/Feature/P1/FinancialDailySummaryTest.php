@@ -3,8 +3,8 @@
 use App\Models\Brand;
 use App\Models\Customer;
 use App\Models\FinancialDailySnapshot;
-use App\Models\PaymentMethod;
 use App\Models\InventoryLot;
+use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
@@ -187,9 +187,15 @@ it('reuses cached snapshots for past days but keeps today fresh', function (): v
 
 it('returns financial drilldown rows and marks formal accounting reports pending without ledger data', function (): void {
     [$admin, $warehouse, $product, $variant] = dailySummaryContext();
+    $customer = Customer::create([
+        'code' => 'C-DRILLDOWN',
+        'name' => 'Cliente Drilldown',
+        'current_balance' => 0,
+    ]);
 
     $order = SalesOrder::create([
         'order_number' => 'SO-DS-DRILL',
+        'customer_id' => $customer->id,
         'user_id' => $admin->id,
         'date' => '2026-05-04',
         'status' => 'completed',
@@ -224,13 +230,27 @@ it('returns financial drilldown rows and marks formal accounting reports pending
         'created_by' => $admin->id,
     ]);
 
-    $this->actingAs($admin)
+    $drilldown = $this->actingAs($admin)
         ->getJson('/api/v1/reports/financial-drilldown?metric=sales&date_from=2026-05-04&date_to=2026-05-04&warehouse_id='.$warehouse->id)
         ->assertOk()
         ->assertJsonPath('metric', 'sales')
         ->assertJsonPath('total', 120)
         ->assertJsonPath('rows.0.document', 'SO-DS-DRILL')
-        ->assertJsonPath('rows.0.paid', 120);
+        ->assertJsonPath('rows.0.paid', 120)
+        ->assertJsonPath('rows.0.document_node.type', 'sales_order')
+        ->assertJsonPath('rows.0.document_node.id', $order->id)
+        ->assertJsonPath('rows.0.party_node.type', 'customer')
+        ->assertJsonPath('rows.0.user_node.type', 'user');
+
+    expect(collect($drilldown->json('columns'))->pluck('key')->all())
+        ->toContain('display_datetime')
+        ->not->toContain('occurred_at', 'business_datetime')
+        ->and($drilldown->json('rows.0'))->toHaveKeys([
+            'occurred_at',
+            'business_datetime',
+            'datetime_source',
+            'display_datetime',
+        ]);
 
     $this->actingAs($admin)
         ->getJson('/api/v1/reports/financial-advanced-status')
@@ -284,7 +304,8 @@ it('keeps inventory trace fields internal and paginates drilldowns with supporte
 
     expect($columns->keys()->all())
         ->not->toContain('warehouse', 'user')
-        ->and($columns['business_datetime']['label'])->toBe('Fecha y hora')
+        ->and($columns['display_datetime']['label'])->toBe('Fecha y hora')
+        ->and($columns->keys()->all())->not->toContain('occurred_at', 'business_datetime')
         ->and(array_key_exists('warehouse', $firstRow))->toBeTrue()
         ->and(array_key_exists('user', $firstRow))->toBeTrue()
         ->and($firstIds->intersect($secondIds))->toHaveCount(0);
@@ -361,10 +382,13 @@ it('maps yappy payments and bank adjustments into Banco', function (): void {
         ->and((float) $response->json('rows.0.closing_bank'))->toBe(115.0)
         ->and((float) $response->json('totals.bank'))->toBe(115.0);
 
-    $this->actingAs($admin)
+    $bankDrilldown = $this->actingAs($admin)
         ->getJson('/api/v1/reports/financial-drilldown?metric=bank&date_from=2026-05-05&date_to=2026-05-05&warehouse_id='.$warehouse->id)
         ->assertOk()
         ->assertJsonPath('total', 115);
+
+    expect($bankDrilldown->json('warnings'))
+        ->toContain('bank_is_operational_payment_bucket');
 });
 
 it('reports daily generated receivables and payables with matching drilldowns', function (): void {

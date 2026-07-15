@@ -9,9 +9,10 @@ use App\Models\CustomerVehicle;
 use App\Models\Inventory;
 use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
-use App\Services\SalesOrderOperationalDetailService;
 use App\Services\SalesOrderCancellationService;
+use App\Services\SalesOrderOperationalDetailService;
 use App\Services\SalesOrderService;
+use App\Services\TransactionTraceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -31,11 +32,14 @@ class SalesOrderController extends Controller
      * GET /api/sales-orders/{salesOrder}/operational-detail
      * Get the complete operational profile for an invoice/order.
      */
-    public function operationalDetail(SalesOrder $salesOrder, SalesOrderOperationalDetailService $operationalDetailService): JsonResponse
+    public function operationalDetail(Request $request, SalesOrder $salesOrder, SalesOrderOperationalDetailService $operationalDetailService, TransactionTraceService $traceService): JsonResponse
     {
+        $data = $operationalDetailService->get($salesOrder);
+        $data['trace'] = $traceService->get('sales_order', $salesOrder->id, $request->user(), 1, 50);
+
         return response()->json([
             'success' => true,
-            'data' => $operationalDetailService->get($salesOrder),
+            'data' => $data,
         ]);
     }
 
