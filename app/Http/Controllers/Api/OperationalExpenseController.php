@@ -5,14 +5,15 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreOperationalExpenseRequest;
 use App\Http\Requests\UpdateOperationalExpenseRequest;
+use App\Models\Customer;
 use App\Models\OperationalExpense;
 use App\Models\OperationalExpenseBeneficiary;
 use App\Models\OperationalExpenseCategory;
 use App\Models\PaymentMethod;
-use App\Models\Customer;
 use App\Models\Supplier;
-use App\Services\OperationalExpenseService;
 use App\Services\CashierQueueService;
+use App\Services\OperationalExpenseService;
+use App\Services\TransactionTraceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -142,10 +143,13 @@ class OperationalExpenseController extends Controller
         ], 201);
     }
 
-    public function show(OperationalExpense $operationalExpense): JsonResponse
+    public function show(Request $request, OperationalExpense $operationalExpense, TransactionTraceService $traceService): JsonResponse
     {
+        $data = $operationalExpense->load(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'customer', 'beneficiary', 'ledgerAccount', 'events.user']);
+        $data->setAttribute('trace', $traceService->get('operational_expense', $operationalExpense->id, $request->user(), 1, 50));
+
         return response()->json([
-            'data' => $operationalExpense->load(['warehouse', 'creator', 'cashMovement', 'posSession', 'categoryRecord', 'supplier', 'customer', 'beneficiary', 'ledgerAccount', 'events.user']),
+            'data' => $data,
         ]);
     }
 

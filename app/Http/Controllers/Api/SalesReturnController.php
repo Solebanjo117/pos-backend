@@ -10,6 +10,7 @@ use App\Models\SalesReturn;
 use App\Models\SalesReturnItem;
 use App\Services\SalesReturnOperationalDetailService;
 use App\Services\SalesReturnService;
+use App\Services\TransactionTraceService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -135,11 +136,14 @@ class SalesReturnController extends Controller
         return response()->json(['data' => $orders]);
     }
 
-    public function operationalDetail(SalesReturn $salesReturn): JsonResponse
+    public function operationalDetail(Request $request, SalesReturn $salesReturn, TransactionTraceService $traceService): JsonResponse
     {
+        $data = $this->operationalDetailService->get($salesReturn);
+        $data['trace'] = $traceService->get('sales_return', $salesReturn->id, $request->user(), 1, 50);
+
         return response()->json([
             'success' => true,
-            'data' => $this->operationalDetailService->get($salesReturn),
+            'data' => $data,
         ]);
     }
 

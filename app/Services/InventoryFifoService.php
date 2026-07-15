@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class InventoryFifoService
 {
@@ -36,6 +37,7 @@ class InventoryFifoService
                 'quantity' => $quantity,
                 'quantity_before' => $quantityBefore,
                 'quantity_after' => $quantityBefore + $quantity,
+                'movement_group_uuid' => $data['movement_group_uuid'] ?? null,
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -120,6 +122,7 @@ class InventoryFifoService
                 'quantity' => $quantityToConsume,
                 'quantity_before' => $quantityBefore,
                 'quantity_after' => max(0, $quantityBefore - $quantityToConsume),
+                'movement_group_uuid' => $data['movement_group_uuid'] ?? null,
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -410,6 +413,7 @@ class InventoryFifoService
                 'quantity' => $quantity,
                 'quantity_before' => $quantityBefore,
                 'quantity_after' => $quantityBefore + $quantity,
+                'movement_group_uuid' => $outboundMovement->movement_group_uuid ?? (string) Str::uuid(),
                 'reference_type' => $outboundMovement->reference_type,
                 'reference_id' => $outboundMovement->reference_id,
                 'reason' => $outboundMovement->reason,

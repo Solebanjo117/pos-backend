@@ -25,9 +25,15 @@ class InventoryMovementController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        $warehouseId = $request->input('warehouse_id');
+        if (! $request->user()->isAdmin()) {
+            $warehouseId = $request->user()->getEffectiveWarehouseId();
+            abort_if($warehouseId === null, 403, 'No tiene un almacen autorizado.');
+        }
+
         $filters = [
             'product_id' => $request->input('product_id'),
-            'warehouse_id' => $request->input('warehouse_id'),
+            'warehouse_id' => $warehouseId,
             'movement_type' => $request->input('movement_type'),
             'date_from' => $request->input('date_from'),
             'date_to' => $request->input('date_to'),
@@ -53,9 +59,10 @@ class InventoryMovementController extends Controller
     /**
      * Get movement by ID
      */
-    public function show(int $id): JsonResponse
+    public function show(Request $request, int $id): JsonResponse
     {
         $movement = $this->movementService->getMovementById($id);
+        $this->assertWarehouseAccess($request, $movement->warehouse_id, $movement->destination_warehouse_id);
 
         return response()->json([
             'data' => new InventoryMovementResource($movement),
@@ -228,12 +235,27 @@ class InventoryMovementController extends Controller
     /**
      * Get related movements
      */
-    public function related(int $id): JsonResponse
+    public function related(Request $request, int $id): JsonResponse
     {
+        $movement = $this->movementService->getMovementById($id);
+        $this->assertWarehouseAccess($request, $movement->warehouse_id, $movement->destination_warehouse_id);
         $movements = $this->movementService->getRelatedMovements($id);
 
         return response()->json([
             'data' => InventoryMovementResource::collection($movements),
         ]);
+    }
+
+    private function assertWarehouseAccess(Request $request, ?int $warehouseId, ?int $destinationWarehouseId = null): void
+    {
+        $user = $request->user();
+        if ($user->isAdmin()) {
+            return;
+        }
+
+        $allowed = ($warehouseId !== null && $user->hasWarehouseAccess($warehouseId))
+            || ($destinationWarehouseId !== null && $user->hasWarehouseAccess($destinationWarehouseId));
+
+        abort_unless($allowed, 403, 'No tiene acceso a este movimiento de inventario.');
     }
 }

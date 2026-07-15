@@ -30,9 +30,10 @@ class FinancialDrilldownService
 
     private const NON_MONEY_METHODS = ['credit', 'store_credit', 'supplier_credit'];
 
-    public function __construct(private readonly FinancialSnapshotService $snapshots)
-    {
-    }
+    public function __construct(
+        private readonly FinancialSnapshotService $snapshots,
+        private readonly TransactionTraceRegistry $traceRegistry,
+    ) {}
 
     /**
      * @return array<string, mixed>
@@ -99,7 +100,10 @@ class FinancialDrilldownService
                 ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
                 'document' => $order->order_number,
                 'party' => $order->customer?->name ?? 'Cliente general',
+                'party_type' => $order->customer ? 'customer' : null,
+                'party_id' => $order->customer_id,
                 'user' => $order->user?->name,
+                'user_id' => $order->user_id,
                 'status' => $order->status_label ?? $order->status,
                 'method' => $order->payment_method,
                 'total' => $total,
@@ -116,7 +120,10 @@ class FinancialDrilldownService
                 ...$this->traceFields($return->approved_at ?? $return->updated_at, null, $return->approved_at ? 'approved_at' : 'updated_at'),
                 'document' => $return->return_number,
                 'party' => $return->customer?->name ?? 'Cliente general',
+                'party_type' => $return->customer ? 'customer' : null,
+                'party_id' => $return->customer_id,
                 'user' => $return->approver?->name,
+                'user_id' => $return->approved_by,
                 'status' => 'Devolucion aprobada',
                 'method' => $return->refund_method,
                 'total' => $this->money(-1 * (float) $return->total_amount),
@@ -154,7 +161,10 @@ class FinancialDrilldownService
                 ...$this->traceFields($payment->paid_at, $payment->business_datetime, 'paid_at'),
                 'document' => $order?->order_number,
                 'party' => $order?->customer?->name ?? 'Cliente general',
+                'party_type' => $order?->customer ? 'customer' : null,
+                'party_id' => $order?->customer_id,
                 'user' => $payment->creator?->name,
+                'user_id' => $payment->created_by,
                 'method' => $payment->formatted_method ?? $payment->method,
                 'reference' => $payment->reference_number ?? $payment->notes,
                 'amount' => $this->money((float) $payment->amount * $ratio),
@@ -315,7 +325,10 @@ class FinancialDrilldownService
                 ...$this->traceFields($order->created_at, $order->business_datetime, 'created_at'),
                 'document' => $order->po_number,
                 'party' => $order->supplier?->name ?? 'Proveedor general',
+                'party_type' => $order->supplier ? 'supplier' : null,
+                'party_id' => $order->supplier_id,
                 'user' => $order->user?->name,
+                'user_id' => $order->user_id,
                 'method' => $order->payments
                     ->whereNotIn('method', self::NON_MONEY_METHODS)
                     ->map(fn (PurchaseOrderPayment $payment): string => $payment->method_label ?? $payment->method)
@@ -351,7 +364,10 @@ class FinancialDrilldownService
             ...$this->traceFields($payment->paid_at, $payment->business_datetime, 'paid_at'),
             'document' => $payment->purchaseOrder?->po_number,
             'party' => $payment->purchaseOrder?->supplier?->name ?? 'Proveedor general',
+            'party_type' => $payment->purchaseOrder?->supplier ? 'supplier' : null,
+            'party_id' => $payment->purchaseOrder?->supplier_id,
             'user' => $payment->user?->name,
+            'user_id' => $payment->user_id,
             'method' => $payment->method_label ?? $payment->method,
             'reference' => $payment->reference_number,
             'amount' => $this->money($payment->amount),
@@ -384,7 +400,10 @@ class FinancialDrilldownService
             'category' => $expense->category_label,
             'description' => $expense->description,
             'party' => $expense->party['name'] ?? 'Sin beneficiario',
+            'party_type' => $expense->party['type'] ?? null,
+            'party_id' => $expense->party['id'] ?? null,
             'user' => $expense->creator?->name,
+            'user_id' => $expense->created_by,
             'method' => $expense->payment_method_label,
             'reference' => $expense->reference_number,
             'amount' => $this->money($expense->amount),
@@ -1281,6 +1300,48 @@ class FinancialDrilldownService
 
     private function collectionPayload(string $metric, string $label, array $columns, Collection $rows, int $page, int $perPage, array $warnings = [], ?float $forcedTotal = null): array
     {
+        $rows = $rows->map(function (array $row) use ($metric): array {
+            $row['display_datetime'] = $row['business_datetime'] ?? $row['occurred_at'] ?? null;
+
+            if (isset($row['method']) && is_string($row['method']) && $row['method'] !== '') {
+                $methods = array_map('trim', preg_split('/\s*\/\s*/', $row['method']) ?: []);
+                $row['method'] = collect($methods)
+                    ->map(fn (string $method): string => PaymentMethod::getNameByCode($method))
+                    ->join(' / ');
+            }
+
+            $trace = $this->drilldownTraceReference($metric, $row);
+            if ($trace !== null) {
+                $row[$trace['column'].'_node'] = $trace['node'];
+            }
+
+            $partyType = match ($row['party_type'] ?? null) {
+                'beneficiary' => 'operational_expense_beneficiary',
+                'customer', 'supplier' => $row['party_type'],
+                default => null,
+            };
+            if ($partyType && ! empty($row['party_id'])) {
+                $row['party_node'] = $this->authorizedTraceNode(
+                    $partyType,
+                    (int) $row['party_id'],
+                    (string) ($row['party'] ?? 'Relacionado'),
+                );
+            }
+            if (! empty($row['user_id'])) {
+                $row['user_node'] = $this->authorizedTraceNode(
+                    'user',
+                    (int) $row['user_id'],
+                    (string) ($row['user'] ?? 'Usuario'),
+                );
+            }
+
+            return $row;
+        });
+
+        if ($metric === 'bank') {
+            $warnings[] = 'bank_is_operational_payment_bucket';
+        }
+
         $total = $forcedTotal ?? $this->money($rows->sum(fn (array $row): float => (float) ($row['amount'] ?? 0)));
         $paginator = $this->paginateCollection($rows, $page, $perPage);
 
@@ -1317,6 +1378,77 @@ class FinancialDrilldownService
         }
 
         return $query->whereIn('category', $categories);
+    }
+
+    /**
+     * @return array{column: string, node: array<string, mixed>}|null
+     */
+    private function drilldownTraceReference(string $metric, array $row): ?array
+    {
+        $rawId = $row['id'] ?? null;
+        $type = null;
+        $column = isset($row['document']) ? 'document' : 'source';
+        $id = is_numeric($rawId) ? (int) $rawId : null;
+
+        if (is_string($rawId)) {
+            if (preg_match('/^return-(\d+)$/', $rawId, $match)) {
+                [$type, $id] = ['sales_return', (int) $match[1]];
+            } elseif (preg_match('/^sale-payment-(\d+)$/', $rawId, $match)) {
+                [$type, $id] = ['sales_order_payment', (int) $match[1]];
+            } elseif (preg_match('/^purchase-payment-(\d+)$/', $rawId, $match)) {
+                [$type, $id] = ['purchase_order_payment', (int) $match[1]];
+            } elseif (preg_match('/^expense-(\d+)$/', $rawId, $match)) {
+                [$type, $id] = ['operational_expense', (int) $match[1]];
+            }
+        }
+
+        if ($type === null && $id !== null) {
+            $type = match ($metric) {
+                'sales', 'sales_total' => 'sales_order',
+                'payments_received', 'sales_collected' => 'sales_order_payment',
+                'purchases', 'purchase' => 'purchase_order',
+                'supplier_payments', 'purchase_paid' => 'purchase_order_payment',
+                'expenses', 'operational_expenses' => 'operational_expense',
+                'inventory' => 'inventory_lot',
+                'inventory_in', 'inventory_out' => 'inventory_movement',
+                default => null,
+            };
+        }
+
+        if ($type === null || $id === null) {
+            return null;
+        }
+
+        $number = $row['document'] ?? $row['source'] ?? null;
+
+        return [
+            'column' => $column,
+            'node' => $this->authorizedTraceNode(
+                $type,
+                $id,
+                (string) ($number ?: 'Documento relacionado'),
+                is_string($number) ? $number : null,
+            ),
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function authorizedTraceNode(string $type, int $id, string $label, ?string $number = null): array
+    {
+        $user = auth()->user();
+        $canView = $user !== null
+            && in_array($user->role, $this->traceRegistry->roles($type), true);
+
+        return [
+            'type' => $type,
+            'id' => $id,
+            'label' => $canView ? $label : 'Documento restringido',
+            'number' => $canView ? $number : null,
+            'href' => null,
+            'can_view' => $canView,
+            'restricted' => ! $canView,
+            'traceable' => true,
+        ];
     }
 
     /**
@@ -1417,8 +1549,7 @@ class FinancialDrilldownService
     private function datetimeColumns(): array
     {
         return [
-            ['key' => 'occurred_at', 'label' => 'Fecha/Hora', 'type' => 'datetime'],
-            ['key' => 'business_datetime', 'label' => 'Fecha y hora', 'type' => 'datetime'],
+            ['key' => 'display_datetime', 'label' => 'Fecha y hora', 'type' => 'datetime'],
         ];
     }
 

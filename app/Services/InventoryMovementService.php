@@ -8,6 +8,7 @@ use App\Models\ProductInventory;
 use App\Models\WarehouseBatch;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class InventoryMovementService
 {
@@ -47,11 +48,13 @@ class InventoryMovementService
         }
 
         if (! empty($filters['search'])) {
-            $query->whereHas('product', function ($q) use ($filters) {
-                $q->where('name', 'ilike', '%'.$filters['search'].'%')
-                    ->orWhere('sku_base', 'ilike', '%'.$filters['search'].'%');
-            })->orWhereHas('variant', function ($q) use ($filters) {
-                $q->where('sku', 'ilike', '%'.$filters['search'].'%');
+            $query->where(function ($searchQuery) use ($filters): void {
+                $searchQuery->whereHas('product', function ($q) use ($filters) {
+                    $q->where('name', 'ilike', '%'.$filters['search'].'%')
+                        ->orWhere('sku_base', 'ilike', '%'.$filters['search'].'%');
+                })->orWhereHas('variant', function ($q) use ($filters) {
+                    $q->where('sku', 'ilike', '%'.$filters['search'].'%');
+                });
             });
         }
 
@@ -118,6 +121,7 @@ class InventoryMovementService
                 'quantity' => $data['quantity'],
                 'quantity_before' => $inventoryBefore,
                 'quantity_after' => $inventoryBefore + (int) $data['quantity'],
+                'movement_group_uuid' => $data['movement_group_uuid'] ?? null,
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -201,6 +205,7 @@ class InventoryMovementService
                 'quantity' => $data['quantity'],
                 'quantity_before' => $inventoryBefore,
                 'quantity_after' => $inventoryBefore - (int) $data['quantity'],
+                'movement_group_uuid' => $data['movement_group_uuid'] ?? null,
                 'reference_type' => $data['reference_type'] ?? null,
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
@@ -225,6 +230,8 @@ class InventoryMovementService
      */
     public function recordTransfer(array $data): InventoryMovement
     {
+        $data['movement_group_uuid'] ??= (string) Str::uuid();
+
         if (empty($data['skip_fifo'])) {
             if ($data['warehouse_id'] == $data['destination_warehouse_id']) {
                 throw new \Exception('El almacÃ©n de origen y destino deben ser diferentes.');
@@ -303,6 +310,7 @@ class InventoryMovementService
                 'quantity' => $data['quantity'],
                 'quantity_before' => $inventoryBefore,
                 'quantity_after' => $inventoryBefore - (int) $data['quantity'],
+                'movement_group_uuid' => $data['movement_group_uuid'],
                 'reference_type' => 'transfer',
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? null,
@@ -431,11 +439,12 @@ class InventoryMovementService
     public function recordBulkInbound(array $items): array
     {
         $consolidatedItems = $this->consolidateItems($items);
+        $groupUuid = (string) Str::uuid();
 
-        return DB::transaction(function () use ($consolidatedItems) {
+        return DB::transaction(function () use ($consolidatedItems, $groupUuid) {
             $movements = [];
             foreach ($consolidatedItems as $item) {
-                $movements[] = $this->recordInbound($item);
+                $movements[] = $this->recordInbound([...$item, 'movement_group_uuid' => $groupUuid]);
             }
 
             return $movements;
@@ -448,11 +457,12 @@ class InventoryMovementService
     public function recordBulkOutbound(array $items): array
     {
         $consolidatedItems = $this->consolidateItems($items);
+        $groupUuid = (string) Str::uuid();
 
-        return DB::transaction(function () use ($consolidatedItems) {
+        return DB::transaction(function () use ($consolidatedItems, $groupUuid) {
             $movements = [];
             foreach ($consolidatedItems as $item) {
-                $movements[] = $this->recordOutbound($item);
+                $movements[] = $this->recordOutbound([...$item, 'movement_group_uuid' => $groupUuid]);
             }
 
             return $movements;
@@ -488,18 +498,27 @@ class InventoryMovementService
     {
         $movement = InventoryMovement::findOrFail($movementId);
 
-        // Find movements created within +/- 5 seconds by the same user, with same reference/notes
-        return InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'lotAllocations.lot', 'sourceLots'])
-            ->where('id', '!=', $movementId) // Exclude self
-            ->where('user_id', $movement->user_id)
-            ->where('movement_type', $movement->movement_type)
-            ->where('created_at', '>=', $movement->created_at->subSeconds(5))
-            ->where('created_at', '<=', $movement->created_at->addSeconds(5))
-            ->where(function ($q) use ($movement) {
-                $q->where('reference_id', $movement->reference_id)
-                    ->where('reference_type', $movement->reference_type);
-            })
-            ->get()
-            ->all();
+        $query = InventoryMovement::with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'lotAllocations.lot', 'sourceLots'])
+            ->where('id', '!=', $movementId);
+
+        if ($movement->movement_group_uuid) {
+            $grouped = (clone $query)->where('movement_group_uuid', $movement->movement_group_uuid)
+                ->orderBy('created_at')
+                ->get()
+                ->all();
+            if ($grouped !== []) {
+                return $grouped;
+            }
+        }
+
+        if ($movement->reference_type && $movement->reference_id) {
+            return $query->where('reference_id', $movement->reference_id)
+                ->where('reference_type', $movement->reference_type)
+                ->orderBy('created_at')
+                ->get()
+                ->all();
+        }
+
+        return [];
     }
 }
