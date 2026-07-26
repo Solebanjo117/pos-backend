@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('accounts-payable')->middleware('role:admin,manager,buyer')->group(function () {
     Route::get('/', [AccountsPayableController::class, 'index']);
+    Route::get('/documents', [AccountsPayableController::class, 'documents']);
     Route::get('/{supplier}/statement', [AccountsPayableController::class, 'statement']);
     Route::post('/{supplier}/payments', [AccountsPayableController::class, 'storePayment']);
 });

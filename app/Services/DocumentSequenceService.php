@@ -8,7 +8,10 @@ use Illuminate\Support\Facades\DB;
 class DocumentSequenceService
 {
     public const COMMERCIAL = 'commercial_document';
+
     public const PURCHASE_ORDER = 'purchase_order';
+
+    public const FINANCIAL_TRANSFER = 'financial_transfer';
 
     public function nextCommercialFolio(): string
     {
@@ -18,6 +21,11 @@ class DocumentSequenceService
     public function nextPurchaseOrderFolio(): string
     {
         return 'PO-'.str_pad((string) $this->next(self::PURCHASE_ORDER), 10, '0', STR_PAD_LEFT);
+    }
+
+    public function nextFinancialTransferFolio(): string
+    {
+        return 'TRF-'.str_pad((string) $this->next(self::FINANCIAL_TRANSFER), 10, '0', STR_PAD_LEFT);
     }
 
     private function next(string $key): int

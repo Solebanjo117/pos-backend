@@ -242,7 +242,7 @@ class PurchaseOrder extends Model
     /**
      * Add a payment to this purchase order
      */
-    public function addPayment(float $amount, string $method = 'cash', ?string $referenceNumber = null, ?string $notes = null): PurchaseOrderPayment
+    public function addPayment(float $amount, string $method = 'cash', ?string $referenceNumber = null, ?string $notes = null, ?int $financialAccountId = null): PurchaseOrderPayment
     {
         $payment = $this->payments()->create([
             'amount' => $amount,
@@ -251,6 +251,7 @@ class PurchaseOrder extends Model
             'notes' => $notes,
             'paid_at' => now(),
             'user_id' => auth()->id(),
+            'financial_account_id' => $financialAccountId,
         ]);
 
         $this->recalculatePaymentStatus();

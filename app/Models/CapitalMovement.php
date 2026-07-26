@@ -22,6 +22,7 @@ class CapitalMovement extends Model
         'source_type',
         'source_id',
         'business_datetime',
+        'financial_account_id',
     ];
 
     protected $casts = [

@@ -26,6 +26,14 @@ class AccountsPayableController extends Controller
         ));
     }
 
+    public function documents(Request $request): JsonResponse
+    {
+        return response()->json($this->accountLedgerService->payableDocuments(
+            $request->only(['search', 'document_number', 'party_id', 'status', 'per_page', 'page', 'date_from', 'date_to']),
+            $request->user()
+        ));
+    }
+
     public function statement(Request $request, Supplier $supplier): JsonResponse
     {
         return response()->json([

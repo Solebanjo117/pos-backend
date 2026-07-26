@@ -76,6 +76,7 @@ Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class.':re
     require __DIR__.'/api_accounts_payable.php';
     require __DIR__.'/api_supply_list.php';
     require __DIR__.'/api_operational_expenses.php';
+    require __DIR__.'/api_financial_transfers.php';
 
     // ---------------------------------------------------------------
     // Reports: manager, admin (cashier/seller restricted in each file)

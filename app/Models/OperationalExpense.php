@@ -91,6 +91,7 @@ class OperationalExpense extends Model
         'reference_number',
         'notes',
         'business_datetime',
+        'financial_account_id',
     ];
 
     protected $casts = [

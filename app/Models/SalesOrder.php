@@ -402,7 +402,7 @@ class SalesOrder extends Model
      * Register a payment (cash, card, transfer, or credit).
      * Updates payment_status and, for credit payments, adjusts customer balance.
      */
-    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false, ?string $referenceNumber = null): SalesOrderPayment
+    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false, ?string $referenceNumber = null, ?int $financialAccountId = null): SalesOrderPayment
     {
         $payment = $this->payments()->create([
             'amount' => $amount,
@@ -411,6 +411,7 @@ class SalesOrder extends Model
             'notes' => $notes,
             'paid_at' => $paidAt ?? now(),
             'created_by' => Auth::id(),
+            'financial_account_id' => $financialAccountId,
         ]);
 
         // Recalculate payment_status
