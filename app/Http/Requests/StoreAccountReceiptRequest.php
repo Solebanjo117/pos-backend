@@ -28,6 +28,8 @@ class StoreAccountReceiptRequest extends FormRequest
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
             'paid_at' => ['nullable', 'date'],
+            'pos_session_id' => ['nullable', 'integer', 'exists:pos_sessions,id'],
+            'financial_account_id' => ['nullable', 'integer', 'exists:financial_accounts,id'],
             'applications' => ['nullable', 'array'],
             'applications.*.document_id' => ['required_with:applications', 'integer', 'min:1'],
             'applications.*.amount' => ['required_with:applications', 'numeric', 'min:0.01'],

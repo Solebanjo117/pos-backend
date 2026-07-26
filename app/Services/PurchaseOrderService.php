@@ -683,9 +683,9 @@ class PurchaseOrderService
     /**
      * Cancel PO and revert inventory if needed
      */
-    public function cancel(int $id): PurchaseOrder
+    public function cancel(int $id, ?string $reason = null): PurchaseOrder
     {
-        return DB::transaction(function () use ($id) {
+        return DB::transaction(function () use ($id, $reason) {
             $po = PurchaseOrder::with('items')->findOrFail($id);
 
             if (! $po->canBeCancelled()) {
@@ -706,6 +706,11 @@ class PurchaseOrderService
 
             $po->status = 'cancelled';
             $po->save();
+
+            activity()
+                ->performedOn($po)
+                ->withProperties(['reason' => $reason])
+                ->log('Orden de compra anulada');
 
             return $po->fresh(['supplier', 'warehouse', 'items.product', 'items.variant']);
         });

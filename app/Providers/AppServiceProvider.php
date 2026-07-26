@@ -3,6 +3,12 @@
 namespace App\Providers;
 
 use App\Listeners\LogAuthenticationEvents;
+use App\Models\CapitalMovement;
+use App\Models\FinancialAdjustment;
+use App\Models\OperationalExpense;
+use App\Models\PurchaseOrderPayment;
+use App\Models\SalesOrderPayment;
+use App\Services\FinancialLiquiditySyncService;
 use Illuminate\Auth\Events\Login;
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -26,6 +32,27 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        foreach ([
+            SalesOrderPayment::class,
+            PurchaseOrderPayment::class,
+            OperationalExpense::class,
+            CapitalMovement::class,
+            FinancialAdjustment::class,
+        ] as $modelClass) {
+            $modelClass::created(fn ($model) => app(FinancialLiquiditySyncService::class)->sync($model));
+            $modelClass::deleting(fn ($model) => app(FinancialLiquiditySyncService::class)->reverse($model));
+        }
+        OperationalExpense::updated(function (OperationalExpense $expense): void {
+            $syncService = app(FinancialLiquiditySyncService::class);
+            if (in_array($expense->status, ['cancelled', 'reversed'], true)) {
+                $syncService->reverse($expense);
+
+                return;
+            }
+
+            $syncService->sync($expense);
+        });
+
         $listener = new LogAuthenticationEvents;
         Event::listen(Login::class, [$listener, 'handleLogin']);
         Event::listen(Logout::class, [$listener, 'handleLogout']);

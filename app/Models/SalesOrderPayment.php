@@ -20,10 +20,11 @@ class SalesOrderPayment extends Model
         'paid_at',
         'created_by',
         'business_datetime',
+        'financial_account_id',
     ];
 
     protected $casts = [
-        'amount'  => 'decimal:2',
+        'amount' => 'decimal:2',
         'paid_at' => 'datetime',
         'business_datetime' => 'datetime',
     ];

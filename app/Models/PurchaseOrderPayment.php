@@ -21,6 +21,7 @@ class PurchaseOrderPayment extends Model
         'notes',
         'paid_at',
         'business_datetime',
+        'financial_account_id',
     ];
 
     protected $casts = [

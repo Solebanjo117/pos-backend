@@ -62,6 +62,7 @@ class FinancialAdjustment extends Model
         'adjustment_date',
         'notes',
         'business_datetime',
+        'financial_account_id',
     ];
 
     protected $casts = [

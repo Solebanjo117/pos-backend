@@ -3,6 +3,9 @@
 use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
 use App\Models\Customer;
+use App\Models\FinancialAccount;
+use App\Models\FinancialAccountMovement;
+use App\Models\LedgerAccount;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\SalesOrder;
@@ -67,6 +70,70 @@ function createArPaymentMethod(string $code, string $name, int $sortOrder): void
         'sort_order' => $sortOrder,
     ]);
 }
+
+it('lists receivable documents with the shared presentation contract', function () {
+    ['cashier' => $cashier, 'customer' => $customer, 'order' => $order] = accountsReceivableContext();
+
+    $this->actingAs($cashier)
+        ->getJson('/api/v1/accounts-receivable/documents?status=open')
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $order->id)
+        ->assertJsonPath('data.0.party.id', $customer->id)
+        ->assertJsonPath('data.0.document_number', $order->order_number)
+        ->assertJsonPath('data.0.total', 100)
+        ->assertJsonPath('data.0.paid', 0)
+        ->assertJsonPath('data.0.balance', 100)
+        ->assertJsonPath('data.0.status', 'pending')
+        ->assertJsonPath('data.0.capabilities.can_register_receipt', true)
+        ->assertJsonPath('summary.balance', 100)
+        ->assertJsonPath('meta.total', 1);
+});
+
+it('filters receivable documents by invoice and person without exposing them to buyers', function () {
+    ['cashier' => $cashier, 'customer' => $customer, 'order' => $order] = accountsReceivableContext();
+    $buyer = User::factory()->create(['role' => 'buyer', 'is_active' => true]);
+
+    $this->actingAs($cashier)
+        ->getJson('/api/v1/accounts-receivable/documents?document_number='.urlencode($order->order_number).'&search='.urlencode($customer->name))
+        ->assertOk()
+        ->assertJsonCount(1, 'data');
+
+    $this->actingAs($cashier)
+        ->getJson('/api/v1/accounts-receivable/documents?document_number=NO-EXISTE')
+        ->assertOk()
+        ->assertJsonCount(0, 'data');
+
+    $this->actingAs($buyer)
+        ->getJson('/api/v1/accounts-receivable/documents')
+        ->assertForbidden();
+});
+
+it('records a bank receipt in the selected financial account without requiring an open cash session', function () {
+    ['cashier' => $cashier, 'customer' => $customer, 'order' => $order] = accountsReceivableContext();
+    createArPaymentMethod('transfer', 'Transferencia', 1);
+    $account = FinancialAccount::create([
+        'name' => 'Banco cobros',
+        'type' => 'bank',
+        'currency' => 'USD',
+        'opening_balance' => 100,
+        'current_balance' => 100,
+        'ledger_account_id' => LedgerAccount::query()->where('code', '1110')->firstOrFail()->id,
+        'created_by' => $cashier->id,
+    ]);
+
+    $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'amount' => 30,
+        'method' => 'transfer',
+        'financial_account_id' => $account->id,
+        'applications' => [
+            ['document_id' => $order->id, 'amount' => 30],
+        ],
+    ])->assertCreated();
+
+    expect((float) $account->fresh()->current_balance)->toBe(130.0)
+        ->and(AccountPaymentBatch::firstOrFail()->financial_account_id)->toBe($account->id)
+        ->and(FinancialAccountMovement::query()->where('financial_account_id', $account->id)->count())->toBe(1);
+});
 
 it('lists credit customer debt and removes it from pending list after full receipt', function () {
     ['warehouse' => $warehouse, 'cashier' => $cashier, 'customer' => $customer, 'order' => $order] = accountsReceivableContext();

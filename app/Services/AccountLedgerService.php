@@ -12,8 +12,10 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\Supplier;
+use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Collection as SupportCollection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -57,6 +59,32 @@ class AccountLedgerService
                 'total' => $customers->total(),
             ],
         ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function receivableDocuments(array $filters, User $user): array
+    {
+        $orders = SalesOrder::query()
+            ->with(['customer', 'payments.creator'])
+            ->when(! empty($filters['date_from']), fn ($query) => $query->whereDate('date', '>=', $filters['date_from']))
+            ->when(! empty($filters['date_to']), fn ($query) => $query->whereDate('date', '<=', $filters['date_to']))
+            ->when(! empty($filters['party_id']), fn ($query) => $query->where('customer_id', $filters['party_id']))
+            ->when(! empty($filters['search']), function ($query) use ($filters): void {
+                $search = '%'.trim((string) $filters['search']).'%';
+                $query->where(function ($query) use ($search): void {
+                    $query->where('order_number', 'LIKE', $search)
+                        ->orWhereHas('customer', fn ($query) => $query->where('name', 'LIKE', $search));
+                });
+            })
+            ->when(! empty($filters['document_number']), fn ($query) => $query->where('order_number', 'LIKE', '%'.trim((string) $filters['document_number']).'%'))
+            ->orderByDesc('date')
+            ->orderByDesc('id')
+            ->get()
+            ->map(fn (SalesOrder $order): array => $this->receivableDocumentRow($order, $user));
+
+        return $this->paginateFinancialDocuments($orders, $filters);
     }
 
     /**
@@ -122,9 +150,14 @@ class AccountLedgerService
             $amount = round((float) $data['amount'], 2);
             $applications = $this->normalizeCustomerApplications($customer, $data['applications'] ?? [], $amount);
             $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
-            $session = $this->openSessionForCurrentWarehouse();
+            $session = ! empty($data['pos_session_id'])
+                ? PosSession::query()
+                    ->where('user_id', Auth::id())
+                    ->where('status', 'open')
+                    ->find($data['pos_session_id'])
+                : $this->openSessionForCurrentWarehouse();
 
-            if (! $session) {
+            if (($data['method'] ?? null) === 'cash' && ! $session) {
                 throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar cobros.');
             }
 
@@ -133,7 +166,7 @@ class AccountLedgerService
             }
 
             $batch = $this->createPaymentBatch('customer', $customer->id, 'incoming', $amount, array_merge($data, [
-                'pos_session_id' => $session->id,
+                'pos_session_id' => $session?->id,
             ]));
 
             foreach ($applications as $application) {
@@ -144,6 +177,7 @@ class AccountLedgerService
                     notes: $data['notes'] ?? "Recibo {$batch->batch_number}",
                     paidAt: $data['paid_at'] ?? now(),
                     referenceNumber: $data['reference_number'] ?? $batch->batch_number,
+                    financialAccountId: $data['financial_account_id'] ?? null,
                 );
 
                 $batch->applications()->create([
@@ -217,6 +251,38 @@ class AccountLedgerService
     /**
      * @return array<string, mixed>
      */
+    public function payableDocuments(array $filters, User $user): array
+    {
+        $orders = PurchaseOrder::query()
+            ->whereNotNull('supplier_id')
+            ->with(['supplier', 'payments.user'])
+            ->when(! empty($filters['date_from']), fn ($query) => $query->whereDate('order_date', '>=', $filters['date_from']))
+            ->when(! empty($filters['date_to']), fn ($query) => $query->whereDate('order_date', '<=', $filters['date_to']))
+            ->when(! empty($filters['party_id']), fn ($query) => $query->where('supplier_id', $filters['party_id']))
+            ->when(! empty($filters['search']), function ($query) use ($filters): void {
+                $search = '%'.trim((string) $filters['search']).'%';
+                $query->where(function ($query) use ($search): void {
+                    $query->where('po_number', 'LIKE', $search)
+                        ->orWhere('supplier_invoice_number', 'LIKE', $search)
+                        ->orWhereHas('supplier', fn ($query) => $query->where('name', 'LIKE', $search));
+                });
+            })
+            ->when(! empty($filters['document_number']), function ($query) use ($filters): void {
+                $search = '%'.trim((string) $filters['document_number']).'%';
+                $query->where(fn ($query) => $query->where('po_number', 'LIKE', $search)
+                    ->orWhere('supplier_invoice_number', 'LIKE', $search));
+            })
+            ->orderByDesc('order_date')
+            ->orderByDesc('id')
+            ->get()
+            ->map(fn (PurchaseOrder $order): array => $this->payableDocumentRow($order, $user));
+
+        return $this->paginateFinancialDocuments($orders, $filters);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     public function supplierStatement(Supplier $supplier, array $filters = []): array
     {
         $documents = $this->openPurchaseOrders($supplier, $filters)
@@ -268,7 +334,7 @@ class AccountLedgerService
                 throw new \InvalidArgumentException('El monto aplicado excede el monto del pago.');
             }
 
-            if (! $session) {
+            if (($data['method'] ?? null) === 'cash' && ! $session) {
                 throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar pagos de compra.');
             }
 
@@ -291,7 +357,7 @@ class AccountLedgerService
             }
 
             $batch = $this->createPaymentBatch('supplier', $supplier->id, 'outgoing', $amount, array_merge($data, [
-                'pos_session_id' => $session->id,
+                'pos_session_id' => $session?->id,
                 'cash_movement_id' => $cashMovement?->id,
             ]));
 
@@ -302,6 +368,7 @@ class AccountLedgerService
                     $data['method'],
                     $data['reference_number'] ?? $batch->batch_number,
                     $data['notes'] ?? "Pago {$batch->batch_number}",
+                    $data['financial_account_id'] ?? null,
                 );
 
                 if (! empty($data['paid_at'])) {
@@ -309,7 +376,7 @@ class AccountLedgerService
                 }
 
                 $payment->update([
-                    'pos_session_id' => $session->id,
+                    'pos_session_id' => $session?->id,
                     'cash_movement_id' => $cashMovement?->id,
                 ]);
 
@@ -413,6 +480,7 @@ class AccountLedgerService
             'account_id' => $accountId,
             'pos_session_id' => $data['pos_session_id'] ?? null,
             'cash_movement_id' => $data['cash_movement_id'] ?? null,
+            'financial_account_id' => $data['financial_account_id'] ?? null,
             'direction' => $direction,
             'batch_number' => $this->nextBatchNumber($accountType),
             'amount' => $amount,
@@ -1183,5 +1251,184 @@ class AccountLedgerService
     private function supplierBalance(Supplier $supplier): float
     {
         return round((float) $this->openPurchaseOrders($supplier->fresh())->sum(fn (PurchaseOrder $order): float => (float) $order->amount_due), 2);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function receivableDocumentRow(SalesOrder $order, User $user): array
+    {
+        $total = round((float) $order->total, 2);
+        $paid = round((float) $order->payments->sum('amount'), 2);
+        $balance = $order->status === 'cancelled' ? 0.0 : round(max(0, $total - $paid), 2);
+        $dueDate = $this->salesOrderDueDate($order, $order->customer);
+        $status = $this->financialDocumentStatus($order->status, $order->payment_status, $paid, $balance, $dueDate);
+        $role = (string) $user->role;
+
+        return [
+            'id' => $order->id,
+            'document_type' => 'sales_order',
+            'date' => optional($order->date)->toDateString(),
+            'party' => [
+                'id' => $order->customer?->id,
+                'name' => $order->customer?->name ?? 'Cliente no asociado',
+                'type' => 'customer',
+            ],
+            'document_number' => $order->order_number,
+            'source_number' => $order->order_number,
+            'total' => $total,
+            'paid' => $paid,
+            'balance' => $balance,
+            'due_date' => $dueDate?->toDateString(),
+            'status' => $status,
+            'status_label' => $this->financialDocumentStatusLabel($status),
+            'detail_url' => "/sales-orders/{$order->id}",
+            'edit_url' => "/sales-orders/{$order->id}/edit",
+            'capabilities' => [
+                'can_edit' => in_array($role, ['admin', 'manager', 'seller'], true) && $order->canBeEdited(),
+                'can_delete' => in_array($role, ['admin', 'manager', 'seller'], true)
+                    && in_array($order->status, ['draft', 'cancelled'], true)
+                    && $order->payments->isEmpty(),
+                'can_cancel' => in_array($role, ['admin', 'manager', 'seller'], true) && $order->canBeCancelled(),
+                'can_register_receipt' => in_array($role, ['admin', 'manager', 'cashier'], true) && $balance > 0,
+                'can_register_payment' => false,
+            ],
+            'movements' => $order->payments->map(fn ($payment): array => [
+                'id' => $payment->id,
+                'amount' => round((float) $payment->amount, 2),
+                'method' => $payment->formatted_method,
+                'reference' => $payment->reference_number,
+                'notes' => $payment->notes,
+                'financial_account_id' => $payment->financial_account_id,
+                'occurred_at' => $payment->paid_at?->toIso8601String(),
+                'created_by' => $payment->creator?->name,
+            ])->values()->all(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function payableDocumentRow(PurchaseOrder $order, User $user): array
+    {
+        $total = round((float) $order->total, 2);
+        $paid = round((float) $order->payments->sum('amount'), 2);
+        $balance = $order->status === 'cancelled' ? 0.0 : round(max(0, $total - $paid), 2);
+        $dueDate = $order->due_date ? CarbonImmutable::parse($order->due_date) : null;
+        $status = $this->financialDocumentStatus($order->status, $order->payment_status, $paid, $balance, $dueDate);
+
+        return [
+            'id' => $order->id,
+            'document_type' => 'purchase_order',
+            'date' => optional($order->order_date)->toDateString(),
+            'party' => [
+                'id' => $order->supplier?->id,
+                'name' => $order->supplier?->name ?? 'Proveedor no asociado',
+                'type' => 'supplier',
+            ],
+            'document_number' => $order->supplier_invoice_number ?: $order->po_number,
+            'source_number' => $order->po_number,
+            'total' => $total,
+            'paid' => $paid,
+            'balance' => $balance,
+            'due_date' => $dueDate?->toDateString(),
+            'status' => $status,
+            'status_label' => $this->financialDocumentStatusLabel($status),
+            'detail_url' => "/purchase-orders/{$order->id}",
+            'edit_url' => "/purchase-orders/{$order->id}/edit",
+            'capabilities' => [
+                'can_edit' => $order->canBeEdited(),
+                'can_delete' => $order->canBeEdited() && $order->payments->isEmpty(),
+                'can_cancel' => $order->canBeCancelled(),
+                'can_register_receipt' => false,
+                'can_register_payment' => $balance > 0,
+            ],
+            'movements' => $order->payments->map(fn ($payment): array => [
+                'id' => $payment->id,
+                'amount' => round((float) $payment->amount, 2),
+                'method' => $payment->method_label,
+                'reference' => $payment->reference_number,
+                'notes' => $payment->notes,
+                'financial_account_id' => $payment->financial_account_id,
+                'occurred_at' => $payment->paid_at?->toIso8601String(),
+                'created_by' => $payment->user?->name,
+            ])->values()->all(),
+        ];
+    }
+
+    private function financialDocumentStatus(
+        string $documentStatus,
+        ?string $paymentStatus,
+        float $paid,
+        float $balance,
+        ?CarbonImmutable $dueDate
+    ): string {
+        if ($documentStatus === 'cancelled') {
+            return 'cancelled';
+        }
+
+        if ($paymentStatus === 'paid' || $balance <= 0) {
+            return 'settled';
+        }
+
+        if ($dueDate?->isPast()) {
+            return 'overdue';
+        }
+
+        return $paid > 0 || $paymentStatus === 'partial' ? 'partial' : 'pending';
+    }
+
+    private function financialDocumentStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'partial' => 'Parcial',
+            'overdue' => 'Vencido',
+            'settled' => 'Saldado',
+            'cancelled' => 'Anulado',
+            default => 'Pendiente',
+        };
+    }
+
+    /**
+     * @param  SupportCollection<int, array<string, mixed>>  $documents
+     * @return array<string, mixed>
+     */
+    private function paginateFinancialDocuments(SupportCollection $documents, array $filters): array
+    {
+        $status = (string) ($filters['status'] ?? 'open');
+        $filtered = $documents
+            ->when($status === 'open' || $status === '', fn (SupportCollection $rows) => $rows->whereIn('status', ['pending', 'partial', 'overdue']))
+            ->when(! in_array($status, ['', 'open', 'all'], true), fn (SupportCollection $rows) => $rows->where('status', $status))
+            ->values();
+
+        $summary = [
+            'total' => round((float) $filtered->sum('total'), 2),
+            'paid' => round((float) $filtered->sum('paid'), 2),
+            'balance' => round((float) $filtered->sum('balance'), 2),
+            'pending_documents' => $filtered->whereIn('status', ['pending', 'partial', 'overdue'])->count(),
+        ];
+        $perPage = min(100, max(10, (int) ($filters['per_page'] ?? 25)));
+        $lastPage = max(1, (int) ceil($filtered->count() / $perPage));
+        $currentPage = min($lastPage, max(1, (int) ($filters['page'] ?? 1)));
+
+        return [
+            'data' => $filtered->forPage($currentPage, $perPage)->values()->all(),
+            'summary' => $summary,
+            'meta' => [
+                'current_page' => $currentPage,
+                'last_page' => $lastPage,
+                'per_page' => $perPage,
+                'total' => $filtered->count(),
+            ],
+            'statuses' => [
+                'open' => 'Pendientes activos',
+                'all' => 'Todos',
+                'pending' => 'Pendiente',
+                'partial' => 'Parcial',
+                'overdue' => 'Vencido',
+                'settled' => 'Saldado',
+                'cancelled' => 'Anulado',
+            ],
+        ];
     }
 }

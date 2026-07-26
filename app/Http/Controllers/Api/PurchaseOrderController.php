@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\CancelPurchaseOrderRequest;
 use App\Models\PurchaseOrder;
 use App\Services\PurchaseOrderService;
 use App\Services\SmartReorderService;
@@ -256,10 +257,13 @@ class PurchaseOrderController extends Controller
      * POST /api/v1/purchase-orders/{id}/cancel
      * Cancel purchase order
      */
-    public function cancel(int $id): JsonResponse
+    public function cancel(CancelPurchaseOrderRequest $request, int $id): JsonResponse
     {
         try {
-            $order = $this->purchaseOrderService->cancel($id);
+            $order = $this->purchaseOrderService->cancel(
+                $id,
+                $request->validated('reason') ?? 'Anulación desde flujo operativo'
+            );
 
             return response()->json([
                 'message' => 'Orden de compra cancelada',

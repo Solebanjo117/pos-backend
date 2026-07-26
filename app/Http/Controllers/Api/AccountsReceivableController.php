@@ -22,6 +22,14 @@ class AccountsReceivableController extends Controller
         ));
     }
 
+    public function documents(Request $request): JsonResponse
+    {
+        return response()->json($this->accountLedgerService->receivableDocuments(
+            $request->only(['search', 'document_number', 'party_id', 'status', 'per_page', 'page', 'date_from', 'date_to']),
+            $request->user()
+        ));
+    }
+
     public function statement(Request $request, Customer $customer): JsonResponse
     {
         return response()->json([

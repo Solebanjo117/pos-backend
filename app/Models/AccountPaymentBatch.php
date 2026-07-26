@@ -25,6 +25,7 @@ class AccountPaymentBatch extends Model
         'paid_at',
         'created_by',
         'business_datetime',
+        'financial_account_id',
     ];
 
     protected $casts = [

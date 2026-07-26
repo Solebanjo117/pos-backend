@@ -2,6 +2,9 @@
 
 use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
+use App\Models\FinancialAccount;
+use App\Models\FinancialAccountMovement;
+use App\Models\LedgerAccount;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\PurchaseOrder;
@@ -60,6 +63,65 @@ function createApPaymentMethod(string $code, string $name, int $sortOrder): void
         'sort_order' => $sortOrder,
     ]);
 }
+
+it('lists payable documents with invoice fallback and capabilities', function () {
+    ['buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
+
+    $this->actingAs($buyer)
+        ->getJson('/api/v1/accounts-payable/documents?status=open')
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $purchaseOrder->id)
+        ->assertJsonPath('data.0.party.id', $supplier->id)
+        ->assertJsonPath('data.0.document_number', $purchaseOrder->po_number)
+        ->assertJsonPath('data.0.total', 120)
+        ->assertJsonPath('data.0.paid', 0)
+        ->assertJsonPath('data.0.balance', 120)
+        ->assertJsonPath('data.0.status', 'pending')
+        ->assertJsonPath('data.0.capabilities.can_register_payment', true)
+        ->assertJsonPath('summary.balance', 120)
+        ->assertJsonPath('meta.total', 1);
+});
+
+it('filters payable documents and keeps seller access forbidden', function () {
+    ['buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
+    $seller = User::factory()->create(['role' => 'seller', 'is_active' => true]);
+
+    $this->actingAs($buyer)
+        ->getJson('/api/v1/accounts-payable/documents?document_number='.urlencode($purchaseOrder->po_number).'&search='.urlencode($supplier->name))
+        ->assertOk()
+        ->assertJsonCount(1, 'data');
+
+    $this->actingAs($seller)
+        ->getJson('/api/v1/accounts-payable/documents')
+        ->assertForbidden();
+});
+
+it('records a bank payment from the selected financial account without requiring an open cash session', function () {
+    ['buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
+    createApPaymentMethod('transfer', 'Transferencia', 1);
+    $account = FinancialAccount::create([
+        'name' => 'Banco pagos',
+        'type' => 'bank',
+        'currency' => 'USD',
+        'opening_balance' => 200,
+        'current_balance' => 200,
+        'ledger_account_id' => LedgerAccount::query()->where('code', '1110')->firstOrFail()->id,
+        'created_by' => $buyer->id,
+    ]);
+
+    $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
+        'amount' => 30,
+        'method' => 'transfer',
+        'financial_account_id' => $account->id,
+        'applications' => [
+            ['document_id' => $purchaseOrder->id, 'amount' => 30],
+        ],
+    ])->assertCreated();
+
+    expect((float) $account->fresh()->current_balance)->toBe(170.0)
+        ->and(AccountPaymentBatch::firstOrFail()->financial_account_id)->toBe($account->id)
+        ->and(FinancialAccountMovement::query()->where('financial_account_id', $account->id)->count())->toBe(1);
+});
 
 it('records partial and full accounts payable payments from supplier account', function () {
     ['warehouse' => $warehouse, 'buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
@@ -148,12 +210,12 @@ it('rejects non real accounts payable payment methods', function (string $method
         ->and($purchaseOrder->fresh()->payment_status)->toBe('pending');
 })->with(['credit', 'store_credit', 'supplier_credit']);
 
-it('requires an open cash session before recording real accounts payable payment', function () {
+it('requires an open cash session before recording a cash accounts payable payment', function () {
     ['buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
 
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 10,
-        'method' => 'transfer',
+        'method' => 'cash',
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 10],
         ],
