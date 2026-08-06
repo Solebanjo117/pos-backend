@@ -1145,7 +1145,7 @@ class ReportService
                 ];
             }
 
-            $timeline[$date]['operational_expenses'] = $expenseDay['amount'];
+            $timeline[$date]['operational_expenses'] = ($timeline[$date]['operational_expenses'] ?? 0) + $expenseDay['amount'];
         }
 
         // Recalculate profit per timeline day
@@ -1196,13 +1196,26 @@ class ReportService
         $summary = $financialReport['summary'];
         $expenses = $financialReport['operational_expenses'];
         $creditBalances = $this->financialCreditBalances(array_merge($filters, ['as_of' => true]));
+        $reconciliation = $financialReport['reconciliation'] ?? [
+            'gross_sales_ex_tax' => round((float) $summary['total_revenue'] + (float) $summary['total_discounts'], 2),
+            'discounts' => round((float) $summary['total_discounts'], 2),
+            'returns_ex_tax' => round((float) $summary['total_refunds'], 2),
+            'net_sales_ex_tax' => round((float) $summary['total_revenue'] - (float) $summary['total_refunds'], 2),
+            'tax_collected' => round((float) $summary['total_tax'], 2),
+            'gross_cogs' => round((float) ($summary['gross_cogs'] ?? $summary['total_cogs']), 2),
+            'return_cogs' => round((float) ($summary['return_cogs'] ?? 0), 2),
+            'net_cogs' => round((float) $summary['total_cogs'], 2),
+            'gross_profit' => round((float) $summary['gross_profit'], 2),
+            'operational_expenses' => round((float) $summary['total_operational_expenses'], 2),
+            'net_income' => round((float) $summary['net_profit'], 2),
+        ];
 
-        $incomeTotal = (float) $summary['total_revenue'] - (float) $summary['total_refunds'];
-        $costTotal = (float) $summary['total_cogs'];
-        $grossSales = (float) $summary['total_revenue'] + (float) $summary['total_discounts'];
-        $grossCogs = (float) ($summary['gross_cogs'] ?? $summary['total_cogs']);
-        $returnCogs = (float) ($summary['return_cogs'] ?? 0);
-        $operationalExpenseTotal = (float) $summary['total_operational_expenses'];
+        $incomeTotal = (float) $reconciliation['net_sales_ex_tax'];
+        $costTotal = (float) $reconciliation['net_cogs'];
+        $grossSales = (float) $reconciliation['gross_sales_ex_tax'];
+        $grossCogs = (float) $reconciliation['gross_cogs'];
+        $returnCogs = (float) $reconciliation['return_cogs'];
+        $operationalExpenseTotal = (float) $reconciliation['operational_expenses'];
 
         return [
             'basis' => $basis,
@@ -1212,17 +1225,20 @@ class ReportService
                 'warehouse_id' => $filters['warehouse_id'] ?? null,
             ],
             'summary' => $summary,
+            'reconciliation' => $reconciliation,
             'sections' => [
                 [
                     'key' => 'income',
                     'label' => 'Ingresos',
                     'amount' => round($incomeTotal, 2),
                     'rows' => [
-                        $this->statementRow('gross-sales', 'Ventas brutas', $grossSales, 'income', 'Ventas antes de descuentos y devoluciones.'),
-                        $this->statementRow('discounts', 'Descuentos', -1 * (float) $summary['total_discounts'], 'expense', 'Descuentos aplicados a las lineas vendidas.'),
-                        $this->statementRow('approved-refunds', 'Devoluciones / notas de credito', -1 * (float) $summary['total_refunds'], 'expense', 'Contra-ingreso del periodo.'),
-                        $this->statementRow('net-sales', 'Ventas netas', $incomeTotal, 'profit', 'Ventas brutas menos descuentos y devoluciones.'),
-                        $this->statementRow('tax-collected', 'ITBM cobrado', (float) $summary['total_tax'], 'neutral', 'Informativo; no altera utilidad neta.'),
+                        $this->statementRow('gross-sales', 'Subtotal', $grossSales, 'income', 'Ventas antes de descuentos, devoluciones e ITBMS.'),
+                        $this->statementRow('discounts', 'Descuentos', -1 * (float) $reconciliation['discounts'], 'expense', 'Descuentos aplicados a las lineas vendidas.'),
+                        $this->statementRow('approved-refunds', 'Devoluciones / notas de credito', -1 * (float) $reconciliation['returns_ex_tax'], 'expense', 'Contra-ingreso sin ITBMS del periodo.'),
+                        ...((float) ($reconciliation['sales_adjustments'] ?? 0) !== 0.0 ? [
+                            $this->statementRow('sales-adjustments', 'Ajustes de ventas', (float) $reconciliation['sales_adjustments'], 'income', 'Correcciones contables autorizadas; no crean facturas.'),
+                        ] : []),
+                        $this->statementRow('tax-collected', 'ITBMS cobrado', (float) $reconciliation['tax_collected'], 'neutral', 'Informativo; no esta incluido en Sales ni altera la utilidad neta.', false),
                     ],
                 ],
                 [
@@ -1232,16 +1248,13 @@ class ReportService
                     'rows' => [
                         $this->statementRow('gross-cogs', 'Costo de productos vendidos', $grossCogs, 'expense', 'Costo registrado en lineas vendidas.'),
                         $this->statementRow('return-cogs', 'Reversion por devoluciones', -1 * $returnCogs, 'income', 'Costo reintegrado al inventario por devoluciones aprobadas.'),
-                        $this->statementRow('net-cogs', 'Costo neto', $costTotal, 'expense', 'Costo vendido menos reversiones por devolucion.'),
                     ],
                 ],
                 [
                     'key' => 'gross-profit',
                     'label' => 'Utilidad bruta',
-                    'amount' => (float) $summary['gross_profit'],
-                    'rows' => [
-                        $this->statementRow('gross-profit-total', 'Utilidad bruta', (float) $summary['gross_profit'], 'profit', 'Ingresos cobrados menos costo y devoluciones.'),
-                    ],
+                    'amount' => (float) $reconciliation['gross_profit'],
+                    'rows' => [],
                 ],
                 [
                     'key' => 'operational-expenses',
@@ -1286,10 +1299,8 @@ class ReportService
                 [
                     'key' => 'net-profit',
                     'label' => 'Utilidad neta',
-                    'amount' => (float) $summary['net_profit'],
-                    'rows' => [
-                        $this->statementRow('net-profit-total', 'Utilidad neta', (float) $summary['net_profit'], 'profit', 'Resultado despues de gastos operativos.'),
-                    ],
+                    'amount' => (float) $reconciliation['net_income'],
+                    'rows' => [],
                 ],
             ],
             'timeline' => $financialReport['timeline'],
@@ -1300,6 +1311,7 @@ class ReportService
                 ? $this->previousPeriodComparison($filters, $basis)
                 : null,
             'breakdowns' => $this->financialBreakdowns($filters),
+            'warnings' => $financialReport['warnings'] ?? [],
         ];
     }
 
@@ -1384,15 +1396,32 @@ class ReportService
         ];
     }
 
-    private function statementRow(string $key, string $label, float $amount, string $type, ?string $detail = null): array
-    {
+    private function statementRow(
+        string $key,
+        string $label,
+        float $amount,
+        string $type,
+        ?string $detail = null,
+        bool $includedInSectionTotal = true,
+    ): array {
         return [
             'key' => $key,
             'label' => $label,
             'amount' => round($amount, 2),
             'type' => $type,
             'detail' => $detail,
+            'included_in_section_total' => $includedInSectionTotal,
         ];
+    }
+
+    private function moneyToCents(mixed $amount): int
+    {
+        return (int) round((float) $amount * 100, 0, PHP_ROUND_HALF_UP);
+    }
+
+    private function centsToMoney(int $amount): float
+    {
+        return round($amount / 100, 2);
     }
 
     private function currentOperationalCash(?int $warehouseId = null): float
@@ -1449,10 +1478,10 @@ class ReportService
             ->get();
 
         $timeline = [];
-        $totalRevenue = 0.0;
-        $totalCogs = 0.0;
-        $totalTax = 0.0;
-        $totalDiscounts = 0.0;
+        $subtotalCents = 0;
+        $totalCogsCents = 0;
+        $totalTaxCents = 0;
+        $totalDiscountsCents = 0;
 
         foreach ($orders as $order) {
             $date = $order->date->format('Y-m-d');
@@ -1466,15 +1495,19 @@ class ReportService
             ];
 
             $items = $warehouseId ? $order->items->where('warehouse_id', $warehouseId) : $order->items;
-            $orderRevenue = (float) $items->sum('total');
-            $orderCogs = (float) $items->sum(fn ($item): float => (float) $item->unit_cost * (int) $item->quantity);
+            $orderSubtotalCents = (int) $items->sum(fn ($item): int => $this->moneyToCents($item->subtotal));
+            $orderDiscountsCents = (int) $items->sum(fn ($item): int => $this->moneyToCents($item->discount_amount));
+            $orderTaxCents = (int) $items->sum(fn ($item): int => $this->moneyToCents($item->tax_amount));
+            $orderCogsCents = (int) $items->sum(
+                fn ($item): int => $this->moneyToCents((float) $item->unit_cost * (int) $item->quantity)
+            );
 
-            $totalRevenue += $orderRevenue;
-            $totalCogs += $orderCogs;
-            $totalTax += (float) $items->sum('tax_amount');
-            $totalDiscounts += (float) $items->sum('discount_amount');
-            $timeline[$date]['revenue'] += $orderRevenue;
-            $timeline[$date]['cogs'] += $orderCogs;
+            $subtotalCents += $orderSubtotalCents;
+            $totalCogsCents += $orderCogsCents;
+            $totalTaxCents += $orderTaxCents;
+            $totalDiscountsCents += $orderDiscountsCents;
+            $timeline[$date]['revenue'] += $this->centsToMoney($orderSubtotalCents);
+            $timeline[$date]['cogs'] += $this->centsToMoney($orderCogsCents);
             $timeline[$date]['orders_count'] += 1;
         }
 
@@ -1495,11 +1528,56 @@ class ReportService
         }
 
         $refunds = $refundsQuery->get();
-        $totalRefunds = (float) $refunds->sum('total_amount');
-        $refundCogs = (float) $refunds->sum(fn (SalesReturn $return): float => $this->salesReturnCogs($return));
+        $returnSubtotalCents = 0;
+        $returnTaxCents = 0;
+        $refundCogsCents = 0;
+        $warnings = [];
+
+        foreach ($refunds as $return) {
+            $amounts = $this->salesReturnIncomeAmounts($return);
+            $returnSubtotalCents += $amounts['subtotal_cents'];
+            $returnTaxCents += $amounts['tax_cents'];
+            $refundCogsCents += $this->moneyToCents($this->salesReturnCogs($return));
+
+            if ($amounts['legacy_tax_unknown']) {
+                $warnings[] = [
+                    'code' => 'legacy_return_tax_unknown',
+                    'message' => 'Una devolucion historica no tiene lineas suficientes para separar su ITBMS; se conservo el total como contra-ingreso.',
+                    'return_id' => $return->id,
+                ];
+            }
+        }
+
         $this->applyRefundsToFinancialTimeline($timeline, $refunds);
         $expenses = $this->financialOperationalExpenses($filters);
-        $totalOperationalExpenses = (float) $expenses['total'];
+        $reportAdjustments = FinancialAdjustment::query()
+            ->whereIn('type', [FinancialAdjustment::TYPE_SALES, FinancialAdjustment::TYPE_EXPENSES])
+            ->whereBetween('adjustment_date', [$filters['date_from'], $filters['date_to']])
+            ->when($warehouseId, fn ($query) => $query->where(fn ($scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
+            ->get(['type', 'direction', 'amount', 'adjustment_date']);
+        $salesAdjustmentCents = (int) $reportAdjustments
+            ->where('type', FinancialAdjustment::TYPE_SALES)
+            ->sum(fn (FinancialAdjustment $adjustment): int => $this->moneyToCents($adjustment->signedAmount()));
+        $expenseAdjustmentCents = (int) $reportAdjustments
+            ->where('type', FinancialAdjustment::TYPE_EXPENSES)
+            ->sum(fn (FinancialAdjustment $adjustment): int => $this->moneyToCents($adjustment->signedAmount()));
+        $totalOperationalExpenseCents = $this->moneyToCents($expenses['total']) + $expenseAdjustmentCents;
+
+        foreach ($reportAdjustments as $adjustment) {
+            $date = $adjustment->adjustment_date?->format('Y-m-d');
+            if (! $date) {
+                continue;
+            }
+            $timeline[$date] ??= [
+                'date' => $date, 'revenue' => 0, 'cogs' => 0, 'profit' => 0,
+                'orders_count' => 0, 'operational_expenses' => 0,
+            ];
+            if ($adjustment->type === FinancialAdjustment::TYPE_SALES) {
+                $timeline[$date]['revenue'] += $adjustment->signedAmount();
+            } else {
+                $timeline[$date]['operational_expenses'] += $adjustment->signedAmount();
+            }
+        }
 
         foreach ($expenses['timeline'] as $expenseDay) {
             $date = $expenseDay['date'];
@@ -1511,7 +1589,7 @@ class ReportService
                 'orders_count' => 0,
                 'operational_expenses' => 0,
             ];
-            $timeline[$date]['operational_expenses'] = $expenseDay['amount'];
+            $timeline[$date]['operational_expenses'] = ($timeline[$date]['operational_expenses'] ?? 0) + $expenseDay['amount'];
         }
 
         foreach ($timeline as &$dayData) {
@@ -1521,33 +1599,63 @@ class ReportService
         unset($dayData);
         ksort($timeline);
 
-        $netCogs = $totalCogs - $refundCogs;
-        $grossProfit = $totalRevenue - $netCogs - $totalRefunds;
-        $netProfit = $grossProfit - $totalOperationalExpenses;
-        $margin = $totalRevenue > 0 ? ($netProfit / $totalRevenue) * 100 : 0;
+        $grossSalesCents = $subtotalCents + $totalDiscountsCents;
+        $netSalesCents = $subtotalCents - $returnSubtotalCents + $salesAdjustmentCents;
+        $netTaxCents = $totalTaxCents - $returnTaxCents;
+        $netCogsCents = $totalCogsCents - $refundCogsCents;
+        $grossProfitCents = $netSalesCents - $netCogsCents;
+        $netIncomeCents = $grossProfitCents - $totalOperationalExpenseCents;
+        $netSales = $this->centsToMoney($netSalesCents);
+        $margin = $netSalesCents !== 0 ? ($netIncomeCents / $netSalesCents) * 100 : 0;
+
+        $reconciliation = [
+            'gross_sales_ex_tax' => $this->centsToMoney($grossSalesCents),
+            'discounts' => $this->centsToMoney($totalDiscountsCents),
+            'returns_ex_tax' => $this->centsToMoney($returnSubtotalCents),
+            'net_sales_ex_tax' => $netSales,
+            'tax_collected' => $this->centsToMoney($netTaxCents),
+            'gross_cogs' => $this->centsToMoney($totalCogsCents),
+            'return_cogs' => $this->centsToMoney($refundCogsCents),
+            'net_cogs' => $this->centsToMoney($netCogsCents),
+            'gross_profit' => $this->centsToMoney($grossProfitCents),
+            'operational_expenses' => $this->centsToMoney($totalOperationalExpenseCents),
+            'net_income' => $this->centsToMoney($netIncomeCents),
+            'sales_adjustments' => $this->centsToMoney($salesAdjustmentCents),
+            'expense_adjustments' => $this->centsToMoney($expenseAdjustmentCents),
+        ];
 
         return [
             'summary' => [
-                'total_revenue' => round($totalRevenue, 2),
-                'total_cogs' => round($netCogs, 2),
-                'gross_cogs' => round($totalCogs, 2),
-                'return_cogs' => round($refundCogs, 2),
-                'total_refunds' => round($totalRefunds, 2),
-                'total_operational_expenses' => round($totalOperationalExpenses, 2),
-                'gross_profit' => round($grossProfit, 2),
-                'net_profit' => round($netProfit, 2),
+                'total_revenue' => $reconciliation['net_sales_ex_tax'],
+                'total_cogs' => $reconciliation['net_cogs'],
+                'gross_cogs' => $reconciliation['gross_cogs'],
+                'return_cogs' => $reconciliation['return_cogs'],
+                'total_refunds' => $reconciliation['returns_ex_tax'],
+                'total_operational_expenses' => $reconciliation['operational_expenses'],
+                'gross_profit' => $reconciliation['gross_profit'],
+                'net_profit' => $reconciliation['net_income'],
                 'margin_percentage' => round($margin, 2),
-                'total_tax' => round($totalTax, 2),
-                'total_discounts' => round($totalDiscounts, 2),
+                'total_tax' => $reconciliation['tax_collected'],
+                'total_discounts' => $reconciliation['discounts'],
                 'orders_count' => $orders->count(),
             ],
+            'reconciliation' => $reconciliation,
             'timeline' => array_values($timeline),
             'operational_expenses' => [
-                'total' => round($totalOperationalExpenses, 2),
-                'by_category' => $expenses['by_category'],
+                'total' => $reconciliation['operational_expenses'],
+                'by_category' => collect($expenses['by_category'])
+                    ->when($expenseAdjustmentCents !== 0, fn ($categories) => $categories->push([
+                        'category' => 'financial_adjustments',
+                        'label' => 'Ajustes financieros',
+                        'amount' => $this->centsToMoney($expenseAdjustmentCents),
+                        'count' => $reportAdjustments->where('type', FinancialAdjustment::TYPE_EXPENSES)->count(),
+                    ]))
+                    ->values()
+                    ->all(),
                 'timeline' => $expenses['timeline'],
             ],
             'credit_balances' => $this->financialCreditBalances($filters),
+            'warnings' => $warnings,
         ];
     }
 
@@ -1882,6 +1990,37 @@ class ReportService
         ), 2);
     }
 
+    /** @return array{subtotal_cents: int, tax_cents: int, legacy_tax_unknown: bool} */
+    private function salesReturnIncomeAmounts(SalesReturn $return): array
+    {
+        $totalCents = $this->moneyToCents($return->total_amount);
+        $subtotalCents = (int) $return->items->sum(
+            fn ($item): int => $this->moneyToCents($item->subtotal)
+        );
+
+        if ($return->items->isEmpty()) {
+            return [
+                'subtotal_cents' => $totalCents,
+                'tax_cents' => 0,
+                'legacy_tax_unknown' => $totalCents !== 0,
+            ];
+        }
+
+        if ($totalCents <= 0) {
+            return [
+                'subtotal_cents' => $subtotalCents,
+                'tax_cents' => 0,
+                'legacy_tax_unknown' => false,
+            ];
+        }
+
+        return [
+            'subtotal_cents' => $subtotalCents,
+            'tax_cents' => max(0, $totalCents - $subtotalCents),
+            'legacy_tax_unknown' => false,
+        ];
+    }
+
     /**
      * @param  array<string, array<string, mixed>>  $timeline
      * @param  Collection<int, SalesReturn>  $refunds
@@ -1891,7 +2030,9 @@ class ReportService
         foreach ($refunds as $return) {
             $date = $this->salesReturnImpactDate($return);
             $timeline[$date] ??= $this->emptyFinancialTimelineDay($date);
-            $timeline[$date]['revenue'] -= (float) $return->total_amount;
+            $timeline[$date]['revenue'] -= $this->centsToMoney(
+                $this->salesReturnIncomeAmounts($return)['subtotal_cents']
+            );
             $timeline[$date]['cogs'] -= $this->salesReturnCogs($return);
         }
     }
@@ -1927,7 +2068,9 @@ class ReportService
             ->whereDate('expense_date', '<=', $filters['date_to'])
             ->where(fn ($query) => $query
                 ->where('affects_income_statement', true)
-                ->orWhereNull('affects_income_statement'));
+                ->orWhereNull('affects_income_statement'))
+            ->whereIn('status', ['pending', 'scheduled', 'queued', 'paid'])
+            ->where('amount', '>', 0);
 
         if ($warehouseId) {
             $query->where(function ($query) use ($warehouseId): void {
@@ -1938,23 +2081,43 @@ class ReportService
 
         $expenses = $query->orderBy('expense_date')->get();
 
-        return [
-            'total' => round((float) $expenses->sum('amount'), 2),
-            'by_category' => $expenses
-                ->groupBy('category')
-                ->map(function ($items, $category): array {
-                    $first = $items->first();
+        $byCategory = $expenses
+            ->groupBy(function (OperationalExpense $expense): string {
+                if ($expense->categoryRecord) {
+                    return (string) $expense->categoryRecord->slug;
+                }
 
-                    return [
-                        'category' => $category,
-                        'label' => $first?->category_label ?? OperationalExpense::CATEGORIES[$category] ?? $category,
-                        'amount' => round((float) $items->sum('amount'), 2),
-                        'count' => $items->count(),
-                    ];
-                })
-                ->sortBy('category')
-                ->values()
-                ->all(),
+                return array_key_exists((string) $expense->category, OperationalExpense::CATEGORIES)
+                    ? (string) $expense->category
+                    : 'other';
+            })
+            ->map(function ($items, string $category): array {
+                /** @var OperationalExpense|null $first */
+                $first = $items->first();
+                $label = $category === 'other'
+                    ? 'Others'
+                    : ($first?->categoryRecord?->name ?? OperationalExpense::CATEGORIES[$category] ?? $category);
+
+                return [
+                    'category' => $category,
+                    'label' => $label,
+                    'amount' => $this->centsToMoney((int) $items->sum(
+                        fn (OperationalExpense $expense): int => $this->moneyToCents($expense->amount)
+                    )),
+                    'count' => $items->count(),
+                ];
+            })
+            ->sortBy(fn (array $category): string => $category['category'] === 'other'
+                ? 'zzzzzzzzzz-other'
+                : $category['category'])
+            ->values()
+            ->all();
+
+        return [
+            'total' => $this->centsToMoney((int) $expenses->sum(
+                fn (OperationalExpense $expense): int => $this->moneyToCents($expense->amount)
+            )),
+            'by_category' => $byCategory,
             'by_party' => $expenses
                 ->groupBy(fn (OperationalExpense $expense): string => ($expense->party['type'] ?? 'none').':'.($expense->party['id'] ?? 0))
                 ->map(function ($items): array {
@@ -2469,84 +2632,26 @@ class ReportService
     public function generateExpenseBreakdown(array $filters): array
     {
         $expenses = $this->financialOperationalExpenses($filters);
-        $byCategory = collect($expenses['by_category'])->keyBy('category');
-
-        $groups = [
-            'rent' => ['label' => 'Rent', 'categories' => ['rent']],
-            'salary' => ['label' => 'Salary', 'categories' => ['payroll']],
-            'utilities' => ['label' => 'Utilities', 'categories' => ['utilities', 'electricity']],
-            'internet' => ['label' => 'Internet', 'categories' => ['software']],
-        ];
-
-        $mapped = collect($groups)
-            ->map(fn (array $group, string $key): array => [
-                'label' => $group['label'],
-                'amount' => round((float) collect($group['categories'])->sum(fn (string $category): float => (float) ($byCategory[$category]['amount'] ?? 0)), 2),
-                'expense_group' => $key,
+        $byCategory = collect($expenses['by_category']);
+        $other = $byCategory->firstWhere('category', 'other');
+        $items = $byCategory
+            ->reject(fn (array $category): bool => $category['category'] === 'other')
+            ->map(fn (array $category): array => [
+                'label' => $category['label'],
+                'amount' => (float) $category['amount'],
+                'expense_category' => $category['category'],
             ])
             ->values();
-
-        $mappedKeys = collect($groups)->flatMap(fn (array $group): array => $group['categories'])->all();
-        $customItems = $byCategory
-            ->filter(fn ($item, $key): bool => ! in_array($key, $mappedKeys, true) && $key !== 'other')
-            ->filter(fn (array $item): bool => abs((float) ($item['amount'] ?? 0)) > 0.005)
-            ->map(fn (array $item, string $key): array => [
-                'label' => $item['label'] ?? $key,
-                'amount' => round((float) ($item['amount'] ?? 0), 2),
-                'expense_category' => $key,
-            ])
-            ->values();
-
-        $otherTotal = round((float) ($byCategory['other']['amount'] ?? 0), 2);
-        $items = $mapped->concat($customItems)->values();
 
         return [
             'items' => $items->all(),
-            'other' => ['label' => 'Otros', 'amount' => $otherTotal, 'expense_category' => 'other'],
-            'total' => round((float) $items->sum('amount') + $otherTotal, 2),
+            'other' => [
+                'label' => 'Others',
+                'amount' => (float) ($other['amount'] ?? 0),
+                'expense_category' => 'other',
+            ],
+            'total' => (float) $expenses['total'],
         ];
-    }
-
-    public function storeFinancialAdjustment(array $data, ?int $userId = null): array
-    {
-        $adjustment = FinancialAdjustment::create([
-            'warehouse_id' => $data['warehouse_id'] ?? null,
-            'user_id' => $userId,
-            'type' => $data['type'],
-            'amount' => (float) $data['amount'],
-            'reason' => $data['reason'],
-            'adjustment_date' => $data['adjustment_date'],
-            'notes' => $data['notes'] ?? null,
-        ]);
-
-        return $adjustment->toArray();
-    }
-
-    public function listFinancialAdjustments(array $filters): array
-    {
-        $warehouseId = $filters['warehouse_id'] ?? null;
-        $dateFrom = $filters['date_from'] ?? null;
-        $dateTo = $filters['date_to'] ?? null;
-
-        $query = FinancialAdjustment::query()
-            ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))
-            ->when($dateFrom, fn ($q) => $q->whereDate('adjustment_date', '>=', $dateFrom))
-            ->when($dateTo, fn ($q) => $q->whereDate('adjustment_date', '<=', $dateTo))
-            ->orderByDesc('adjustment_date')
-            ->orderByDesc('id');
-
-        return $query->get()->map(fn (FinancialAdjustment $adj): array => [
-            'id' => $adj->id,
-            'type' => $adj->type,
-            'type_label' => $adj->type_label,
-            'amount' => (float) $adj->amount,
-            'reason' => $adj->reason,
-            'adjustment_date' => $adj->adjustment_date?->toDateString(),
-            'business_datetime' => $adj->business_datetime?->toIso8601String(),
-            'created_at' => $adj->created_at?->toIso8601String(),
-            'notes' => $adj->notes,
-            'warehouse_id' => $adj->warehouse_id,
-        ])->all();
     }
 
     private function emptyDailyRow(string $date): array
@@ -2767,7 +2872,7 @@ class ReportService
                 continue;
             }
 
-            $amount = (float) $adjustment->amount;
+            $amount = $adjustment->signedAmount();
 
             match ($adjustment->type) {
                 FinancialAdjustment::TYPE_CASH => $days[$date]['cash'] = round($days[$date]['cash'] + $amount, 2),
@@ -2798,7 +2903,8 @@ class ReportService
         return round((float) FinancialAdjustment::query()
             ->where('type', $type)
             ->when($warehouseId, fn ($q) => $q->where(fn ($q) => $q->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
-            ->sum('amount'), 2);
+            ->get(['amount', 'direction'])
+            ->sum(fn (FinancialAdjustment $adjustment): float => $adjustment->signedAmount()), 2);
     }
 
     private function salesOrderWarehouseRatioForReport(SalesOrder $order, int $warehouseId): float

@@ -181,7 +181,13 @@ class SalesOrder extends Model
             : (float) $this->payments()->where('method', 'store_credit')->sum('amount');
 
         // Amount still owed
-        return max(0, $effectiveTotal - $this->amount_paid - $storeCreditApplied);
+        $adjustments = (float) FinancialAdjustment::query()
+            ->where('sales_order_id', $this->id)
+            ->where('is_legacy', false)
+            ->get(['amount', 'direction'])
+            ->sum(fn (FinancialAdjustment $adjustment): float => $adjustment->signedAmount());
+
+        return max(0, $effectiveTotal - $this->amount_paid - $storeCreditApplied + $adjustments);
     }
 
     public function getTotalReturnedAttribute(): float

@@ -289,6 +289,75 @@ class InventoryFifoService
         });
     }
 
+    public function reverseInboundMovement(InventoryMovement $inboundMovement, array $data = []): ?InventoryMovement
+    {
+        return DB::transaction(function () use ($inboundMovement, $data): ?InventoryMovement {
+            $lots = $inboundMovement->sourceLots()
+                ->lockForUpdate()
+                ->orderByDesc('received_at')
+                ->orderByDesc('id')
+                ->get();
+            $quantityToReverse = (int) $inboundMovement->quantity;
+
+            if ($quantityToReverse <= 0) {
+                return null;
+            }
+
+            if ((int) $lots->sum('quantity_available') < $quantityToReverse) {
+                throw new \InvalidArgumentException('No se puede revertir el ajuste porque parte de ese lote ya fue consumida.');
+            }
+
+            $quantityBefore = $this->aggregateQuantity(
+                $inboundMovement->product_id,
+                $inboundMovement->variant_id,
+                $inboundMovement->warehouse_id,
+            );
+            $movement = InventoryMovement::create([
+                'movement_type' => 'out',
+                'reason' => $data['reason'] ?? 'financial_adjustment_reversal',
+                'product_id' => $inboundMovement->product_id,
+                'variant_id' => $inboundMovement->variant_id,
+                'warehouse_id' => $inboundMovement->warehouse_id,
+                'quantity' => $quantityToReverse,
+                'quantity_before' => $quantityBefore,
+                'quantity_after' => $quantityBefore - $quantityToReverse,
+                'reference_type' => $data['reference_type'] ?? 'financial_adjustment_reversal',
+                'reference_id' => $data['reference_id'] ?? $inboundMovement->reference_id,
+                'notes' => $data['notes'] ?? null,
+                'user_id' => $data['user_id'] ?? Auth::id(),
+                'business_datetime' => $data['business_datetime'] ?? now(),
+            ]);
+
+            $remaining = $quantityToReverse;
+            foreach ($lots as $lot) {
+                if ($remaining <= 0) {
+                    break;
+                }
+
+                $quantityFromLot = min($remaining, (int) $lot->quantity_available);
+                $lot->decrement('quantity_available', $quantityFromLot);
+                InventoryLotAllocation::create([
+                    'inventory_lot_id' => $lot->id,
+                    'inventory_movement_id' => $movement->id,
+                    'quantity' => $quantityFromLot,
+                    'unit_cost' => $lot->landed_unit_cost,
+                    'total_cost' => round($quantityFromLot * (float) $lot->landed_unit_cost, 4),
+                ]);
+                $remaining -= $quantityFromLot;
+            }
+
+            $this->subtractAggregateStock(
+                $inboundMovement->product_id,
+                $inboundMovement->variant_id,
+                $inboundMovement->warehouse_id,
+                $quantityToReverse,
+                false,
+            );
+
+            return $movement;
+        });
+    }
+
     public function restoreFromOutboundMovement(InventoryMovement $outboundMovement, array $data = []): ?InventoryMovement
     {
         $quantity = (int) $outboundMovement->lotAllocations()->sum('quantity');
@@ -373,6 +442,7 @@ class InventoryFifoService
                 'reference_id' => $data['reference_id'] ?? $firstMovement->reference_id,
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? Auth::id(),
+                'business_datetime' => $data['business_datetime'] ?? now(),
             ]);
 
             $this->addAggregateStock(

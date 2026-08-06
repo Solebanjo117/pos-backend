@@ -47,6 +47,7 @@ Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class.':re
             'email' => $user->email,
             'role' => $user->role,
             'is_active' => $user->is_active,
+            'can_manage_financial_adjustments' => $user->canManageFinancialAdjustments(),
             'current_warehouse_id' => $user->current_warehouse_id,
         ]);
     });

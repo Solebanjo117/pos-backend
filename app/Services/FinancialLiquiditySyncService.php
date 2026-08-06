@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Models\CapitalMovement;
 use App\Models\FinancialAccount;
 use App\Models\FinancialAccountMovement;
-use App\Models\FinancialAdjustment;
 use App\Models\OperationalExpense;
 use App\Models\PaymentMethod;
 use App\Models\PurchaseOrderPayment;
@@ -115,12 +114,6 @@ class FinancialLiquiditySyncService
 
         if ($source instanceof CapitalMovement) {
             return $this->payload($source->movement_type, (float) $source->amount, $source->business_datetime ?? $source->movement_date, null, $source->notes, $source->user_id);
-        }
-
-        if ($source instanceof FinancialAdjustment && $source->type === FinancialAdjustment::TYPE_BANK) {
-            $amount = (float) $source->amount;
-
-            return $this->payload($amount >= 0 ? 'in' : 'out', abs($amount), $source->business_datetime ?? $source->adjustment_date, null, $source->notes, $source->user_id);
         }
 
         return null;

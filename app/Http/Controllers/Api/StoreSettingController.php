@@ -59,6 +59,7 @@ class StoreSettingController extends Controller
             'regional_country',
             'regional_decimal_separator',
             'regional_settings_active',
+            'accounting_lock_date',
         ];
 
         foreach ($allowed as $key) {
@@ -68,6 +69,7 @@ class StoreSettingController extends Controller
                     str_starts_with($key, 'modules_') => 'modules',
                     str_starts_with($key, 'quote_') || $key === 'require_stock_for_quotes' => 'quotes',
                     str_starts_with($key, 'regional_') => 'regional',
+                    str_starts_with($key, 'accounting_') => 'accounting',
                     $key === 'sku_format' => 'sku',
                     default => 'store',
                 };
@@ -193,6 +195,7 @@ class StoreSettingController extends Controller
             'regional_country' => ['sometimes', 'required', 'string', 'max:80'],
             'regional_decimal_separator' => ['sometimes', 'required', 'string', Rule::in(['.', ','])],
             'regional_settings_active' => ['sometimes', 'boolean'],
+            'accounting_lock_date' => ['sometimes', 'nullable', 'date_format:Y-m-d'],
         ];
     }
 
@@ -201,6 +204,6 @@ class StoreSettingController extends Controller
      */
     private function settingGroups(): array
     {
-        return ['store', 'pricing', 'quotes', 'modules', 'sku', 'regional'];
+        return ['store', 'pricing', 'quotes', 'modules', 'sku', 'regional', 'accounting'];
     }
 }

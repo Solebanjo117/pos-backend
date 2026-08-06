@@ -7,6 +7,7 @@ use App\Models\Customer;
 use App\Models\InventoryLot;
 use App\Models\JournalEntry;
 use App\Models\OperationalExpense;
+use App\Models\OperationalExpenseCategory;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
@@ -14,6 +15,8 @@ use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesReturn;
+use App\Models\SalesReturnItem;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
@@ -251,6 +254,168 @@ it('reports cash and operational accrual income separately with comparison and b
         ->assertJsonPath('summary.net_profit', 30);
 
     expect($cash->json('credit_balances.accounts_receivable.aging_buckets.1_30.amount'))->toBe(0);
+});
+
+it('reconciles accrual income without ITBMS and reverses returned revenue and cost once', function (): void {
+    [$admin, $warehouse] = financialReportContext();
+    [$product, $variant] = financialReportProduct($warehouse);
+
+    $order = SalesOrder::create([
+        'order_number' => 'SO-FR-TAXED',
+        'user_id' => $admin->id,
+        'date' => '2026-05-12',
+        'status' => 'completed',
+        'subtotal' => 180,
+        'tax_amount' => 12.60,
+        'discount_amount' => 20,
+        'shipping_cost' => 0,
+        'total' => 192.60,
+        'payment_status' => 'paid',
+    ]);
+
+    $item = SalesOrderItem::create([
+        'sales_order_id' => $order->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
+        'seller_id' => $admin->id,
+        'quantity' => 2,
+        'unit_price' => 100,
+        'unit_cost' => 40,
+        'discount_percent' => 10,
+        'discount_amount' => 20,
+        'tax_percent' => 7,
+        'tax_amount' => 12.60,
+        'subtotal' => 180,
+        'total' => 192.60,
+    ]);
+
+    $return = SalesReturn::create([
+        'sales_order_id' => $order->id,
+        'warehouse_id' => $warehouse->id,
+        'user_id' => $admin->id,
+        'status' => 'approved',
+        'settlement_status' => 'completed',
+        'reason' => 'Devolucion parcial',
+        'total_amount' => 96.30,
+        'approved_by' => $admin->id,
+        'approved_at' => '2026-05-13 10:00:00',
+    ]);
+
+    SalesReturnItem::create([
+        'sales_return_id' => $return->id,
+        'sales_order_item_id' => $item->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'quantity' => 1,
+        'unit_price' => 90,
+        'subtotal' => 90,
+        'user_id' => $admin->id,
+        'seller_id' => $admin->id,
+    ]);
+
+    OperationalExpense::create([
+        'expense_date' => '2026-05-13',
+        'category' => 'rent',
+        'description' => 'Alquiler reconocido',
+        'amount' => 10,
+        'payment_method' => 'transfer',
+        'status' => 'paid',
+        'affects_income_statement' => true,
+        'warehouse_id' => $warehouse->id,
+        'created_by' => $admin->id,
+    ]);
+
+    $response = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/income-statement?date_from=2026-05-01&date_to=2026-05-31&warehouse_id='.$warehouse->id.'&basis=accrual_operational')
+        ->assertOk()
+        ->assertJsonPath('reconciliation.gross_sales_ex_tax', 200)
+        ->assertJsonPath('reconciliation.discounts', 20)
+        ->assertJsonPath('reconciliation.returns_ex_tax', 90)
+        ->assertJsonPath('reconciliation.net_sales_ex_tax', 90)
+        ->assertJsonPath('reconciliation.tax_collected', 6.3)
+        ->assertJsonPath('reconciliation.gross_cogs', 80)
+        ->assertJsonPath('reconciliation.return_cogs', 40)
+        ->assertJsonPath('reconciliation.net_cogs', 40)
+        ->assertJsonPath('reconciliation.gross_profit', 50)
+        ->assertJsonPath('reconciliation.operational_expenses', 10)
+        ->assertJsonPath('reconciliation.net_income', 40)
+        ->assertJsonPath('summary.total_revenue', 90)
+        ->assertJsonPath('summary.net_profit', 40)
+        ->assertJsonPath('sections.0.rows.3.key', 'tax-collected')
+        ->assertJsonPath('sections.0.rows.3.included_in_section_total', false)
+        ->assertJsonPath('warnings', []);
+
+    expect(collect($response->json('sections.0.rows'))->pluck('key')->all())
+        ->not->toContain('net-sales')
+        ->and(collect($response->json('sections.1.rows'))->pluck('key')->all())
+        ->not->toContain('net-cogs');
+});
+
+it('includes only recognized operational expenses and exposes dynamic categories', function (): void {
+    [$admin, $warehouse] = financialReportContext();
+
+    $amazon = OperationalExpenseCategory::create([
+        'name' => 'Amazon Web Services',
+        'slug' => 'amazon-web-services',
+        'expense_kind' => 'operational',
+        'affects_cash_flow' => true,
+        'affects_income_statement' => true,
+        'is_active' => true,
+        'sort_order' => 25,
+    ]);
+
+    $createExpense = function (
+        string $status,
+        float $amount,
+        string $category = 'rent',
+        ?int $categoryId = null,
+        bool $affectsIncomeStatement = true,
+    ) use ($admin, $warehouse): void {
+        OperationalExpense::create([
+            'expense_date' => '2026-05-13',
+            'category' => $category,
+            'category_id' => $categoryId,
+            'description' => $status.' '.$category,
+            'amount' => $amount,
+            'payment_method' => $status === 'paid' ? 'transfer' : null,
+            'status' => $status,
+            'affects_income_statement' => $affectsIncomeStatement,
+            'warehouse_id' => $warehouse->id,
+            'created_by' => $admin->id,
+        ]);
+    };
+
+    $createExpense('pending', 1);
+    $createExpense('scheduled', 2);
+    $createExpense('queued', 3);
+    $createExpense('paid', 4, 'amazon-web-services', $amazon->id);
+    $createExpense('paid', 5, 'legacy-invalid');
+    $createExpense('draft', 8);
+    $createExpense('cancelled', 16);
+    $createExpense('reversed', 32);
+    $createExpense('paid', 64, 'other', null, false);
+
+    $response = $this->actingAs($admin)
+        ->getJson('/api/v1/reports/income-statement?date_from=2026-05-01&date_to=2026-05-31&warehouse_id='.$warehouse->id.'&basis=accrual_operational')
+        ->assertOk()
+        ->assertJsonPath('reconciliation.operational_expenses', 15)
+        ->assertJsonPath('expense_breakdown.total', 15)
+        ->assertJsonFragment([
+            'category' => 'amazon-web-services',
+            'label' => 'Amazon Web Services',
+            'amount' => 4,
+            'count' => 1,
+        ])
+        ->assertJsonFragment([
+            'category' => 'other',
+            'label' => 'Others',
+            'amount' => 5,
+            'count' => 1,
+        ]);
+
+    expect(collect($response->json('operational_expenses.by_category'))->last()['category'])
+        ->toBe('other');
 });
 
 it('reports credit aging, document drilldowns, recent movements and historical financial position', function (): void {

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\FinancialAdjustmentController;
 use App\Http\Controllers\Api\ReportController;
 use Illuminate\Support\Facades\Route;
 
@@ -40,8 +41,11 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/accounting/trial-balance', [ReportController::class, 'accountingTrialBalance']);
     Route::post('/capital-movements', [ReportController::class, 'storeCapitalMovement'])->middleware('throttle:60,1');
     Route::get('/capital-movements', [ReportController::class, 'capitalMovements']);
-    Route::post('/adjustments', [ReportController::class, 'storeAdjustment'])->middleware(['role:admin', 'throttle:60,1']);
-    Route::get('/adjustments', [ReportController::class, 'adjustments']);
+    Route::get('/adjustments/options', [FinancialAdjustmentController::class, 'options']);
+    Route::get('/adjustments', [FinancialAdjustmentController::class, 'index']);
+    Route::post('/adjustments', [FinancialAdjustmentController::class, 'store'])->middleware('throttle:60,1');
+    Route::get('/adjustments/{financialAdjustment}', [FinancialAdjustmentController::class, 'show']);
+    Route::post('/adjustments/{financialAdjustment}/reverse', [FinancialAdjustmentController::class, 'reverse'])->middleware('throttle:30,1');
 
     Route::get('/stock-levels/export/{format}', [ReportController::class, 'exportStockLevels']);
     Route::get('/inventory-items/export/{format}', [ReportController::class, 'exportInventoryItems']);

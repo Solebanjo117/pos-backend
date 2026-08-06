@@ -7,7 +7,6 @@ use App\Http\Requests\FinancialPositionReportRequest;
 use App\Http\Requests\IncomeStatementReportRequest;
 use App\Http\Requests\LedgerTrialBalanceReportRequest;
 use App\Http\Requests\SalesByClientReportRequest;
-use App\Http\Requests\StoreFinancialAdjustmentRequest;
 use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
 use App\Services\AccountingReportService;
@@ -616,42 +615,6 @@ class ReportController extends Controller
             'data' => $this->financialSnapshotService->listCapitalMovements(
                 $request->only(['date_from', 'date_to', 'warehouse_id']),
             ),
-        ]);
-    }
-
-    public function storeAdjustment(StoreFinancialAdjustmentRequest $request): JsonResponse
-    {
-        $validated = $request->validated();
-        $adjustment = $this->reportService->storeFinancialAdjustment(
-            $validated,
-            $request->user()?->id,
-        );
-        $this->financialSnapshotService->rebuildRange(
-            $validated['adjustment_date'],
-            now()->toDateString(),
-            $validated['warehouse_id'] ?? null,
-            true,
-        );
-
-        return response()->json([
-            'success' => true,
-            'data' => $adjustment,
-        ], 201);
-    }
-
-    public function adjustments(Request $request): JsonResponse
-    {
-        $request->validate([
-            'date_from' => 'nullable|date',
-            'date_to' => 'nullable|date',
-            'warehouse_id' => 'nullable|exists:warehouses,id',
-        ]);
-
-        $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
-
-        return response()->json([
-            'success' => true,
-            'data' => $this->reportService->listFinancialAdjustments($filters),
         ]);
     }
 
