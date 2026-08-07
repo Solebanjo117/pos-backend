@@ -30,6 +30,7 @@ class User extends Authenticatable
         'current_warehouse_id',
         'role',
         'is_active',
+        'can_manage_financial_adjustments',
     ];
 
     /**
@@ -53,6 +54,7 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'is_active' => 'boolean',
+            'can_manage_financial_adjustments' => 'boolean',
         ];
     }
 
@@ -62,6 +64,7 @@ class User extends Authenticatable
     public function hasRole(string|array $roles): bool
     {
         $roles = is_array($roles) ? $roles : [$roles];
+
         return in_array($this->role, $roles);
     }
 
@@ -95,6 +98,13 @@ class User extends Authenticatable
         return $this->role === 'assistant';
     }
 
+    public function canManageFinancialAdjustments(): bool
+    {
+        return $this->is_active
+            && $this->hasRole(['admin', 'manager'])
+            && (bool) $this->can_manage_financial_adjustments;
+    }
+
     /**
      * Get the current warehouse for this user.
      */
@@ -121,6 +131,7 @@ class User extends Authenticatable
         if ($this->isAdmin()) {
             return true;
         }
+
         return $this->warehouses()->where('warehouse_id', $warehouseId)->exists();
     }
 
@@ -135,6 +146,7 @@ class User extends Authenticatable
         }
         // Fallback to first allowed warehouse
         $first = $this->warehouses()->first();
+
         return $first?->id;
     }
 }

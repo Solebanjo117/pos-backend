@@ -2,8 +2,10 @@
 
 use App\Models\Brand;
 use App\Models\Customer;
+use App\Models\FinancialAccount;
 use App\Models\FinancialDailySnapshot;
 use App\Models\InventoryLot;
+use App\Models\LedgerAccount;
 use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\ProductVariant;
@@ -18,6 +20,7 @@ use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\FinancialSnapshotService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -32,6 +35,7 @@ function dailySummaryContext(): array
         'role' => 'admin',
         'current_warehouse_id' => $warehouse->id,
         'is_active' => true,
+        'can_manage_financial_adjustments' => true,
     ]);
     $admin->warehouses()->attach($warehouse->id);
 
@@ -362,13 +366,41 @@ it('maps yappy payments and bank adjustments into Banco', function (): void {
         'created_by' => $admin->id,
     ]);
 
+    $bankLedger = LedgerAccount::firstOrCreate(
+        ['code' => '1110'],
+        ['name' => 'Banco', 'type' => 'asset', 'is_active' => true],
+    );
+    $counterparty = LedgerAccount::create([
+        'code' => '3998',
+        'name' => 'Contrapartida de prueba',
+        'type' => 'equity',
+        'is_active' => true,
+    ]);
+    $bankAccount = FinancialAccount::create([
+        'name' => 'Banco Daily Summary',
+        'type' => 'bank',
+        'institution_name' => 'Banco Nacional',
+        'masked_number' => '•••• 2525',
+        'currency' => 'USD',
+        'opening_balance' => 0,
+        'current_balance' => 0,
+        'ledger_account_id' => $bankLedger->id,
+        'is_active' => true,
+        'is_legacy' => false,
+        'created_by' => $admin->id,
+    ]);
+
     $this->actingAs($admin)
         ->postJson('/api/v1/reports/adjustments', [
             'warehouse_id' => $warehouse->id,
             'type' => 'bank',
+            'direction' => 'increase',
             'amount' => 25,
             'reason' => 'Cuadre banco',
-            'adjustment_date' => '2026-05-05',
+            'business_datetime' => '2026-05-05T12:30:00-05:00',
+            'idempotency_key' => (string) Str::uuid(),
+            'financial_account_id' => $bankAccount->id,
+            'counterparty_ledger_account_id' => $counterparty->id,
         ])
         ->assertCreated()
         ->assertJsonPath('data.type', 'bank');

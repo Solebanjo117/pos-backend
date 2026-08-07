@@ -127,7 +127,13 @@ class PurchaseOrder extends Model
 
     public function getAmountDueAttribute(): float
     {
-        return max(0, (float) $this->total - $this->amount_paid);
+        $adjustments = (float) FinancialAdjustment::query()
+            ->where('purchase_order_id', $this->id)
+            ->where('is_legacy', false)
+            ->get(['amount', 'direction'])
+            ->sum(fn (FinancialAdjustment $adjustment): float => $adjustment->signedAmount());
+
+        return max(0, (float) $this->total - $this->amount_paid + $adjustments);
     }
 
     public function getPaymentStatusLabelAttribute(): string

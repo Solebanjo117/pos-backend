@@ -16,6 +16,7 @@ class FinancialAccount extends Model
     protected $fillable = [
         'name',
         'type',
+        'institution_name',
         'masked_number',
         'currency',
         'opening_balance',

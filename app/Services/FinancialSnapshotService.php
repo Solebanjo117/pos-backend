@@ -650,7 +650,11 @@ class FinancialSnapshotService
         foreach ($adjustments as $adjustment) {
             $key = FinancialAdjustment::flowKeyForType((string) $adjustment->type);
             if ($key !== null && array_key_exists($key, $flows)) {
-                $flows[$key] = $this->money($flows[$key] + (float) $adjustment->amount);
+                $flows[$key] = $this->money($flows[$key] + $adjustment->signedAmount());
+            }
+            if ($adjustment->type === FinancialAdjustment::TYPE_INVESTMENT && ! $adjustment->is_legacy) {
+                $liquidityKey = $adjustment->financial_account_id ? 'bank_adjustments' : 'cash_adjustments';
+                $flows[$liquidityKey] = $this->money($flows[$liquidityKey] + $adjustment->signedAmount());
             }
         }
 

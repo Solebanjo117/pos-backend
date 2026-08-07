@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Models\AccountPaymentBatch;
 use App\Models\BusinessDatetimeAudit;
 use App\Models\CapitalMovement;
-use App\Models\FinancialAdjustment;
 use App\Models\InventoryMovement;
 use App\Models\OperationalExpense;
 use App\Models\PurchaseOrder;
@@ -28,7 +27,6 @@ class BusinessDatetimeService
         'account_payment_batch' => AccountPaymentBatch::class,
         'inventory_movement' => InventoryMovement::class,
         'operational_expense' => OperationalExpense::class,
-        'financial_adjustment' => FinancialAdjustment::class,
         'capital_movement' => CapitalMovement::class,
     ];
 

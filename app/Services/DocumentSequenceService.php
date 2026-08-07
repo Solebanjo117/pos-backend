@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\DocumentSequence;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\DB;
 
 class DocumentSequenceService
@@ -26,6 +27,18 @@ class DocumentSequenceService
     public function nextFinancialTransferFolio(): string
     {
         return 'TRF-'.str_pad((string) $this->next(self::FINANCIAL_TRANSFER), 10, '0', STR_PAD_LEFT);
+    }
+
+    public function nextFinancialAdjustmentFolio(CarbonInterface $businessDatetime): string
+    {
+        $year = $businessDatetime->format('Y');
+
+        return 'AJ-'.$year.'-'.str_pad(
+            (string) $this->next('financial_adjustment:'.$year),
+            6,
+            '0',
+            STR_PAD_LEFT,
+        );
     }
 
     private function next(string $key): int

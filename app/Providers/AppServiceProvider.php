@@ -4,7 +4,6 @@ namespace App\Providers;
 
 use App\Listeners\LogAuthenticationEvents;
 use App\Models\CapitalMovement;
-use App\Models\FinancialAdjustment;
 use App\Models\OperationalExpense;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrderPayment;
@@ -37,7 +36,6 @@ class AppServiceProvider extends ServiceProvider
             PurchaseOrderPayment::class,
             OperationalExpense::class,
             CapitalMovement::class,
-            FinancialAdjustment::class,
         ] as $modelClass) {
             $modelClass::created(fn ($model) => app(FinancialLiquiditySyncService::class)->sync($model));
             $modelClass::deleting(fn ($model) => app(FinancialLiquiditySyncService::class)->reverse($model));

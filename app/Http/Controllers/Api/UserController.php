@@ -5,10 +5,11 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreUserRequest;
 use App\Models\User;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class UserController extends Controller
 {
@@ -17,7 +18,7 @@ class UserController extends Controller
      */
     public function index(): JsonResponse
     {
-        $users = User::select(['id', 'name', 'username', 'email', 'role', 'is_active', 'current_warehouse_id', 'created_at'])
+        $users = User::select(['id', 'name', 'username', 'email', 'role', 'is_active', 'can_manage_financial_adjustments', 'current_warehouse_id', 'created_at'])
             ->with(['currentWarehouse:id,name', 'warehouses:id,name'])
             ->orderBy('name')
             ->get();
@@ -31,14 +32,21 @@ class UserController extends Controller
     public function store(StoreUserRequest $request): JsonResponse
     {
         $validated = $request->validate([
-            'name'                  => 'required|string|max:255',
-            'username'              => 'required|string|max:50|unique:users,username',
-            'email'                 => 'required|email|unique:users,email',
-            'password'              => 'required|string|min:8|confirmed',
-            'role'                  => ['required', Rule::in(User::VALID_ROLES)],
-            'current_warehouse_id'  => 'nullable|exists:warehouses,id',
-            'is_active'             => 'boolean',
+            'name' => 'required|string|max:255',
+            'username' => 'required|string|max:50|unique:users,username',
+            'email' => 'required|email|unique:users,email',
+            'password' => 'required|string|min:8|confirmed',
+            'role' => ['required', Rule::in(User::VALID_ROLES)],
+            'current_warehouse_id' => 'nullable|exists:warehouses,id',
+            'is_active' => 'boolean',
+            'can_manage_financial_adjustments' => 'boolean',
         ]);
+
+        if ($validated['role'] === 'admin' && ! array_key_exists('can_manage_financial_adjustments', $validated)) {
+            $validated['can_manage_financial_adjustments'] = true;
+        } elseif (! in_array($validated['role'], ['admin', 'manager'], true)) {
+            $validated['can_manage_financial_adjustments'] = false;
+        }
 
         $validated['password'] = Hash::make($validated['password']);
 
@@ -51,7 +59,7 @@ class UserController extends Controller
 
         return response()->json([
             'message' => 'User created successfully.',
-            'user'    => $user->load('warehouses:id,name')->makeHidden(['password', 'remember_token']),
+            'user' => $user->load('warehouses:id,name')->makeHidden(['password', 'remember_token']),
         ], 201);
     }
 
@@ -61,14 +69,37 @@ class UserController extends Controller
     public function update(Request $request, User $user): JsonResponse
     {
         $validated = $request->validate([
-            'name'                  => 'sometimes|string|max:255',
-            'username'              => ['sometimes', 'string', 'max:50', Rule::unique('users')->ignore($user->id)],
-            'email'                 => ['sometimes', 'email', Rule::unique('users')->ignore($user->id)],
-            'password'              => 'nullable|string|min:8|confirmed',
-            'role'                  => ['sometimes', Rule::in(User::VALID_ROLES)],
-            'current_warehouse_id'  => 'nullable|exists:warehouses,id',
-            'is_active'             => 'sometimes|boolean',
+            'name' => 'sometimes|string|max:255',
+            'username' => ['sometimes', 'string', 'max:50', Rule::unique('users')->ignore($user->id)],
+            'email' => ['sometimes', 'email', Rule::unique('users')->ignore($user->id)],
+            'password' => 'nullable|string|min:8|confirmed',
+            'role' => ['sometimes', Rule::in(User::VALID_ROLES)],
+            'current_warehouse_id' => 'nullable|exists:warehouses,id',
+            'is_active' => 'sometimes|boolean',
+            'can_manage_financial_adjustments' => 'sometimes|boolean',
         ]);
+
+        $effectiveRole = $validated['role'] ?? $user->role;
+        if (! in_array($effectiveRole, ['admin', 'manager'], true)) {
+            $validated['can_manage_financial_adjustments'] = false;
+        }
+
+        $willRemainAuthorizedAdmin = $effectiveRole === 'admin'
+            && ($validated['is_active'] ?? $user->is_active)
+            && ($validated['can_manage_financial_adjustments'] ?? $user->can_manage_financial_adjustments);
+        if ($user->role === 'admin' && $user->is_active && $user->can_manage_financial_adjustments && ! $willRemainAuthorizedAdmin) {
+            $otherAuthorizedAdmins = User::query()
+                ->whereKeyNot($user->id)
+                ->where('role', 'admin')
+                ->where('is_active', true)
+                ->where('can_manage_financial_adjustments', true)
+                ->exists();
+            if (! $otherAuthorizedAdmins) {
+                throw ValidationException::withMessages([
+                    'can_manage_financial_adjustments' => 'Debe existir al menos un administrador activo autorizado para ajustes financieros.',
+                ]);
+            }
+        }
 
         if (isset($validated['password'])) {
             $validated['password'] = Hash::make($validated['password']);
@@ -85,7 +116,7 @@ class UserController extends Controller
 
         return response()->json([
             'message' => 'User updated successfully.',
-            'user'    => $user->fresh()->load('warehouses:id,name')->makeHidden(['password', 'remember_token']),
+            'user' => $user->fresh()->load('warehouses:id,name')->makeHidden(['password', 'remember_token']),
         ]);
     }
 
@@ -98,6 +129,20 @@ class UserController extends Controller
         if ($user->isAdmin() && User::where('role', 'admin')->where('is_active', true)->count() <= 1) {
             return response()->json([
                 'message' => 'Cannot deactivate the last active administrator.',
+            ], 422);
+        }
+        if (
+            $user->isAdmin()
+            && $user->can_manage_financial_adjustments
+            && User::query()
+                ->whereKeyNot($user->id)
+                ->where('role', 'admin')
+                ->where('is_active', true)
+                ->where('can_manage_financial_adjustments', true)
+                ->doesntExist()
+        ) {
+            return response()->json([
+                'message' => 'Debe existir al menos un administrador autorizado para ajustes financieros.',
             ], 422);
         }
 
@@ -118,7 +163,7 @@ class UserController extends Controller
 
         if (! $user) {
             return response()->json([
-                'message'              => 'Not authenticated',
+                'message' => 'Not authenticated',
                 'current_warehouse_id' => null,
             ], 200);
         }
@@ -146,7 +191,7 @@ class UserController extends Controller
         ]);
 
         return response()->json([
-            'message'              => 'Warehouse context updated successfully',
+            'message' => 'Warehouse context updated successfully',
             'current_warehouse_id' => $user->current_warehouse_id,
         ]);
     }
@@ -162,8 +207,8 @@ class UserController extends Controller
         if (! $user) {
             return response()->json([
                 'current_warehouse_id' => null,
-                'current_warehouse'    => null,
-                'allowed_warehouses'   => [],
+                'current_warehouse' => null,
+                'allowed_warehouses' => [],
             ]);
         }
 
@@ -173,8 +218,8 @@ class UserController extends Controller
 
         return response()->json([
             'current_warehouse_id' => $user->current_warehouse_id,
-            'current_warehouse'    => $user->currentWarehouse,
-            'allowed_warehouses'   => $allowedWarehouses,
+            'current_warehouse' => $user->currentWarehouse,
+            'allowed_warehouses' => $allowedWarehouses,
         ]);
     }
 }
