@@ -9,8 +9,11 @@ class LedgerAccount extends Model
 {
     protected $fillable = [
         'code',
+        'system_key',
         'name',
         'type',
+        'report_group',
+        'normal_balance',
         'is_active',
     ];
 

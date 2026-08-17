@@ -735,10 +735,17 @@ it('classifies product preview rows as create update unchanged or conflict with 
         ->assertJsonPath('data.rows.2.action_type', 'unchanged')
         ->assertJsonPath('data.rows.3.action_type', 'conflict')
         ->assertJsonPath('data.rows.4.action_type', 'conflict')
+        ->assertJsonPath('data.rows.0.resolution_type', 'new_product')
+        ->assertJsonPath('data.rows.1.resolution_type', 'existing')
+        ->assertJsonPath('data.rows.2.resolution_type', 'existing')
+        ->assertJsonPath('data.rows.3.resolution_type', 'conflict')
         ->assertJsonPath('data.summary.action_counts.create', 1)
         ->assertJsonPath('data.summary.action_counts.update', 1)
         ->assertJsonPath('data.summary.action_counts.unchanged', 1)
         ->assertJsonPath('data.summary.action_counts.conflict', 2)
+        ->assertJsonPath('data.summary.resolution_counts.new_product', 1)
+        ->assertJsonPath('data.summary.resolution_counts.existing', 2)
+        ->assertJsonPath('data.summary.resolution_counts.conflict', 2)
         ->assertJsonPath('data.summary.unchanged_count', 1);
 
     $updateChanges = collect($response->json('data.rows.1.change_preview'));
@@ -756,6 +763,55 @@ it('classifies product preview rows as create update unchanged or conflict with 
             'current' => '7.00',
             'imported' => '8.00',
         ]);
+});
+
+it('resolves normalized commercial codes before deciding between existing variant new variant and conflict', function () {
+    $category = Category::create([
+        'name' => 'Terminales Import',
+        'slug' => 'terminales-import-codes',
+    ]);
+    $miz = Brand::create(['name' => 'MIZ', 'status' => 'active']);
+    Brand::create(['name' => 'WBS', 'status' => 'active']);
+
+    $source = app(ProductService::class)->createProduct([
+        'name' => 'Terminal Dirección',
+        'category_id' => $category->id,
+        'brand_id' => $miz->id,
+        'codes' => [
+            ['code' => '45503-19155', 'type' => 'sku', 'is_primary' => true],
+        ],
+    ]);
+    app(ProductService::class)->createProduct([
+        'name' => 'Terminal Diferente',
+        'category_id' => $category->id,
+        'codes' => [
+            ['code' => 'TARGET-002', 'type' => 'sku', 'is_primary' => true],
+        ],
+    ]);
+
+    $productCount = Product::query()->count();
+    $variantCount = ProductVariant::query()->count();
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    $file = productImportUploadedSpreadsheet([
+        ['Description', 'Custom SKU', 'Brand', 'Category'],
+        ['Terminal Dirección', '45503 19155', 'MIZ', 'Terminales Import'],
+        ['Terminal Dirección', 'WBS.45503.01', 'WBS', 'Terminales Import'],
+        ['Terminal Dirección', 'TARGET-002', 'MIZ', 'Terminales Import'],
+    ]);
+
+    $response = $this->actingAs($admin)->postJson('/api/v1/products/import/preview', ['file' => $file]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.rows.0.resolution_type', 'existing')
+        ->assertJsonPath('data.rows.1.resolution_type', 'new_variant')
+        ->assertJsonPath('data.rows.2.resolution_type', 'conflict')
+        ->assertJsonPath('data.summary.resolution_counts.existing', 1)
+        ->assertJsonPath('data.summary.resolution_counts.new_variant', 1)
+        ->assertJsonPath('data.summary.resolution_counts.conflict', 1);
+
+    expect(Product::query()->count())->toBe($productCount)
+        ->and(ProductVariant::query()->count())->toBe($variantCount)
+        ->and($source->fresh()->variants()->count())->toBe(1);
 });
 
 it('allows quick creation of a missing product brand as active', function () {

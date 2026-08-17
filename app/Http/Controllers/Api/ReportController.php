@@ -10,6 +10,7 @@ use App\Http\Requests\SalesByClientReportRequest;
 use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
 use App\Services\AccountingReportService;
+use App\Services\BalanceSheetLedgerService;
 use App\Services\FinancialDrilldownService;
 use App\Services\FinancialReconciliationService;
 use App\Services\FinancialSnapshotService;
@@ -37,6 +38,7 @@ class ReportController extends Controller
         AccountingReportService $accountingReportService,
         private readonly OperationalAnalyticsService $operationalAnalyticsService,
         private readonly FinancialReconciliationService $financialReconciliationService,
+        private readonly BalanceSheetLedgerService $balanceSheetLedgerService,
     ) {
         $this->reportService = $reportService;
         $this->financialSnapshotService = $financialSnapshotService;
@@ -525,22 +527,23 @@ class ReportController extends Controller
     public function balanceSheet(Request $request): JsonResponse
     {
         $request->validate([
+            'as_of' => 'nullable|date',
             'date_from' => 'nullable|date',
             'date_to' => 'nullable|date',
             'warehouse_id' => 'nullable|exists:warehouses,id',
         ]);
 
-        $filters = $request->only(['date_from', 'date_to', 'warehouse_id']);
+        $filters = $request->only(['as_of', 'date_from', 'date_to', 'warehouse_id']);
 
         return response()->json(
-            $this->financialSnapshotService->balanceSheet($filters),
+            $this->balanceSheetLedgerService->generate($filters),
         );
     }
 
     public function financialDrilldown(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'metric' => 'required|string|in:sales,sales_total,sales_gross,sales_discounts,sales_returns,sales_net,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,operational_expenses,cash,bank,inventory,inventory_bridge,inventory_in,inventory_out,receivable,accounts_receivable,credit_receivable,sales_pending,receivables_generated,payable,accounts_payable,credit_payable,purchase_pending,payables_generated,cogs,cogs_gross,cogs_returns,cogs_net,profit,gross_profit,net_profit,assets,liabilities,equity,customer_credits,pending_refunds,retained_earnings,investment,investment_in,investment_out,adjustments',
+            'metric' => 'required|string|in:sales,sales_total,sales_gross,sales_discounts,sales_returns,sales_net,payments_received,sales_collected,purchases,purchase,supplier_payments,purchase_paid,expenses,operational_expenses,cash,bank,inventory,inventory_bridge,inventory_in,inventory_out,receivable,accounts_receivable,credit_receivable,sales_pending,receivables_generated,payable,accounts_payable,credit_payable,purchase_pending,payables_generated,cogs,cogs_gross,cogs_returns,cogs_net,profit,gross_profit,net_profit,assets,liabilities,equity,customer_credits,pending_refunds,retained_earnings,investment,investment_in,investment_out,adjustments,balance_cash,balance_bank,balance_inventory,balance_receivable,balance_payable,balance_customer_credits,balance_pending_refunds,balance_investment,balance_retained_earnings,balance_profit,balance_assets,balance_liabilities,balance_equity',
             'date_from' => 'required|date',
             'date_to' => 'required|date|after_or_equal:date_from',
             'warehouse_id' => 'nullable|exists:warehouses,id',

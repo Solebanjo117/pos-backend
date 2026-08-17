@@ -17,6 +17,18 @@ class LedgerPostingService
     public function postManualEntry(array $data): JournalEntry
     {
         return DB::transaction(function () use ($data): JournalEntry {
+            $postingKey = isset($data['posting_key']) ? trim((string) $data['posting_key']) : null;
+            if ($postingKey !== null && $postingKey !== '') {
+                $existing = JournalEntry::query()
+                    ->with('lines.ledgerAccount')
+                    ->where('posting_key', $postingKey)
+                    ->first();
+
+                if ($existing) {
+                    return $existing;
+                }
+            }
+
             $lines = collect($data['lines'] ?? []);
             $totalDebit = round((float) $lines->sum(fn (array $line): float => (float) ($line['debit'] ?? 0)), 2);
             $totalCredit = round((float) $lines->sum(fn (array $line): float => (float) ($line['credit'] ?? 0)), 2);
@@ -28,10 +40,12 @@ class LedgerPostingService
             $entry = JournalEntry::create([
                 'source_type' => $data['source_type'],
                 'source_id' => $data['source_id'] ?? null,
+                'posting_key' => $postingKey ?: null,
                 'warehouse_id' => $data['warehouse_id'] ?? null,
                 'occurred_at' => $data['occurred_at'],
                 'status' => $data['status'] ?? 'posted',
                 'memo' => $data['memo'] ?? null,
+                'metadata' => $data['metadata'] ?? null,
                 'created_by' => $data['created_by'] ?? null,
             ]);
 
@@ -96,6 +110,11 @@ class LedgerPostingService
             $entry = JournalEntry::create([
                 'source_type' => 'operational_expense',
                 'source_id' => $expense->id,
+                'posting_key' => 'operational_expense:'.$expense->id.':'.hash('sha256', implode('|', [
+                    $expense->status,
+                    $amount,
+                    (string) ($expense->business_datetime ?? $expense->expense_date),
+                ])),
                 'warehouse_id' => $expense->warehouse_id,
                 'occurred_at' => $expense->business_datetime ?? $expense->expense_date ?? $expense->created_at ?? now(),
                 'status' => 'posted',
@@ -152,6 +171,11 @@ class LedgerPostingService
         return $this->postManualEntry([
             'source_type' => 'operational_expense_payment',
             'source_id' => $expense->id,
+            'posting_key' => 'operational_expense_payment:'.$expense->id.':'.hash('sha256', implode('|', [
+                (string) $expense->amount,
+                (string) $expense->payment_method,
+                (string) ($expense->paid_at ?? $expense->business_datetime),
+            ])),
             'warehouse_id' => $expense->warehouse_id,
             'occurred_at' => $expense->paid_at ?? now(),
             'memo' => 'Pago de gasto: '.($expense->description ?: $expense->category_label),
@@ -208,10 +232,13 @@ class LedgerPostingService
                 $reversal = JournalEntry::create([
                     'source_type' => $sourceType.'_reversal',
                     'source_id' => $sourceId,
+                    'posting_key' => 'reversal:'.$entry->id,
+                    'reverses_entry_id' => $entry->id,
                     'warehouse_id' => $entry->warehouse_id,
                     'occurred_at' => now(),
                     'status' => 'posted',
                     'memo' => $memo ?? 'Reversa de asiento '.$entry->id,
+                    'metadata' => ['reverses_journal_entry_id' => $entry->id],
                     'created_by' => $userId ?? $entry->created_by,
                 ]);
 

@@ -158,7 +158,7 @@ class AccountingReportService
     private function entryQuery(array $filters): Builder
     {
         return JournalEntry::query()
-            ->where('status', 'posted')
+            ->whereIn('status', ['posted', 'reversed'])
             ->when($filters['date_from'] ?? null, fn (Builder $query, string $date) => $query->where('occurred_at', '>=', Carbon::parse($date)->startOfDay()))
             ->when($filters['date_to'] ?? null, fn (Builder $query, string $date) => $query->where('occurred_at', '<=', Carbon::parse($date)->endOfDay()))
             ->when($filters['warehouse_id'] ?? null, fn (Builder $query, int|string $warehouseId) => $query->where('warehouse_id', $warehouseId))
@@ -173,7 +173,7 @@ class AccountingReportService
     private function entryFilters(Builder $query, array $filters): Builder
     {
         return $query
-            ->where('status', 'posted')
+            ->whereIn('status', ['posted', 'reversed'])
             ->when($filters['date_from'] ?? null, fn (Builder $query, string $date) => $query->where('occurred_at', '>=', Carbon::parse($date)->startOfDay()))
             ->when($filters['date_to'] ?? null, fn (Builder $query, string $date) => $query->where('occurred_at', '<=', Carbon::parse($date)->endOfDay()))
             ->when($filters['warehouse_id'] ?? null, fn (Builder $query, int|string $warehouseId) => $query->where('warehouse_id', $warehouseId))
@@ -226,7 +226,7 @@ class AccountingReportService
             ->where('ledger_account_id', $account->id)
             ->whereHas('journalEntry', function (Builder $query) use ($filters, $dateFrom): void {
                 $query
-                    ->where('status', 'posted')
+                    ->whereIn('status', ['posted', 'reversed'])
                     ->where('occurred_at', '<', $dateFrom)
                     ->when($filters['warehouse_id'] ?? null, fn (Builder $query, int|string $warehouseId) => $query->where('warehouse_id', $warehouseId))
                     ->when($filters['source_type'] ?? null, fn (Builder $query, string $sourceType) => $query->where('source_type', $sourceType))

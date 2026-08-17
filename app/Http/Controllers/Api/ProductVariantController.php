@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\ProductCodeConflictException;
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ProductVariantFifoHistoryRequest;
@@ -29,7 +30,7 @@ class ProductVariantController extends Controller
     public function index(Product $product): JsonResponse
     {
         $variants = $product->variants()
-            ->with(['brand', 'pricing', 'inventory.warehouse', 'attributes', 'suppliers'])
+            ->with(['brand', 'codes', 'pricing', 'inventory.warehouse', 'attributes', 'suppliers'])
             ->get();
 
         return response()->json([
@@ -53,6 +54,8 @@ class ProductVariantController extends Controller
                 'data' => (new ProductVariantResource($variant))->resolve($request),
             ], 201);
 
+        } catch (ProductCodeConflictException $exception) {
+            throw $exception;
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error al crear la variante: '.$e->getMessage(),
@@ -85,6 +88,11 @@ class ProductVariantController extends Controller
                 'max:50',
             ],
             'status' => 'nullable|in:active,discontinued,pending',
+            'codes' => 'sometimes|array|max:25',
+            'codes.*.id' => 'nullable|integer',
+            'codes.*.code' => 'required|string|max:255',
+            'codes.*.type' => 'required|in:sku,upc,alternate,manual',
+            'codes.*.is_primary' => 'required|boolean',
 
             // Pricing (optional)
             'pricing' => 'nullable|array',
@@ -124,8 +132,10 @@ class ProductVariantController extends Controller
 
             return response()->json([
                 'message' => 'Variante actualizada correctamente',
-                'data' => $variant->fresh(['brand', 'pricing', 'inventory']),
+                'data' => (new ProductVariantResource($variant->fresh(['brand', 'codes', 'pricing', 'inventory'])))->resolve($request),
             ]);
+        } catch (ProductCodeConflictException $exception) {
+            throw $exception;
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error al actualizar: '.$e->getMessage(),

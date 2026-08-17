@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AssignAttributesRequest;
+use App\Http\Requests\CheckProductCodeRequest;
 use App\Http\Requests\ProductProfileRequest;
 use App\Http\Requests\RegenerateProductNameRequest;
 use App\Http\Requests\StoreProductRequest;
@@ -12,6 +13,7 @@ use App\Http\Resources\ProductDetailResource;
 use App\Http\Resources\ProductResource;
 use App\Models\Product;
 use App\Models\ProductVehicleCompatibility;
+use App\Services\ProductCodeService;
 use App\Services\ProductProfileService;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
@@ -22,7 +24,8 @@ class ProductController extends Controller
 {
     public function __construct(
         private readonly ProductService $productService,
-        private readonly ProductProfileService $productProfileService
+        private readonly ProductProfileService $productProfileService,
+        private readonly ProductCodeService $productCodeService,
     ) {}
 
     /**
@@ -92,6 +95,7 @@ class ProductController extends Controller
                 }
             },
             'variants.brand',
+            'variants.codes',
             'variants.pricing',
             'variants.suppliers',
             'variants.inventory' => function ($q) use ($warehouseId) {
@@ -104,6 +108,7 @@ class ProductController extends Controller
                     $q->where('warehouse_id', $warehouseId);
                 }
             },
+            'codes',
         ]);
 
         // ProductLine Filter
@@ -132,6 +137,10 @@ class ProductController extends Controller
         if (! empty($searchTerm)) {
             $query->search($searchTerm);
         }
+
+        $exactCodeMatch = ! empty($searchTerm)
+            ? $this->productCodeService->findActive((string) $searchTerm)
+            : null;
 
         // OEM Code Filter
         if ($request->has('oem_code')) {
@@ -228,6 +237,9 @@ class ProductController extends Controller
         if (! in_array(strtolower($sortDirection), ['asc', 'desc'])) {
             $sortDirection = 'desc';
         }
+        if ($exactCodeMatch) {
+            $query->orderByRaw('CASE WHEN products.id = ? THEN 0 ELSE 1 END', [$exactCodeMatch->product_id]);
+        }
         $query->orderBy($sortField, $sortDirection);
 
         $products = $query->paginate($perPage);
@@ -286,23 +298,34 @@ class ProductController extends Controller
      * Check for potential duplicate products by SKU base (primary) or name.
      * GET /api/v1/products/check-duplicate?sku=xxx&name=yyy
      */
-    public function checkDuplicate(Request $request): JsonResponse
+    public function checkDuplicate(CheckProductCodeRequest $request): JsonResponse
     {
-        $sku = $request->get('sku');
-        $name = $request->get('name');
+        $validated = $request->validated();
+        $codeValue = (string) ($validated['code'] ?? $validated['sku'] ?? '');
+        $match = $this->productCodeService->findActive($codeValue);
 
-        if (empty($sku)) {
+        if (! $match) {
             return response()->json(['data' => []]);
         }
 
-        $query = Product::query()
-            ->select(['id', 'name', 'sku_base'])
-            ->where('sku_base', 'ilike', '%'.$sku.'%')
-            ->limit(5);
+        if (($validated['exclude_variant_id'] ?? null) === $match->variant_id) {
+            return response()->json(['data' => []]);
+        }
+        if (($validated['exclude_product_id'] ?? null) === $match->product_id) {
+            return response()->json(['data' => []]);
+        }
 
-        $duplicates = $query->get();
-
-        return response()->json(['data' => $duplicates]);
+        return response()->json(['data' => [[
+            'id' => $match->product_id,
+            'variant_id' => $match->variant_id,
+            'name' => $match->product->name,
+            'sku_base' => $match->product->sku_base,
+            'primary_code' => $match->variant?->codes->firstWhere('is_primary', true)?->code
+                ?? $match->product->codes->firstWhere('is_primary', true)?->code,
+            'matched_code' => $match->code,
+            'normalized_code' => $match->normalized_code,
+            'url' => '/products/'.$match->product_id.'/edit',
+        ]]]);
     }
 
     /**
@@ -332,15 +355,14 @@ class ProductController extends Controller
     }
 
     /**
-     * GET /api/v1/products/next-sku?category_id=X
-     * Returns the next auto-generated SKU for a category.
+     * Kept temporarily so older clients receive an explicit deprecation response.
      */
     public function nextSku(Request $request): JsonResponse
     {
-        $categoryId = $request->input('category_id');
-        $sku = $this->productService->autoGenerateSku($categoryId ? (int) $categoryId : null);
-
-        return response()->json(['sku' => $sku]);
+        return response()->json([
+            'message' => 'La generación automática de códigos comerciales fue retirada.',
+            'code' => 'PRODUCT_CODE_AUTO_GENERATION_REMOVED',
+        ], 410);
     }
 
     /**

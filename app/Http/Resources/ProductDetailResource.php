@@ -17,6 +17,9 @@ class ProductDetailResource extends JsonResource
     {
         // Get default variant or first variant
         $defaultVariant = $this->defaultVariant ?? $this->variants?->first();
+        $effectiveCodes = $defaultVariant?->relationLoaded('codes')
+            ? $defaultVariant->codes
+            : ($this->relationLoaded('codes') ? $this->codes : collect());
         $pricing = $this->relationLoaded('pricing') ? $this->pricing : null;
         $saleTaxRate = (float) ($pricing?->sale_tax_rate ?? $pricing?->tax_rate ?? 0);
         $costTaxRate = (float) ($pricing?->cost_tax_rate ?? $pricing?->tax_rate ?? $saleTaxRate);
@@ -28,6 +31,13 @@ class ProductDetailResource extends JsonResource
             'system_id' => $this->system_id,
             'sku_base' => $this->sku_base,
             'alternate_code' => $this->alternate_code,
+            'primary_code' => $effectiveCodes->firstWhere('is_primary', true)?->code ?? $this->sku_base,
+            'codes' => $effectiveCodes->map(fn ($code) => [
+                'id' => $code->id,
+                'code' => $code->code,
+                'type' => $code->type,
+                'is_primary' => (bool) $code->is_primary,
+            ])->values(),
             'pricing_formula' => $this->pricing_formula,
             'name' => $this->name,
             'description' => $this->description,
@@ -81,6 +91,17 @@ class ProductDetailResource extends JsonResource
                     'id' => $defaultVariant->id,
                     'sku' => $defaultVariant->sku,
                     'upc' => $defaultVariant->upc,
+                    'primary_code' => $defaultVariant->relationLoaded('codes')
+                        ? $defaultVariant->codes->firstWhere('is_primary', true)?->code
+                        : $defaultVariant->sku,
+                    'codes' => $defaultVariant->relationLoaded('codes')
+                        ? $defaultVariant->codes->map(fn ($code) => [
+                            'id' => $code->id,
+                            'code' => $code->code,
+                            'type' => $code->type,
+                            'is_primary' => (bool) $code->is_primary,
+                        ])->values()
+                        : [],
                     'is_default' => $defaultVariant->is_default,
                     'brand' => [
                         'id' => $defaultVariant->brand?->id,

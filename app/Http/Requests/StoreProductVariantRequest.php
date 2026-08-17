@@ -22,6 +22,11 @@ class StoreProductVariantRequest extends FormRequest
             'sku' => ['nullable', 'string', 'max:255'],
             'upc' => ['nullable', 'string', 'max:50'],
             'status' => 'nullable|in:active,discontinued,pending',
+            'codes' => 'nullable|array|max:25',
+            'codes.*.id' => 'nullable|integer',
+            'codes.*.code' => 'required|string|max:255',
+            'codes.*.type' => 'required|in:sku,upc,alternate,manual',
+            'codes.*.is_primary' => 'required|boolean',
 
             'pricing' => 'nullable|array',
             'pricing.base_price' => 'required_with:pricing|numeric|min:0',
@@ -59,6 +64,7 @@ class StoreProductVariantRequest extends FormRequest
             'initial_inventory.*.warehouse_id.exists' => 'El almacen seleccionado no existe.',
             'initial_inventory.*.stock_available.min' => 'El stock inicial debe ser mayor o igual a 0.',
             'attributes.missing' => 'Los atributos no se actualizan desde este formulario.',
+            'codes.*.code.required' => 'Cada código debe tener un valor.',
         ];
     }
 

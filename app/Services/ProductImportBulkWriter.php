@@ -105,6 +105,7 @@ class ProductImportBulkWriter
             $pricingRows = [];
             $inventoryRows = [];
             $inventoryPayloads = [];
+            $productCodeRows = [];
 
             foreach ($rows as $row) {
                 $productSystemId = $productSystemIdByKey[$row['product_key']];
@@ -115,6 +116,22 @@ class ProductImportBulkWriter
                     'product_id' => $productId,
                     'variant_id' => $variantId,
                 ];
+
+                if (($row['variant']['normalized_code'] ?? '') !== '') {
+                    $productCodeRows[] = [
+                        'product_id' => $productId,
+                        'variant_id' => $variantId,
+                        'code' => $row['variant']['sku'],
+                        'normalized_code' => $row['variant']['normalized_code'],
+                        'type' => 'sku',
+                        'status' => 'active',
+                        'is_primary' => true,
+                        'metadata' => json_encode(['source' => 'product_import'], JSON_UNESCAPED_UNICODE),
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                        'deleted_at' => null,
+                    ];
+                }
 
                 if ($row['variant']['pricing'] !== null) {
                     $pricing = $row['variant']['pricing'];
@@ -174,6 +191,10 @@ class ProductImportBulkWriter
 
             if ($pricingRows !== []) {
                 DB::table('product_pricing')->insert($pricingRows);
+            }
+
+            if ($productCodeRows !== []) {
+                DB::table('product_codes')->insert($productCodeRows);
             }
 
             if ($inventoryRows !== []) {
