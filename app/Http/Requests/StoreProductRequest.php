@@ -167,6 +167,11 @@ class StoreProductRequest extends FormRequest
             'sku' => 'nullable|string|max:50',
             'upc' => 'nullable|string|max:255',
             'brand_id' => 'nullable|exists:brands,id',
+            'codes' => 'nullable|array|max:25',
+            'codes.*.id' => 'nullable|integer',
+            'codes.*.code' => 'required|string|max:255',
+            'codes.*.type' => 'required|in:sku,upc,alternate,manual',
+            'codes.*.is_primary' => 'required|boolean',
 
             // Pricing (opcional, solo si se crea variante default)
             'pricing' => 'nullable|array',
@@ -244,6 +249,8 @@ class StoreProductRequest extends FormRequest
             'vins.*.max' => 'El VIN no puede tener más de 40 caracteres',
             'oem_references.*.min' => 'La referencia debe tener al menos 1 carácter',
             'oem_references.*.max' => 'La referencia no puede exceder 100 caracteres',
+            'codes.*.code.required' => 'Cada código debe tener un valor.',
+            'codes.*.type.in' => 'El tipo de código seleccionado no es válido.',
         ];
     }
 }

@@ -2626,7 +2626,7 @@ class ReportService
 
     public function generateBalanceSheet(array $filters): array
     {
-        return app(FinancialSnapshotService::class)->balanceSheet($filters);
+        return app(BalanceSheetLedgerService::class)->generate($filters);
     }
 
     public function generateExpenseBreakdown(array $filters): array

@@ -10,6 +10,7 @@ use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
@@ -19,6 +20,7 @@ use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\FinancialSnapshotService;
+use App\Services\OperationalLedgerService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 
@@ -189,7 +191,7 @@ it('reuses cached snapshots for past days but keeps today fresh', function (): v
         ->count())->toBe(1);
 });
 
-it('returns financial drilldown rows and marks formal accounting reports pending without ledger data', function (): void {
+it('returns financial drilldown rows and marks formal accounting reports available after operational posting', function (): void {
     [$admin, $warehouse, $product, $variant] = dailySummaryContext();
     $customer = Customer::create([
         'code' => 'C-DRILLDOWN',
@@ -259,8 +261,8 @@ it('returns financial drilldown rows and marks formal accounting reports pending
     $this->actingAs($admin)
         ->getJson('/api/v1/reports/financial-advanced-status')
         ->assertOk()
-        ->assertJsonPath('ledger.is_available', false)
-        ->assertJsonPath('reports.5.status', 'pending');
+        ->assertJsonPath('ledger.is_available', true)
+        ->assertJsonPath('reports.5.status', 'available');
 });
 
 it('keeps inventory trace fields internal and paginates drilldowns with supported page sizes', function (): void {
@@ -584,7 +586,7 @@ it('places receivables in assets and reconciles assets with liabilities and equi
     ]);
 
     $supplier = Supplier::create(['name' => 'Proveedor Balance Sheet']);
-    PurchaseOrder::create([
+    $balancePurchase = PurchaseOrder::create([
         'po_number' => 'PO-BS-001',
         'supplier_id' => $supplier->id,
         'warehouse_id' => $warehouse->id,
@@ -597,6 +599,20 @@ it('places receivables in assets and reconciles assets with liabilities and equi
         'shipping_cost' => 0,
         'total' => 40,
     ]);
+    PurchaseOrderItem::create([
+        'purchase_order_id' => $balancePurchase->id,
+        'supplier_id' => $supplier->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'quantity_ordered' => 4,
+        'quantity_received' => 4,
+        'unit_cost' => 10,
+        'subtotal' => 40,
+        'tax_rate' => 0,
+        'tax_amount' => 0,
+        'misc_cost' => 0,
+    ]);
+    app(OperationalLedgerService::class)->syncPurchaseOrder($balancePurchase->fresh());
     InventoryLot::create([
         'product_id' => $product->id,
         'variant_id' => $variant->id,
@@ -631,8 +647,8 @@ it('places receivables in assets and reconciles assets with liabilities and equi
         ->assertOk()
         ->assertJsonPath('assets.accounts_receivable', 50)
         ->assertJsonPath('liabilities.accounts_payable', 40)
-        ->assertJsonPath('liabilities.customer_credits', 10)
-        ->assertJsonPath('liabilities.pending_refunds', 7)
+        ->assertJsonPath('liabilities.customer_credits', 2)
+        ->assertJsonPath('liabilities.pending_refunds', 5)
         ->assertJsonPath('totals.reconciliation_difference', 0);
 
     expect((float) $response->json('totals.total_assets'))

@@ -17,6 +17,8 @@ use Illuminate\Support\Facades\DB;
 
 class ProductService
 {
+    public function __construct(private readonly ProductCodeService $productCodeService) {}
+
     /**
      * Normalize incoming attribute payload into name/value/unit triplets.
      *
@@ -631,11 +633,10 @@ class ProductService
         try {
             $primaryCategoryId = $data['category_id'] ?? null;
             $extraCategoryIds = $this->normalizeExtraCategoryIds($data['extra_category_ids'] ?? [], $primaryCategoryId);
-            // sku_base is required — auto-generate if not provided or empty
-            $skuBase = $data['sku_base'] ?? null;
-            if (empty($skuBase)) {
-                $skuBase = $this->autoGenerateSku($primaryCategoryId);
-            }
+            // Commercial codes are optional. system_id remains the internal identity.
+            $skuBase = is_string($data['sku_base'] ?? null) && trim($data['sku_base']) !== ''
+                ? trim($data['sku_base'])
+                : null;
 
             // Auto-generate name only when not provided.
             $name = $data['name'] ?? null;
@@ -675,6 +676,7 @@ class ProductService
                     'brand_id' => $data['brand_id'],
                     'sku' => $data['sku'] ?? $skuBase,
                     'upc' => $data['upc'] ?? null,
+                    'codes' => $this->productCodeService->variantCodesFromPayload($data, $skuBase),
                     'status' => $data['status'] ?? 'active',
                     'is_default' => true,
                 ]);
@@ -709,6 +711,11 @@ class ProductService
                         );
                     }
                 }
+            } else {
+                $this->productCodeService->syncForProduct(
+                    $product,
+                    $this->productCodeService->productCodesFromPayload($data)
+                );
             }
 
             // Assign attributes at product level, regardless of default variant presence.
@@ -754,7 +761,7 @@ class ProductService
 
             DB::commit();
 
-            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories', 'attributes']);
+            return $product->fresh(['codes', 'variants.codes', 'variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories', 'attributes']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -773,12 +780,17 @@ class ProductService
 
         $variant = $product->variants()->create([
             'brand_id' => $data['brand_id'],
-            'sku' => $data['sku'],
+            'sku' => $data['sku'] ?? null,
             'upc' => $data['upc'] ?? null,
             'status' => $data['status'] ?? 'active',
             'is_default' => $data['is_default'] ?? false,
             'system_id' => $systemId,
         ]);
+
+        $this->productCodeService->syncForVariant(
+            $variant,
+            $this->productCodeService->variantCodesFromPayload($data)
+        );
 
         return $variant;
     }
@@ -791,15 +803,15 @@ class ProductService
     public function createVariantWithInitialInventory(Product $product, array $data): ProductVariant
     {
         return DB::transaction(function () use ($product, $data) {
-            $sku = $data['sku'] ?? null;
-            if (! is_string($sku) || trim($sku) === '') {
-                $sku = $this->generateSkuForVariant($product, (int) $data['brand_id']);
-            }
+            $sku = is_string($data['sku'] ?? null) && trim($data['sku']) !== ''
+                ? trim($data['sku'])
+                : null;
 
             $variant = $this->createVariant($product, [
                 'brand_id' => $data['brand_id'],
                 'sku' => $sku,
                 'upc' => $data['upc'] ?? null,
+                'codes' => $this->productCodeService->variantCodesFromPayload($data),
                 'status' => $data['status'] ?? 'active',
                 'is_default' => false,
             ]);
@@ -879,15 +891,6 @@ class ProductService
         });
     }
 
-    private function generateSkuForVariant(Product $product, int $brandId): string
-    {
-        $base = $product->sku_base ?: ($product->name ? substr($product->name, 0, 10) : 'PROD');
-        $brand = Brand::find($brandId);
-        $brandCode = $brand ? substr($brand->name, 0, 3) : 'XXX';
-
-        return strtoupper($base.'-'.$brandCode.'-'.substr(uniqid(), -6));
-    }
-
     /**
      * Update product information.
      */
@@ -924,6 +927,26 @@ class ProductService
 
             if (! empty($updatePayload)) {
                 $product->update($updatePayload);
+            }
+
+            if (array_key_exists('codes', $data)) {
+                $product->loadMissing('defaultVariant');
+                if ($product->defaultVariant) {
+                    $this->productCodeService->syncForVariant($product->defaultVariant, $data['codes'] ?? []);
+                } else {
+                    $this->productCodeService->syncForProduct($product, $data['codes'] ?? []);
+                }
+            } elseif (array_key_exists('sku_base', $data) || array_key_exists('alternate_code', $data)) {
+                $product->loadMissing('defaultVariant');
+                $legacyCodes = $this->productCodeService->productCodesFromPayload([
+                    'sku_base' => $product->sku_base,
+                    'alternate_code' => $product->alternate_code,
+                ]);
+                if ($product->defaultVariant) {
+                    $this->productCodeService->syncForVariant($product->defaultVariant, $legacyCodes);
+                } else {
+                    $this->productCodeService->syncForProduct($product, $legacyCodes);
+                }
             }
 
             $currentCategoryId = array_key_exists('category_id', $data)
@@ -1017,7 +1040,7 @@ class ProductService
 
             DB::commit();
 
-            return $product->fresh(['variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories', 'attributes']);
+            return $product->fresh(['codes', 'variants.codes', 'variants.brand', 'variants.pricing', 'pricing', 'variants.inventory', 'productLine', 'category', 'extraCategories', 'attributes']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -1040,9 +1063,21 @@ class ProductService
                 'status' => $data['status'] ?? $variant->status,
             ]);
 
+            if (array_key_exists('codes', $data)) {
+                $this->productCodeService->syncForVariant($variant, $data['codes'] ?? []);
+            } elseif (array_key_exists('sku', $data) || array_key_exists('upc', $data)) {
+                $this->productCodeService->syncForVariant(
+                    $variant,
+                    $this->productCodeService->variantCodesFromPayload([
+                        'sku' => $variant->sku,
+                        'upc' => $variant->upc,
+                    ])
+                );
+            }
+
             DB::commit();
 
-            return $variant->fresh(['brand', 'inventory']);
+            return $variant->fresh(['brand', 'codes', 'inventory']);
         } catch (\Exception $e) {
             DB::rollBack();
             throw $e;
@@ -1125,11 +1160,14 @@ class ProductService
     public function getProductDetail(int $productId, array $includes = [], ?int $warehouseId = null): ?Product
     {
         $query = Product::with([
+            'codes',
             'variants.brand',
+            'variants.codes',
             'variants.pricing',
             'variants.suppliers',
             'pricing',
             'defaultVariant.brand',
+            'defaultVariant.codes',
             'defaultVariant.pricing',
             'productLine',
             'category.media',
@@ -1244,45 +1282,6 @@ class ProductService
         $product->setRelation('alternatives', $existing);
 
         return $product;
-    }
-
-    /**
-     * Auto-generate a sequential SKU based on category prefix.
-     * Format: [PREFIX]-[0001] where PREFIX = first 3 uppercase letters of category name.
-     */
-    public function autoGenerateSku(?int $categoryId): string
-    {
-        $prefix = 'GEN';
-
-        if ($categoryId) {
-            $category = Category::find($categoryId);
-            if ($category) {
-                $prefix = strtoupper(substr(preg_replace('/[^a-zA-Z]/', '', $category->name), 0, 3));
-                if (strlen($prefix) < 3) {
-                    $prefix = str_pad($prefix, 3, 'X');
-                }
-            }
-        }
-
-        // Fetch SKUs to find the max number safely in PHP
-        $skus = Product::where('sku_base', 'LIKE', $prefix.'-%')
-            ->pluck('sku_base');
-
-        $maxNumber = 0;
-        foreach ($skus as $sku) {
-            $parts = explode('-', $sku);
-            $lastPart = end($parts);
-            if (is_numeric($lastPart)) {
-                $num = (int) $lastPart;
-                if ($num > $maxNumber) {
-                    $maxNumber = $num;
-                }
-            }
-        }
-
-        $nextNumber = $maxNumber + 1;
-
-        return $prefix.'-'.str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -1783,8 +1782,9 @@ class ProductService
             foreach ($source->variants as $sourceVariant) {
                 $duplicatedVariant = $this->createVariant($duplicatedProduct, [
                     'brand_id' => $sourceVariant->brand_id,
-                    'sku' => $sourceVariant->sku,
-                    'upc' => $sourceVariant->upc,
+                    'sku' => null,
+                    'upc' => null,
+                    'codes' => [],
                     'status' => $sourceVariant->status,
                     'is_default' => (bool) $sourceVariant->is_default,
                 ]);

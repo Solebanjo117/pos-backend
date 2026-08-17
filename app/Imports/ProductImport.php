@@ -9,11 +9,14 @@ use App\Models\ImportRun;
 use App\Models\ImportRunRecord;
 use App\Models\Product;
 use App\Models\ProductAttribute;
+use App\Models\ProductCode;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\ProductVehicleCompatibility;
 use App\Models\Warehouse;
 use App\Services\BrandResolver;
+use App\Services\ProductCodeNormalizer;
+use App\Services\ProductCodeService;
 use App\Services\ProductImportBulkWriter;
 use App\Services\ProductImportVehicleResolver;
 use App\Services\ProductImportVendorResolver;
@@ -39,6 +42,16 @@ class ProductImport extends BaseImport
     private const ACTION_CONFLICT = 'conflict';
 
     private const ACTION_INVALID = 'invalid';
+
+    private const RESOLUTION_EXISTING = 'existing';
+
+    private const RESOLUTION_NEW_VARIANT = 'new_variant';
+
+    private const RESOLUTION_NEW_PRODUCT = 'new_product';
+
+    private const RESOLUTION_REVIEW = 'review';
+
+    private const RESOLUTION_CONFLICT = 'conflict';
 
     private const LATEST_RESULT_LIMIT = 100;
 
@@ -72,6 +85,8 @@ class ProductImport extends BaseImport
     private array $variantBrandSkuKeysByProduct = [];
 
     private array $productMatchesByCategoryName = [];
+
+    private array $productCodesByNormalized = [];
 
     private ?Collection $cachedCategories = null;
 
@@ -111,8 +126,8 @@ class ProductImport extends BaseImport
         ?BrandResolver $brandResolver = null,
         ?ProductImportVendorResolver $vendorResolver = null,
         ?ProductImportVehicleResolver $vehicleResolver = null,
-    )
-    {
+        private readonly ?ProductCodeNormalizer $productCodeNormalizer = null,
+    ) {
         $this->bulkWriter = $bulkWriter ?? app(ProductImportBulkWriter::class);
         $this->brandResolver = $brandResolver ?? app(BrandResolver::class);
         $this->vendorResolver = $vendorResolver ?? app(ProductImportVendorResolver::class);
@@ -610,30 +625,7 @@ class ProductImport extends BaseImport
 
     private function fastRowOperationPreview(array $row, array $previewData, array $errors, array $duplicateKeys, ?string $duplicateKey = null): array
     {
-        $conflicts = [];
-        $duplicateKey ??= $this->rowConflictKey($row);
-
-        if ($duplicateKey !== '' && (int) ($duplicateKeys[$duplicateKey] ?? 0) > 1) {
-            $conflicts[] = [
-                'field' => 'fila',
-                'type' => 'duplicate_in_file',
-                'message' => 'Hay otra fila con la misma identidad de producto y variante en este archivo.',
-            ];
-        }
-
-        if ($conflicts !== []) {
-            $actionType = self::ACTION_CONFLICT;
-        } elseif ($errors !== []) {
-            $actionType = self::ACTION_INVALID;
-        } else {
-            $actionType = self::ACTION_CREATE;
-        }
-
-        return [
-            'action_type' => $actionType,
-            'change_preview' => [],
-            'conflicts' => $conflicts,
-        ];
+        return $this->rowOperationPreview($row, $previewData, $errors, $duplicateKeys, $duplicateKey);
     }
 
     /**
@@ -651,6 +643,7 @@ class ProductImport extends BaseImport
             ! in_array($this->mode, [ImportRun::MODE_CREATE_UPDATE, ImportRun::MODE_CREATE_ONLY], true)
             || $this->hasProductWriteListeners()
             || ($operation['action_type'] ?? null) !== self::ACTION_CREATE
+            || ($operation['resolution_type'] ?? null) !== self::RESOLUTION_NEW_PRODUCT
             || $rowErrors !== []
             || ($operation['conflicts'] ?? []) !== []
             || ! empty($row['__variants'])
@@ -701,6 +694,7 @@ class ProductImport extends BaseImport
             'variant' => [
                 'brand_id' => (int) $brand->id,
                 'sku' => $sku,
+                'normalized_code' => $this->codeNormalizer()->normalize($sku),
                 'system_id' => $this->nullIfEmpty($row['system_id'] ?? null),
                 'pricing' => $cost !== null || $price !== null
                     ? [
@@ -888,6 +882,7 @@ class ProductImport extends BaseImport
                 'data' => $row,
                 'error' => $e->getMessage(),
                 'action_type' => $operation['action_type'],
+                'resolution_type' => $operation['resolution_type'] ?? self::RESOLUTION_REVIEW,
                 'change_preview' => $operation['change_preview'],
                 'conflicts' => $operation['conflicts'],
             ]);
@@ -908,6 +903,7 @@ class ProductImport extends BaseImport
             'label' => $row[$this->getLabelColumn()] ?? '',
             'id' => $resultId,
             'action_type' => $operation['action_type'],
+            'resolution_type' => $operation['resolution_type'] ?? self::RESOLUTION_REVIEW,
             'change_preview' => $operation['change_preview'],
         ]);
     }
@@ -952,6 +948,7 @@ class ProductImport extends BaseImport
                     'label' => $previewRow['data'][$this->getLabelColumn()] ?? '',
                     'id' => null,
                     'action_type' => $previewRow['action_type'],
+                    'resolution_type' => $previewRow['resolution_type'] ?? self::RESOLUTION_REVIEW,
                     'change_preview' => $previewRow['change_preview'],
                 ]);
 
@@ -968,6 +965,7 @@ class ProductImport extends BaseImport
                 'data' => $previewRow['data'],
                 'error' => implode(' ', $errorMessages),
                 'action_type' => $previewRow['action_type'],
+                'resolution_type' => $previewRow['resolution_type'] ?? self::RESOLUTION_REVIEW,
                 'change_preview' => $previewRow['change_preview'],
                 'conflicts' => $previewRow['conflicts'],
             ]);
@@ -1180,6 +1178,7 @@ class ProductImport extends BaseImport
                     'errors' => $rowErrors,
                     'warnings' => $rowWarnings,
                     'action_type' => $operation['action_type'],
+                    'resolution_type' => $operation['resolution_type'],
                     'change_preview' => $operation['change_preview'],
                     'conflicts' => $operation['conflicts'],
                     'source_data' => $row['__source_data'] ?? null,
@@ -1219,7 +1218,10 @@ class ProductImport extends BaseImport
         foreach ($rows as $row) {
             $productKey = $this->productGroupingKey($row);
             $variantKey = $productKey !== '' ? $this->variantGroupingKey($row) : '';
-            $conflictKey = $productKey !== '' ? $productKey.'|'.$variantKey : '';
+            $normalizedCode = $this->codeNormalizer()->normalize($this->nullIfEmpty($row['sku'] ?? null));
+            $conflictKey = $normalizedCode !== ''
+                ? 'commercial-code:'.$normalizedCode
+                : ($productKey !== '' ? $productKey.'|'.$variantKey : '');
             $context = $storeRowKeys ? $this->rowContext($row) : null;
 
             if ($storeRowKeys) {
@@ -1331,9 +1333,50 @@ class ProductImport extends BaseImport
 
         return [
             'action_type' => $actionType,
+            'resolution_type' => $this->resolutionType(
+                $row,
+                $errors,
+                $conflicts,
+                $match['product'] ?? null,
+                $match['variant'] ?? null,
+            ),
             'change_preview' => $changePreview,
             'conflicts' => $conflicts,
         ];
+    }
+
+    private function resolutionType(
+        array $row,
+        array $errors,
+        array $conflicts,
+        ?Product $product,
+        ?ProductVariant $variant
+    ): string {
+        if ($conflicts !== []) {
+            return self::RESOLUTION_CONFLICT;
+        }
+
+        if ($errors !== []) {
+            return self::RESOLUTION_REVIEW;
+        }
+
+        if ($product === null) {
+            return self::RESOLUTION_NEW_PRODUCT;
+        }
+
+        if ($variant !== null) {
+            return self::RESOLUTION_EXISTING;
+        }
+
+        $brandName = $this->brandNameForRow($row);
+        $brand = $brandName !== null ? $this->resolveBrandForImport($brandName, false, false) : null;
+        if ($brand === null) {
+            return self::RESOLUTION_EXISTING;
+        }
+
+        return $product->variants()->where('brand_id', $brand->id)->exists()
+            ? self::RESOLUTION_EXISTING
+            : self::RESOLUTION_NEW_VARIANT;
     }
 
     /**
@@ -1343,12 +1386,43 @@ class ProductImport extends BaseImport
     {
         $conflicts = [];
         $variant = null;
+        $product = null;
         $systemId = $this->nullIfEmpty($row['system_id'] ?? null);
         $brandName = $this->brandNameForRow($row);
         $brand = $brandName !== null ? $this->resolveBrandForImport($brandName, false, false) : null;
         $sku = $this->nullIfEmpty($row['sku'] ?? null);
 
-        if ($systemId !== null) {
+        if ($sku !== null) {
+            $normalizedCode = $this->codeNormalizer()->normalize($sku);
+            $codeMatches = $this->productCodesByNormalized[$normalizedCode] ?? collect();
+            $ownerCount = $codeMatches
+                ->map(fn (ProductCode $code): string => $code->variant_id ? 'variant:'.$code->variant_id : 'product:'.$code->product_id)
+                ->unique()
+                ->count();
+
+            if ($codeMatches->contains(fn (ProductCode $code): bool => $code->status === 'conflict') || $ownerCount > 1) {
+                $conflicts[] = [
+                    'field' => 'sku',
+                    'type' => 'legacy_code_conflict',
+                    'message' => 'El código comercial está marcado como conflicto histórico y requiere revisión.',
+                ];
+            } else {
+                $matchedCode = $codeMatches->firstWhere('status', 'active');
+                if ($matchedCode instanceof ProductCode) {
+                    $variant = $matchedCode->variant;
+                    $product = $matchedCode->product;
+                    if ($variant !== null && $brand !== null && (int) $variant->brand_id !== (int) $brand->id) {
+                        $conflicts[] = [
+                            'field' => 'brand',
+                            'type' => 'identity_mismatch',
+                            'message' => 'El código comercial pertenece a una variante de otra marca.',
+                        ];
+                    }
+                }
+            }
+        }
+
+        if ($variant === null && $systemId !== null) {
             if (array_key_exists($systemId, $this->variantsBySystemId)) {
                 $cachedVariant = $this->variantsBySystemId[$systemId];
                 $variant = $cachedVariant instanceof ProductVariant
@@ -1378,17 +1452,17 @@ class ProductImport extends BaseImport
             }
         }
 
-        $product = $variant?->product;
+        $product ??= $variant?->product;
         if (! $previewProductDataPrecomputed) {
             $previewProductData ??= $this->previewProductData($row);
         }
-        $productByName = $previewProductData !== null ? $this->findExistingProduct($previewProductData) : null;
+        $productByName = $previewProductData !== null ? $this->findExistingProduct($previewProductData, false) : null;
 
         if ($product !== null && $productByName !== null && (int) $product->id !== (int) $productByName->id) {
             $conflicts[] = [
                 'field' => 'system_id',
                 'type' => 'identity_mismatch',
-                'message' => 'El SKU/System ID apunta a un producto distinto al nombre y categoria detectados.',
+                'message' => 'El código/System ID apunta a un producto distinto al nombre y categoría detectados.',
             ];
         }
 
@@ -1622,6 +1696,9 @@ class ProductImport extends BaseImport
         }
 
         $actionCounts = $this->actionCountsFromPreviewRows($previewRows);
+        $resolutionCounts = collect($previewRows)
+            ->countBy(fn (array $row): string => (string) ($row['resolution_type'] ?? self::RESOLUTION_REVIEW))
+            ->all();
         $conflictCounts = $this->conflictCountsFromPreviewRows($previewRows);
 
         return [
@@ -1661,6 +1738,7 @@ class ProductImport extends BaseImport
                 'brands' => collect($brandSuggestions)->unique('value')->values()->all(),
             ],
             'action_counts' => $actionCounts,
+            'resolution_counts' => $resolutionCounts,
             'conflict_counts' => $conflictCounts,
             'unchanged_count' => (int) ($actionCounts[self::ACTION_UNCHANGED] ?? 0),
             'conflict_count' => collect($conflictCounts)->sum(),
@@ -1969,7 +2047,7 @@ class ProductImport extends BaseImport
 
         $sku = $this->nullIfEmpty($row['sku'] ?? null);
         if ($sku !== null) {
-            return 'brand:'.$this->normalizeImportKey($this->brandNameForRow($row) ?? 'Sin marca').'|sku:'.$this->normalizeImportKey($sku);
+            return 'brand:'.$this->normalizeImportKey($this->brandNameForRow($row) ?? 'Sin marca').'|code:'.$this->codeNormalizer()->normalize($sku);
         }
 
         return 'brand:'.$this->normalizeImportKey($this->brandNameForRow($row) ?? 'Sin marca').'|name:'.$this->normalizeImportKey($this->originalProductName($row));
@@ -2007,6 +2085,7 @@ class ProductImport extends BaseImport
         $productLookupKeys = [];
         $categoryIds = [];
         $productNames = [];
+        $normalizedCodes = [];
         $position = 0;
 
         foreach ($rows as $row) {
@@ -2016,6 +2095,12 @@ class ProductImport extends BaseImport
             }
 
             $sku = $this->nullIfEmpty($row['sku'] ?? null);
+            if ($sku !== null) {
+                $normalizedCode = $this->codeNormalizer()->normalize($sku);
+                if ($normalizedCode !== '') {
+                    $normalizedCodes[$normalizedCode] = $normalizedCode;
+                }
+            }
             $brandName = $this->brandNameForRow($row);
             $brand = $brandName !== null ? $this->resolveBrandForImport($brandName, false, false) : null;
 
@@ -2038,6 +2123,22 @@ class ProductImport extends BaseImport
             }
 
             $position++;
+        }
+
+        if ($normalizedCodes !== []) {
+            foreach ($normalizedCodes as $normalizedCode) {
+                $this->productCodesByNormalized[$normalizedCode] ??= collect();
+            }
+
+            ProductCode::query()
+                ->whereIn('normalized_code', array_values($normalizedCodes))
+                ->whereIn('status', ['active', 'conflict'])
+                ->with(['product.category', 'product.attributes', 'product.vehicleCompatibility', 'variant.brand', 'variant.pricing', 'variant.inventory'])
+                ->get()
+                ->groupBy('normalized_code')
+                ->each(function (Collection $codes, string $normalizedCode): void {
+                    $this->productCodesByNormalized[$normalizedCode] = $codes;
+                });
         }
 
         if ($systemIds !== []) {
@@ -2104,6 +2205,11 @@ class ProductImport extends BaseImport
         return $brandId.'|'.$sku;
     }
 
+    private function codeNormalizer(): ProductCodeNormalizer
+    {
+        return $this->productCodeNormalizer ?? app(ProductCodeNormalizer::class);
+    }
+
     private function productSystemKey(int $productId, string $systemId): string
     {
         return $productId.'|'.$systemId;
@@ -2119,11 +2225,28 @@ class ProductImport extends BaseImport
         return $categoryId.'|'.mb_strtolower(trim($name));
     }
 
-    private function findExistingProduct(array $productData): ?Product
+    private function findExistingProduct(array $productData, bool $matchCommercialCode = true): ?Product
     {
         $name = mb_strtolower(trim((string) $productData['name']));
         $sku = $this->nullIfEmpty($productData['sku_base'] ?? null);
         $importKey = $this->nullIfEmpty($productData['__import_product_key'] ?? null);
+
+        if ($matchCommercialCode && $sku !== null) {
+            $normalizedCode = $this->codeNormalizer()->normalize($sku);
+            $codeMatches = $this->productCodesByNormalized[$normalizedCode] ?? collect();
+            $owners = $codeMatches
+                ->map(fn (ProductCode $code): string => $code->variant_id ? 'variant:'.$code->variant_id : 'product:'.$code->product_id)
+                ->unique();
+
+            if ($codeMatches->contains(fn (ProductCode $code): bool => $code->status === 'conflict') || $owners->count() > 1) {
+                throw new \RuntimeException('El código comercial está en conflicto histórico y no puede resolverse automáticamente.');
+            }
+
+            $matchedCode = $codeMatches->firstWhere('status', 'active');
+            if ($matchedCode instanceof ProductCode) {
+                return $matchedCode->product;
+            }
+        }
 
         if ($importKey !== null && isset($this->productIdsByImportKey[$importKey])) {
             $cachedProduct = $this->productsByImportKey[$importKey] ?? null;
@@ -2771,6 +2894,29 @@ class ProductImport extends BaseImport
             $variant->update(['system_id' => $importSystemId]);
         }
 
+        if ($variantSku !== '') {
+            $variant->loadMissing('codes');
+            $normalizedVariantSku = $this->codeNormalizer()->normalize($variantSku);
+            $hasImportedCode = $variant->codes->contains(
+                fn (ProductCode $code): bool => $code->normalized_code === $normalizedVariantSku
+            );
+
+            if (! $hasImportedCode) {
+                $codes = $variant->codes->map(fn (ProductCode $code): array => [
+                    'id' => $code->id,
+                    'code' => $code->code,
+                    'type' => $code->type,
+                    'is_primary' => (bool) $code->is_primary,
+                ])->values()->all();
+                $codes[] = [
+                    'code' => $variantSku,
+                    'type' => 'sku',
+                    'is_primary' => $codes === [],
+                ];
+                app(ProductCodeService::class)->syncForVariant($variant, $codes);
+            }
+        }
+
         $this->rememberVariantLookup($variant->refresh());
 
         if (! empty($variantData['pricing']) && $variant) {
@@ -2853,6 +2999,11 @@ class ProductImport extends BaseImport
 
     private function rememberVariantLookup(ProductVariant $variant): void
     {
+        $variant->loadMissing('codes');
+        foreach ($variant->codes as $code) {
+            $this->productCodesByNormalized[$code->normalized_code] = collect([$code->loadMissing(['product', 'variant'])]);
+        }
+
         if ($variant->system_id !== null) {
             $this->variantsBySystemId[$variant->system_id] = $this->largeBatchFastPath ? $variant->id : $variant;
             $this->variantSystemKeysByProduct[$this->productSystemKey((int) $variant->product_id, $variant->system_id)] = true;
@@ -2913,7 +3064,6 @@ class ProductImport extends BaseImport
 
         return $product->variants()
             ->where('brand_id', $brandId)
-            ->where('sku', $sku)
             ->first();
     }
 

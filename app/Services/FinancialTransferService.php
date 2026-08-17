@@ -205,6 +205,7 @@ class FinancialTransferService
         $this->ledgerPostingService->postManualEntry([
             'source_type' => 'financial_transfer',
             'source_id' => $transfer->id,
+            'posting_key' => 'financial_transfer:'.$transfer->id,
             'occurred_at' => $transfer->business_datetime,
             'memo' => 'Transferencia '.$transfer->folio,
             'created_by' => $user->id,

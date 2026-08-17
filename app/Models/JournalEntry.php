@@ -11,10 +11,13 @@ class JournalEntry extends Model
     protected $fillable = [
         'source_type',
         'source_id',
+        'posting_key',
+        'reverses_entry_id',
         'warehouse_id',
         'occurred_at',
         'status',
         'memo',
+        'metadata',
         'created_by',
     ];
 
@@ -22,6 +25,7 @@ class JournalEntry extends Model
     {
         return [
             'occurred_at' => 'datetime',
+            'metadata' => 'array',
         ];
     }
 

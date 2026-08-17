@@ -294,8 +294,8 @@ it('duplicates product preserving core setup and excluding inventory, vins and a
     expect($duplicated->variants)->toHaveCount(2);
 
     $duplicatedByBrand = $duplicated->variants->keyBy('brand_id');
-    expect($duplicatedByBrand[$data['variant_a']->brand_id]->sku)->toBe($data['variant_a']->sku);
-    expect($duplicatedByBrand[$data['variant_b']->brand_id]->sku)->toBe($data['variant_b']->sku);
+    expect($duplicatedByBrand[$data['variant_a']->brand_id]->sku)->toBeNull();
+    expect($duplicatedByBrand[$data['variant_b']->brand_id]->sku)->toBeNull();
     expect($duplicatedByBrand[$data['variant_a']->brand_id]->system_id)->not->toBe($data['variant_a']->system_id);
     expect($duplicatedByBrand[$data['variant_b']->brand_id]->system_id)->not->toBe($data['variant_b']->system_id);
 

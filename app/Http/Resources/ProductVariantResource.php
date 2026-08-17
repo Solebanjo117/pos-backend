@@ -19,6 +19,17 @@ class ProductVariantResource extends JsonResource
             'brand_id' => $this->brand_id,
             'sku' => $this->sku,
             'upc' => $this->upc,
+            'primary_code' => $this->relationLoaded('codes')
+                ? $this->codes->firstWhere('is_primary', true)?->code
+                : $this->sku,
+            'codes' => $this->relationLoaded('codes')
+                ? $this->codes->map(fn ($code) => [
+                    'id' => $code->id,
+                    'code' => $code->code,
+                    'type' => $code->type,
+                    'is_primary' => (bool) $code->is_primary,
+                ])->values()
+                : [],
             'is_default' => $this->is_default,
 
             'brand' => [

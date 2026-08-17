@@ -69,6 +69,11 @@ class ProductVariant extends Model
         return $this->hasMany(InventoryLot::class, 'variant_id');
     }
 
+    public function codes(): HasMany
+    {
+        return $this->hasMany(ProductCode::class, 'variant_id')->active()->orderByDesc('is_primary')->orderBy('id');
+    }
+
     /**
      * Get the suppliers for this variant
      */

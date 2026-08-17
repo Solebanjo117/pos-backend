@@ -17,6 +17,9 @@ class ProductResource extends JsonResource
     {
         // Get default variant or first variant
         $defaultVariant = $this->defaultVariant ?? $this->variants->first();
+        $effectiveCodes = $defaultVariant?->relationLoaded('codes')
+            ? $defaultVariant->codes
+            : ($this->relationLoaded('codes') ? $this->codes : collect());
 
         return [
             'id' => $this->id,
@@ -26,6 +29,13 @@ class ProductResource extends JsonResource
             'search_match_variant_id' => $this->search_match_variant_id ?? null,
             'sku_base' => $this->sku_base,
             'alternate_code' => $this->alternate_code,
+            'primary_code' => $effectiveCodes->firstWhere('is_primary', true)?->code ?? $this->sku_base,
+            'codes' => $effectiveCodes->map(fn ($code) => [
+                'id' => $code->id,
+                'code' => $code->code,
+                'type' => $code->type,
+                'is_primary' => (bool) $code->is_primary,
+            ])->values(),
             'pricing_formula' => $this->pricing_formula,
             'name' => $this->name,
             'status' => $this->status,
@@ -64,6 +74,9 @@ class ProductResource extends JsonResource
                 'id' => $defaultVariant?->id,
                 'sku' => $defaultVariant?->sku,
                 'upc' => $defaultVariant?->upc,
+                'primary_code' => $defaultVariant?->relationLoaded('codes')
+                    ? $defaultVariant->codes->firstWhere('is_primary', true)?->code
+                    : $defaultVariant?->sku,
                 'brand' => [
                     'id' => $defaultVariant?->brand?->id,
                     'name' => $defaultVariant?->brand?->name,

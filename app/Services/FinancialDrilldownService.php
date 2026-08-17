@@ -33,6 +33,7 @@ class FinancialDrilldownService
     public function __construct(
         private readonly FinancialSnapshotService $snapshots,
         private readonly TransactionTraceRegistry $traceRegistry,
+        private readonly BalanceSheetLedgerService $balanceSheetLedger,
     ) {}
 
     /**
@@ -48,6 +49,10 @@ class FinancialDrilldownService
         $perPage = min(100, max(10, (int) ($filters['per_page'] ?? 25)));
         $expenseCategory = trim((string) ($filters['expense_category'] ?? '')) ?: null;
         $expenseGroup = trim((string) ($filters['expense_group'] ?? '')) ?: null;
+
+        if (str_starts_with($metric, 'balance_')) {
+            return $this->ledgerBalanceDrilldown($metric, $to, $page, $perPage);
+        }
 
         return match ($metric) {
             'sales', 'sales_total' => $this->sales($metric, $from, $to, $warehouseId, $page, $perPage),
@@ -73,6 +78,48 @@ class FinancialDrilldownService
             'adjustments' => $this->adjustments($metric, $from, $to, $warehouseId, $page, $perPage),
             default => $this->emptyPayload($metric, 'Metrica no soportada', $page, $perPage, ['metric_not_supported']),
         };
+    }
+
+    /** @return array<string, mixed> */
+    private function ledgerBalanceDrilldown(string $metric, Carbon $to, int $page, int $perPage): array
+    {
+        $baseMetric = substr($metric, strlen('balance_'));
+        $metricMap = [
+            'inventory' => 'inventory_bridge',
+            'receivable' => 'receivable',
+            'payable' => 'payable',
+            'investment' => 'investment',
+            'retained_earnings' => 'retained_earnings',
+            'profit' => 'profit',
+        ];
+        $ledgerMetric = $metricMap[$baseMetric] ?? $baseMetric;
+        $rows = $this->balanceSheetLedger->drilldown($ledgerMetric, $to);
+        $labels = [
+            'cash' => 'Efectivo',
+            'bank' => 'Banco',
+            'inventory' => 'Inventario',
+            'receivable' => 'Cuentas por cobrar',
+            'payable' => 'Cuentas por pagar',
+            'customer_credits' => 'Saldos a favor',
+            'pending_refunds' => 'Reembolsos pendientes',
+            'investment' => 'Capital aportado',
+            'retained_earnings' => 'Resultados acumulados',
+            'profit' => 'Utilidad del periodo',
+            'assets' => 'Activos',
+            'liabilities' => 'Pasivos',
+            'equity' => 'Patrimonio',
+        ];
+
+        return $this->collectionPayload($metric, $labels[$baseMetric] ?? 'Balance contable', [
+            ['key' => 'occurred_at', 'label' => 'Fecha y hora', 'type' => 'datetime'],
+            ['key' => 'account', 'label' => 'Cuenta'],
+            ['key' => 'document', 'label' => 'Documento'],
+            ['key' => 'description', 'label' => 'Detalle'],
+            ['key' => 'user', 'label' => 'Usuario'],
+            ['key' => 'debit', 'label' => 'Débito', 'type' => 'money'],
+            ['key' => 'credit', 'label' => 'Crédito', 'type' => 'money'],
+            ['key' => 'amount', 'label' => 'Movimiento', 'type' => 'money'],
+        ], $rows, $page, $perPage);
     }
 
     private function sales(string $metric, Carbon $from, Carbon $to, ?int $warehouseId, int $page, int $perPage): array

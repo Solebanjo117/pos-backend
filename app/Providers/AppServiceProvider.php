@@ -4,10 +4,18 @@ namespace App\Providers;
 
 use App\Listeners\LogAuthenticationEvents;
 use App\Models\CapitalMovement;
+use App\Models\FinancialAccount;
 use App\Models\OperationalExpense;
+use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
 use App\Models\PurchaseOrderPayment;
+use App\Models\SalesOrder;
+use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;
+use App\Models\SalesReturn;
+use App\Models\SalesReturnItem;
 use App\Services\FinancialLiquiditySyncService;
+use App\Services\OperationalLedgerService;
 use Illuminate\Auth\Events\Login;
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -49,6 +57,25 @@ class AppServiceProvider extends ServiceProvider
             }
 
             $syncService->sync($expense);
+        });
+
+        SalesOrder::saved(fn (SalesOrder $order) => app(OperationalLedgerService::class)->syncSalesOrder($order));
+        SalesOrderItem::saved(fn (SalesOrderItem $item) => app(OperationalLedgerService::class)->syncSalesOrder($item->salesOrder));
+        SalesOrderItem::deleted(fn (SalesOrderItem $item) => app(OperationalLedgerService::class)->syncSalesOrder($item->salesOrder));
+        SalesOrderPayment::created(fn (SalesOrderPayment $payment) => app(OperationalLedgerService::class)->syncSalesPayment($payment));
+        PurchaseOrder::saved(fn (PurchaseOrder $order) => app(OperationalLedgerService::class)->syncPurchaseOrder($order));
+        PurchaseOrderItem::saved(fn (PurchaseOrderItem $item) => app(OperationalLedgerService::class)->syncPurchaseOrder($item->purchaseOrder));
+        PurchaseOrderItem::deleted(fn (PurchaseOrderItem $item) => app(OperationalLedgerService::class)->syncPurchaseOrder($item->purchaseOrder));
+        PurchaseOrderPayment::created(fn (PurchaseOrderPayment $payment) => app(OperationalLedgerService::class)->syncPurchasePayment($payment));
+        SalesReturn::saved(fn (SalesReturn $return) => app(OperationalLedgerService::class)->syncSalesReturn($return));
+        SalesReturnItem::saved(fn (SalesReturnItem $item) => app(OperationalLedgerService::class)->syncSalesReturn($item->salesReturn));
+        SalesReturnItem::deleted(fn (SalesReturnItem $item) => app(OperationalLedgerService::class)->syncSalesReturn($item->salesReturn));
+        CapitalMovement::created(fn (CapitalMovement $movement) => app(OperationalLedgerService::class)->syncCapitalMovement($movement));
+        FinancialAccount::saved(function (FinancialAccount $account): void {
+            $account->ledgerAccount()->update([
+                'report_group' => $account->type === 'bank' ? 'bank' : 'other_assets',
+                'normal_balance' => 'debit',
+            ]);
         });
 
         $listener = new LogAuthenticationEvents;

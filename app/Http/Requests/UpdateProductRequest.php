@@ -143,6 +143,11 @@ class UpdateProductRequest extends FormRequest
         return [
             'sku_base' => 'nullable|string|max:50',
             'alternate_code' => 'nullable|string|max:100',
+            'codes' => 'sometimes|array|max:25',
+            'codes.*.id' => 'nullable|integer',
+            'codes.*.code' => 'required|string|max:255',
+            'codes.*.type' => 'required|in:sku,upc,alternate,manual',
+            'codes.*.is_primary' => 'required|boolean',
             'pricing_formula' => 'nullable|string|max:255',
             'upc' => 'nullable|string|max:255',
             'product_line_id' => 'nullable|exists:product_lines,id',
@@ -227,6 +232,7 @@ class UpdateProductRequest extends FormRequest
             'sku_base.unique' => 'El SKU ya está en uso por otro producto',
             'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
             'status.in' => 'El estado debe ser: active, discontinued o pending',
+            'codes.*.code.required' => 'Cada código debe tener un valor.',
         ];
     }
 }

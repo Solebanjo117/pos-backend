@@ -454,6 +454,7 @@ class FinancialAdjustmentService
         $entry = $this->ledgerPostingService->postManualEntry([
             'source_type' => 'financial_adjustment',
             'source_id' => $adjustment->id,
+            'posting_key' => 'financial_adjustment:'.$adjustment->id,
             'warehouse_id' => $adjustment->warehouse_id,
             'occurred_at' => $adjustment->business_datetime,
             'memo' => $adjustment->folio.' — '.$adjustment->reason,
