@@ -22,7 +22,7 @@ class SmartReorderController extends Controller
     public function getLowStock(Request $request)
     {
         $warehouseId = $request->query('warehouse_id');
-        
+
         $data = $this->service->getLowStockProducts($warehouseId);
 
         return response()->json([
@@ -37,7 +37,7 @@ class SmartReorderController extends Controller
     public function getStats(Request $request)
     {
         $warehouseId = $request->query('warehouse_id');
-        
+
         $stats = $this->service->getLowStockStats($warehouseId);
 
         return response()->json([
@@ -75,13 +75,13 @@ class SmartReorderController extends Controller
         try {
             // Get first available user from database
             $userId = auth()->id();
-            if (!$userId) {
+            if (! $userId) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Usuario no autenticado. No se pueden crear órdenes de compra.',
                 ], 401);
             }
-            
+
             $orders = $this->service->batchCreatePurchaseOrders(
                 $request->input('orders'),
                 $userId
@@ -89,13 +89,13 @@ class SmartReorderController extends Controller
 
             return response()->json([
                 'success' => true,
-                'message' => count($orders) . ' purchase orders created successfully',
+                'message' => count($orders).' purchase orders created successfully',
                 'data' => $orders,
             ], 201);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Error creating purchase orders: ' . $e->getMessage(),
+                'message' => 'Error creating purchase orders: '.$e->getMessage(),
             ], 500);
         }
     }

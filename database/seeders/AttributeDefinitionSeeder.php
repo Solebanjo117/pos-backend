@@ -32,7 +32,7 @@ class AttributeDefinitionSeeder extends Seeder
                 'applicable_categories' => null,
                 'is_required' => false,
             ],
-            
+
             // Dimensiones
             [
                 'name' => 'Largo',
@@ -62,7 +62,7 @@ class AttributeDefinitionSeeder extends Seeder
                 'applicable_categories' => null,
                 'is_required' => false,
             ],
-            
+
             // Peso
             [
                 'name' => 'Peso',
@@ -71,7 +71,7 @@ class AttributeDefinitionSeeder extends Seeder
                 'applicable_categories' => null,
                 'is_required' => false,
             ],
-            
+
             // Capacidades
             [
                 'name' => 'Capacidad',
@@ -80,7 +80,7 @@ class AttributeDefinitionSeeder extends Seeder
                 'applicable_categories' => null,
                 'is_required' => false,
             ],
-            
+
             // Presión
             [
                 'name' => 'Presión',
@@ -89,7 +89,7 @@ class AttributeDefinitionSeeder extends Seeder
                 'applicable_categories' => null,
                 'is_required' => false,
             ],
-            
+
             // Temperatura
             [
                 'name' => 'Temperatura de operación',
@@ -98,7 +98,7 @@ class AttributeDefinitionSeeder extends Seeder
                 'applicable_categories' => null,
                 'is_required' => false,
             ],
-            
+
             // Atributos de texto
             [
                 'name' => 'Material',

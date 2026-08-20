@@ -2,14 +2,15 @@
 
 namespace App\Console\Commands;
 
-use Illuminate\Console\Command;
 use App\Models\Product;
 use App\Models\ProductPricing;
 use App\Models\ProductVariant;
+use Illuminate\Console\Command;
 
 class EnsureVariantPricing extends Command
 {
     protected $signature = 'app:ensure-variant-pricing';
+
     protected $description = 'Ensures every product variant has its own independent pricing record';
 
     public function handle()
@@ -31,8 +32,9 @@ class EnsureVariantPricing extends Command
                 ->orderBy('id')
                 ->first();
 
-            if (!$productPricing) {
+            if (! $productPricing) {
                 $this->warn("Variant {$variant->id} (product {$variant->product_id}): no pricing found to copy, skipping.");
+
                 continue;
             }
 

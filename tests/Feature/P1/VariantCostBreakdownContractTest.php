@@ -3,8 +3,8 @@
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\InventoryLot;
-use App\Models\ProductPricing;
 use App\Models\ProductInventory;
+use App\Models\ProductPricing;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -28,17 +28,17 @@ beforeEach(function () {
 
     $this->category = Category::create([
         'name' => 'Cost Breakdown Category',
-        'slug' => 'cost-breakdown-category-' . uniqid(),
+        'slug' => 'cost-breakdown-category-'.uniqid(),
         'priority' => 1,
     ]);
 
     $this->brandDefault = Brand::create([
-        'name' => 'Brand Cost Default ' . uniqid(),
+        'name' => 'Brand Cost Default '.uniqid(),
         'status' => 'active',
     ]);
 
     $this->brandVariant = Brand::create([
-        'name' => 'Brand Cost Variant ' . uniqid(),
+        'name' => 'Brand Cost Variant '.uniqid(),
         'status' => 'active',
     ]);
 });
@@ -47,10 +47,10 @@ function variantCostBaseProductPayload(Brand $brand, Category $category): array
 {
     return [
         'name' => 'Producto Costo Base',
-        'sku_base' => 'CST-' . strtoupper(substr(uniqid(), -6)),
+        'sku_base' => 'CST-'.strtoupper(substr(uniqid(), -6)),
         'category_id' => $category->id,
         'brand_id' => $brand->id,
-        'sku' => 'CST-VAR-' . strtoupper(substr(uniqid(), -6)),
+        'sku' => 'CST-VAR-'.strtoupper(substr(uniqid(), -6)),
         'pricing' => [
             'base_price' => 100,
             'msrp' => 120,
@@ -68,7 +68,7 @@ it('computes variant cost total from cost breakdown and syncs legacy cost alias'
 
     $createVariantResponse = $this->postJson("/api/v1/products/{$productId}/variants", [
         'brand_id' => $this->brandVariant->id,
-        'sku' => 'CST-BRK-' . strtoupper(substr(uniqid(), -6)),
+        'sku' => 'CST-BRK-'.strtoupper(substr(uniqid(), -6)),
         'pricing' => [
             'base_price' => 155,
             'msrp' => 165,
@@ -131,7 +131,7 @@ it('keeps legacy cost unchanged when cost_base is not explicitly provided', func
 
     $createVariantResponse = $this->postJson("/api/v1/products/{$productId}/variants", [
         'brand_id' => $this->brandVariant->id,
-        'sku' => 'CST-LEG-' . strtoupper(substr(uniqid(), -6)),
+        'sku' => 'CST-LEG-'.strtoupper(substr(uniqid(), -6)),
         'pricing' => [
             'base_price' => 130,
             'msrp' => 140,

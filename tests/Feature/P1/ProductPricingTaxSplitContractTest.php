@@ -26,12 +26,12 @@ beforeEach(function () {
 
     $this->category = Category::create([
         'name' => 'Filtros Tax Split',
-        'slug' => 'filtros-tax-split-' . uniqid(),
+        'slug' => 'filtros-tax-split-'.uniqid(),
         'priority' => 1,
     ]);
 
     $this->brand = Brand::create([
-        'name' => 'Brand Tax ' . uniqid(),
+        'name' => 'Brand Tax '.uniqid(),
         'status' => 'active',
     ]);
 });
@@ -40,10 +40,10 @@ function baseProductPayload(Brand $brand, Category $category, array $pricingOver
 {
     return [
         'name' => 'Producto Tax Split',
-        'sku_base' => 'TAX-' . strtoupper(substr(uniqid(), -6)),
+        'sku_base' => 'TAX-'.strtoupper(substr(uniqid(), -6)),
         'category_id' => $category->id,
         'brand_id' => $brand->id,
-        'sku' => 'TAX-VAR-' . strtoupper(substr(uniqid(), -6)),
+        'sku' => 'TAX-VAR-'.strtoupper(substr(uniqid(), -6)),
         'pricing' => array_merge([
             'base_price' => 100,
             'msrp' => 120,

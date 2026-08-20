@@ -51,7 +51,7 @@ class WarehouseController extends Controller
     public function show(int $id): JsonResponse
     {
         $warehouse = $this->warehouseService->getWarehouseById($id);
-        
+
         return response()->json([
             'data' => new WarehouseResource($warehouse),
         ]);

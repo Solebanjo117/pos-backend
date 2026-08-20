@@ -13,7 +13,7 @@ class Setting extends Model
      */
     public function getTypedValue()
     {
-        return match($this->type) {
+        return match ($this->type) {
             'boolean' => $this->value === 'true' || $this->value === '1',
             'number' => is_numeric($this->value) ? (float) $this->value : 0,
             'json' => json_decode($this->value, true),
@@ -27,6 +27,7 @@ class Setting extends Model
     public static function get($key, $default = null)
     {
         $setting = static::where('key', $key)->first();
+
         return $setting ? $setting->getTypedValue() : $default;
     }
 
@@ -36,7 +37,7 @@ class Setting extends Model
     public static function set($key, $value, $type = 'string', $group = 'general'): void
     {
         $valueToStore = is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
-        
+
         static::updateOrCreate(
             ['key' => $key],
             ['value' => $valueToStore, 'type' => $type, 'group' => $group]

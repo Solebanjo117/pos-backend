@@ -20,14 +20,14 @@ class LoginTest extends DuskTestCase
 
         $this->browse(function (Browser $browser) use ($user) {
             $browser->visit('/login')
-                    ->waitForText('Log in', 5) // Wait for Vue to render
-                    ->assertSee('Email address')
-                    ->assertSee('Password')
-                    ->type('#email', $user->email)
-                    ->type('#password', 'password123')
-                    ->click('[data-test="login-button"]')
-                    ->pause(3000) // Wait for Inertia/API to resolve
-                    ->assertPathIsNot('/login'); // Verifies we left the login page
+                ->waitForText('Log in', 5) // Wait for Vue to render
+                ->assertSee('Email address')
+                ->assertSee('Password')
+                ->type('#email', $user->email)
+                ->type('#password', 'password123')
+                ->click('[data-test="login-button"]')
+                ->pause(3000) // Wait for Inertia/API to resolve
+                ->assertPathIsNot('/login'); // Verifies we left the login page
         });
     }
 
@@ -38,12 +38,12 @@ class LoginTest extends DuskTestCase
     {
         $this->browse(function (Browser $browser) {
             $browser->visit('/login')
-                    ->waitForText('Log in', 5)
-                    ->type('#email', 'invalid@notexist.com')
-                    ->type('#password', 'wrongpassword')
-                    ->click('[data-test="login-button"]')
-                    ->pause(2000)
-                    ->assertSee('credentials'); // Laravel returns "These credentials do not match..."
+                ->waitForText('Log in', 5)
+                ->type('#email', 'invalid@notexist.com')
+                ->type('#password', 'wrongpassword')
+                ->click('[data-test="login-button"]')
+                ->pause(2000)
+                ->assertSee('credentials'); // Laravel returns "These credentials do not match..."
         });
     }
 }

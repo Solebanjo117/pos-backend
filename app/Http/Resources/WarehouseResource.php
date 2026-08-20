@@ -22,7 +22,7 @@ class WarehouseResource extends JsonResource
             'notes' => $this->notes,
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
-            
+
             // Statistics (if loaded)
             'total_products' => $this->whenNotNull($this->total_products),
             'total_units' => $this->whenNotNull($this->total_units),
@@ -31,7 +31,7 @@ class WarehouseResource extends JsonResource
             'out_of_stock_products' => $this->whenNotNull($this->out_of_stock_products),
             'utilization_percentage' => $this->when(
                 $this->capacity && $this->capacity > 0 && isset($this->total_units),
-                fn() => round(($this->total_units / $this->capacity) * 100, 2)
+                fn () => round(($this->total_units / $this->capacity) * 100, 2)
             ),
         ];
     }

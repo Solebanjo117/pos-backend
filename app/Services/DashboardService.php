@@ -2,8 +2,8 @@
 
 namespace App\Services;
 
-use App\Models\ProductInventory;
 use App\Models\OperationalExpense;
+use App\Models\ProductInventory;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesOrderPayment;

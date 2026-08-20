@@ -53,7 +53,7 @@ class DefaultSettingsSeeder extends Seeder
 
         foreach ($defaults as [$key, $value, $type, $group]) {
             // Only create if the setting doesn't exist yet — never overwrite user config
-            if (!Setting::where('key', $key)->exists()) {
+            if (! Setting::where('key', $key)->exists()) {
                 Setting::set($key, $value, $type, $group);
             }
         }

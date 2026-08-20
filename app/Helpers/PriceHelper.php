@@ -12,9 +12,9 @@ class PriceHelper
      * Examples with increment=0.50: 10.21 → 10.50, 10.51 → 11.00
      * Examples with increment=5.00: 10.21 → 15.00
      *
-     * @param  float  $price      The raw price to round
+     * @param  float  $price  The raw price to round
      * @param  float  $increment  Rounding step (0.25, 0.50, 1.00, 5.00, 10.00)
-     * @return float              The rounded price
+     * @return float The rounded price
      */
     public static function roundUp(float $price, float $increment = 1.00): float
     {

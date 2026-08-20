@@ -51,7 +51,7 @@ class CustomerTransaction extends Model
      */
     public function getFormattedTypeAttribute(): string
     {
-        return match($this->type) {
+        return match ($this->type) {
             'sale' => 'Venta',
             'payment' => 'Pago',
             'credit_note' => 'Nota de Crédito',

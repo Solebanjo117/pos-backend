@@ -16,7 +16,7 @@ class DataResetController extends Controller
     public function reset(Request $request): JsonResponse
     {
         $user = $request->user();
-        if (!$user || $user->role !== 'admin') {
+        if (! $user || $user->role !== 'admin') {
             return response()->json([
                 'success' => false,
                 'message' => 'No autorizado.',
@@ -28,7 +28,7 @@ class DataResetController extends Controller
             'confirmation_text' => 'required|string|in:REINICIAR DATOS',
         ]);
 
-        if (!Hash::check($validated['password'], $user->password)) {
+        if (! Hash::check($validated['password'], $user->password)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Contraseña incorrecta.',
@@ -55,7 +55,7 @@ class DataResetController extends Controller
         } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Error al reiniciar datos: ' . $e->getMessage(),
+                'message' => 'Error al reiniciar datos: '.$e->getMessage(),
             ], 500);
         }
     }

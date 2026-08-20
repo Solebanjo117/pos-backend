@@ -2,9 +2,9 @@
 
 namespace App\Console\Commands;
 
-use Illuminate\Console\Command;
 use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
+use Illuminate\Console\Command;
 
 class RecalculatePaymentStatus extends Command
 {
@@ -58,6 +58,7 @@ class RecalculatePaymentStatus extends Command
         }
 
         $this->info("Done! Updated {$updated} orders.");
+
         return 0;
     }
 }

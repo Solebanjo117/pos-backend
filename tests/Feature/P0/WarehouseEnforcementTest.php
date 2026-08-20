@@ -61,4 +61,3 @@ class WarehouseEnforcementTest extends TestCase
         $this->assertSame(5, $data['total_stock']);
     }
 }
-

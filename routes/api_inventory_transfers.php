@@ -1,7 +1,7 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\InventoryTransferController;
+use Illuminate\Support\Facades\Route;
 
 Route::prefix('inventory-transfers')->group(function () {
     Route::get('/', [InventoryTransferController::class, 'index']);

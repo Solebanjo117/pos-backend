@@ -16,9 +16,7 @@ use Illuminate\Support\Facades\DB;
 
 class CashierQueueService
 {
-    public function __construct(private readonly OperationalExpenseService $expenseService)
-    {
-    }
+    public function __construct(private readonly OperationalExpenseService $expenseService) {}
 
     public function syncPendingSources(): void
     {
@@ -48,7 +46,7 @@ class CashierQueueService
             ->with([
                 'source' => function (MorphTo $morphTo): void {
                     $morphTo->morphWith([
-                        SalesQuote::class => ['customer'],
+                        SalesQuote::class => ['customer', 'user'],
                         OperationalExpense::class => ['supplier', 'customer', 'beneficiary', 'categoryRecord'],
                         SalesReturn::class => ['customer', 'creditNote'],
                     ]);
@@ -67,7 +65,7 @@ class CashierQueueService
 
     public function enqueueSale(SalesQuote $quote): CashierQueueEntry
     {
-        return $this->firstOrCreateEntry(
+        $entry = $this->firstOrCreateEntry(
             [
                 'source_type' => SalesQuote::class,
                 'source_id' => $quote->id,
@@ -81,6 +79,21 @@ class CashierQueueService
                 'metadata' => ['document_number' => $quote->quote_number],
             ],
         );
+
+        if ($entry->status === CashierQueueEntry::STATUS_CANCELLED) {
+            $entry->update([
+                'status' => CashierQueueEntry::STATUS_PENDING,
+                'warehouse_id' => $quote->warehouse_id,
+                'estimated_amount' => $quote->total,
+                'scheduled_for' => $quote->sent_to_cashier_at ?? now(),
+                'opened_by' => null,
+                'opened_at' => null,
+                'cancelled_by' => null,
+                'cancelled_at' => null,
+            ]);
+        }
+
+        return $entry;
     }
 
     public function enqueueExpense(OperationalExpense $expense): CashierQueueEntry

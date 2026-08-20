@@ -5,8 +5,8 @@ namespace Database\Seeders;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Supplier;
-use App\Models\Warehouse;
 use App\Models\User;
+use App\Models\Warehouse;
 use Illuminate\Database\Seeder;
 
 class EssentialSeeder extends Seeder
@@ -88,7 +88,7 @@ class EssentialSeeder extends Seeder
         );
 
         // If user already existed but has no warehouse assigned, set it
-        if (!$admin->wasRecentlyCreated && !$admin->current_warehouse_id) {
+        if (! $admin->wasRecentlyCreated && ! $admin->current_warehouse_id) {
             $admin->update(['current_warehouse_id' => $warehouse->id]);
         }
 

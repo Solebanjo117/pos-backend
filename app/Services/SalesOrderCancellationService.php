@@ -11,9 +11,7 @@ use Illuminate\Validation\ValidationException;
 
 class SalesOrderCancellationService
 {
-    public function __construct(private readonly SalesReturnService $returns)
-    {
-    }
+    public function __construct(private readonly SalesReturnService $returns) {}
 
     /** @param array{reason: string, refund_method?: string|null, notes?: string|null} $data */
     public function cancel(SalesOrder $salesOrder, array $data, User $user): SalesOrder

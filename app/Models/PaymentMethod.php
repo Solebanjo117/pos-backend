@@ -2,9 +2,9 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Schema;
 
 class PaymentMethod extends Model
@@ -63,17 +63,17 @@ class PaymentMethod extends Model
     ];
 
     protected $casts = [
-        'is_active'           => 'boolean',
-        'archived_at'         => 'datetime',
-        'is_system'           => 'boolean',
-        'requires_reference'  => 'boolean',
+        'is_active' => 'boolean',
+        'archived_at' => 'datetime',
+        'is_system' => 'boolean',
+        'requires_reference' => 'boolean',
         'requires_cash_count' => 'boolean',
         'available_in_sales' => 'boolean',
         'available_in_customer_receipts' => 'boolean',
         'available_in_supplier_payments' => 'boolean',
         'available_in_purchase_orders' => 'boolean',
         'available_in_returns' => 'boolean',
-        'sort_order'          => 'integer',
+        'sort_order' => 'integer',
     ];
 
     protected $appends = [
@@ -170,8 +170,7 @@ class PaymentMethod extends Model
         ?string $context = null,
         bool $realMoneyOnly = false,
         array $exclude = [],
-    ): array
-    {
+    ): array {
         return static::active()
             ->notArchived()
             ->forContext($context)

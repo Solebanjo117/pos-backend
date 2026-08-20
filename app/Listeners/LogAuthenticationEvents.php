@@ -4,7 +4,6 @@ namespace App\Listeners;
 
 use Illuminate\Auth\Events\Login;
 use Illuminate\Auth\Events\Logout;
-use Spatie\Activitylog\Models\Activity;
 
 class LogAuthenticationEvents
 {
@@ -16,7 +15,7 @@ class LogAuthenticationEvents
         activity('auth')
             ->causedBy($event->user)
             ->withProperties([
-                'ip'    => request()->ip(),
+                'ip' => request()->ip(),
                 'agent' => request()->userAgent(),
             ])
             ->event('login')
@@ -35,7 +34,7 @@ class LogAuthenticationEvents
         activity('auth')
             ->causedBy($event->user)
             ->withProperties([
-                'ip'    => request()->ip(),
+                'ip' => request()->ip(),
                 'agent' => request()->userAgent(),
             ])
             ->event('logout')

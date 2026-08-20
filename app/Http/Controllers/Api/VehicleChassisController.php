@@ -46,13 +46,13 @@ class VehicleChassisController extends Controller
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
                 $q->where('code', 'ilike', "%{$search}%")
-                  ->orWhere('name', 'ilike', "%{$search}%");
+                    ->orWhere('name', 'ilike', "%{$search}%");
             });
         }
 
         // Pagination
-        $perPage  = $request->input('per_page', 50);
-        $chassis  = $query->orderBy('code')->paginate($perPage);
+        $perPage = $request->input('per_page', 50);
+        $chassis = $query->orderBy('code')->paginate($perPage);
         $data = collect($chassis->items())
             ->map(fn (VehicleChassis $item) => $this->serializeChassis($item))
             ->values();
@@ -61,9 +61,9 @@ class VehicleChassisController extends Controller
             'data' => $data,
             'meta' => [
                 'current_page' => $chassis->currentPage(),
-                'last_page'    => $chassis->lastPage(),
-                'per_page'     => $chassis->perPage(),
-                'total'        => $chassis->total(),
+                'last_page' => $chassis->lastPage(),
+                'per_page' => $chassis->perPage(),
+                'total' => $chassis->total(),
             ],
         ]);
     }
@@ -75,14 +75,14 @@ class VehicleChassisController extends Controller
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'code'       => 'required|string|max:50',
-            'name'       => 'nullable|string|max:255',
-            'model_id'   => 'nullable|exists:vehicle_models,id',
-            'model_ids'  => 'nullable|array',
+            'code' => 'required|string|max:50',
+            'name' => 'nullable|string|max:255',
+            'model_id' => 'nullable|exists:vehicle_models,id',
+            'model_ids' => 'nullable|array',
             'model_ids.*' => 'integer|exists:vehicle_models,id',
-            'year_from'  => 'nullable|string|max:4',
-            'year_to'    => 'nullable|string|max:4',
-            'notes'      => 'nullable|string',
+            'year_from' => 'nullable|string|max:4',
+            'year_to' => 'nullable|string|max:4',
+            'notes' => 'nullable|string',
         ]);
 
         $modelIds = $this->resolveModelIds($validated, false);
@@ -91,13 +91,13 @@ class VehicleChassisController extends Controller
 
         $chassis = VehicleChassis::create($validated);
 
-        if (!empty($modelIds)) {
+        if (! empty($modelIds)) {
             $chassis->models()->sync($modelIds);
         }
 
         return response()->json([
             'message' => 'Chasis creado exitosamente',
-            'data'    => $this->serializeChassis($chassis),
+            'data' => $this->serializeChassis($chassis),
         ], 201);
     }
 
@@ -120,14 +120,14 @@ class VehicleChassisController extends Controller
         $chassis = VehicleChassis::findOrFail($id);
 
         $validated = $request->validate([
-            'code'      => 'sometimes|required|string|max:50',
-            'name'      => 'nullable|string|max:255',
-            'model_id'  => 'nullable|exists:vehicle_models,id',
+            'code' => 'sometimes|required|string|max:50',
+            'name' => 'nullable|string|max:255',
+            'model_id' => 'nullable|exists:vehicle_models,id',
             'model_ids' => 'nullable|array',
             'model_ids.*' => 'integer|exists:vehicle_models,id',
             'year_from' => 'nullable|string|max:4',
-            'year_to'   => 'nullable|string|max:4',
-            'notes'     => 'nullable|string',
+            'year_to' => 'nullable|string|max:4',
+            'notes' => 'nullable|string',
         ]);
 
         $modelIds = $this->resolveModelIds($validated, true);
@@ -144,7 +144,7 @@ class VehicleChassisController extends Controller
 
         return response()->json([
             'message' => 'Chasis actualizado exitosamente',
-            'data'    => $this->serializeChassis($chassis),
+            'data' => $this->serializeChassis($chassis),
         ]);
     }
 
@@ -200,7 +200,7 @@ class VehicleChassisController extends Controller
         $hasModelIds = array_key_exists('model_ids', $validated);
         $hasLegacyModelId = array_key_exists('model_id', $validated);
 
-        if (!$hasModelIds && !$hasLegacyModelId) {
+        if (! $hasModelIds && ! $hasLegacyModelId) {
             return $allowNoChange ? null : [];
         }
 
@@ -212,11 +212,11 @@ class VehicleChassisController extends Controller
                 ->values()
                 ->all();
 
-            if (!empty($modelIds)) {
+            if (! empty($modelIds)) {
                 return $modelIds;
             }
 
-            if ($hasLegacyModelId && !empty($validated['model_id'])) {
+            if ($hasLegacyModelId && ! empty($validated['model_id'])) {
                 return [(int) $validated['model_id']];
             }
 
@@ -225,7 +225,7 @@ class VehicleChassisController extends Controller
 
         $legacyModelId = $validated['model_id'] ?? null;
 
-        return !empty($legacyModelId) ? [(int) $legacyModelId] : [];
+        return ! empty($legacyModelId) ? [(int) $legacyModelId] : [];
     }
 
     private function serializeChassis(VehicleChassis $chassis): VehicleChassis
@@ -248,7 +248,7 @@ class VehicleChassisController extends Controller
 
         $chassis->setAttribute('model_ids', $modelIds);
 
-        if ($chassis->model_id === null && !empty($modelIds)) {
+        if ($chassis->model_id === null && ! empty($modelIds)) {
             $chassis->setAttribute('model_id', $modelIds[0]);
         }
 

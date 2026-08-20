@@ -18,9 +18,9 @@ class StoreInboundMovementRequest extends FormRequest
             'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
             'quantity' => ['required', 'integer', 'min:1'],
             'reference_type' => ['nullable', 'in:purchase,adjustment,return'],
-            'reference_id'   => ['nullable', 'integer'],
-            'notes'          => ['nullable', 'string', 'max:1000'],
-            'supplier_id'    => ['nullable', 'integer', 'exists:suppliers,id'],
+            'reference_id' => ['nullable', 'integer'],
+            'notes' => ['nullable', 'string', 'max:1000'],
+            'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id'],
         ];
     }
 

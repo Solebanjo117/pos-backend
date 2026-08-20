@@ -30,7 +30,7 @@ beforeEach(function () {
 it('keeps provided name when creating product with vehicle compatibility', function () {
     $category = Category::create([
         'name' => 'Pruebas',
-        'slug' => 'pruebas-' . uniqid(),
+        'slug' => 'pruebas-'.uniqid(),
         'priority' => 1,
     ]);
 

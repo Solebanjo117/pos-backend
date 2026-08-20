@@ -34,7 +34,7 @@ class CategorySeeder extends Seeder
         };
 
         // ==================== CATEGORÍAS PRINCIPALES ====================
-        
+
         // 1. Sistema Eléctrico
         $electrical = $createCategory([
             'name' => 'Sistema Eléctrico',

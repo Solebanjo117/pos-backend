@@ -41,18 +41,18 @@ class PricingFormulaController extends Controller
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'name'        => 'required|string|max:100|unique:pricing_formulas,name',
-            'formula'     => 'required|string|max:500',
+            'name' => 'required|string|max:100|unique:pricing_formulas,name',
+            'formula' => 'required|string|max:500',
             'description' => 'nullable|string|max:500',
-            'is_active'   => 'boolean',
-            'sort_order'  => 'nullable|integer|min:0',
+            'is_active' => 'boolean',
+            'sort_order' => 'nullable|integer|min:0',
         ]);
 
         // Validate formula syntax
-        if (!$this->formulaService->validate($validated['formula'])) {
+        if (! $this->formulaService->validate($validated['formula'])) {
             return response()->json([
                 'message' => 'La fórmula contiene caracteres inválidos o sintaxis incorrecta.',
-                'errors'  => ['formula' => ['Fórmula inválida. Usa: costo, ITBM, *, +, -, /, ROUND(), ROUNDUP(), FLOOR(), CEIL()']],
+                'errors' => ['formula' => ['Fórmula inválida. Usa: costo, ITBM, *, +, -, /, ROUND(), ROUNDUP(), FLOOR(), CEIL()']],
             ], 422);
         }
 
@@ -60,7 +60,7 @@ class PricingFormulaController extends Controller
 
         return response()->json([
             'message' => 'Fórmula creada correctamente.',
-            'data'    => $formula,
+            'data' => $formula,
         ], 201);
     }
 
@@ -86,23 +86,23 @@ class PricingFormulaController extends Controller
         if ($formula->is_preset) {
             // Presets: only allow toggling active status and reordering
             $validated = $request->validate([
-                'is_active'  => 'boolean',
+                'is_active' => 'boolean',
                 'sort_order' => 'nullable|integer|min:0',
             ]);
         } else {
             $validated = $request->validate([
-                'name'        => "required|string|max:100|unique:pricing_formulas,name,{$id}",
-                'formula'     => 'required|string|max:500',
+                'name' => "required|string|max:100|unique:pricing_formulas,name,{$id}",
+                'formula' => 'required|string|max:500',
                 'description' => 'nullable|string|max:500',
-                'is_active'   => 'boolean',
-                'sort_order'  => 'nullable|integer|min:0',
+                'is_active' => 'boolean',
+                'sort_order' => 'nullable|integer|min:0',
             ]);
 
             // Validate formula syntax
-            if (!$this->formulaService->validate($validated['formula'])) {
+            if (! $this->formulaService->validate($validated['formula'])) {
                 return response()->json([
                     'message' => 'La fórmula contiene caracteres inválidos.',
-                    'errors'  => ['formula' => ['Fórmula inválida.']],
+                    'errors' => ['formula' => ['Fórmula inválida.']],
                 ], 422);
             }
         }
@@ -111,7 +111,7 @@ class PricingFormulaController extends Controller
 
         return response()->json([
             'message' => 'Fórmula actualizada.',
-            'data'    => $formula->fresh(),
+            'data' => $formula->fresh(),
         ]);
     }
 
@@ -147,8 +147,8 @@ class PricingFormulaController extends Controller
         }
 
         $request->validate([
-            'formula'  => 'required|string|max:500',
-            'cost'     => 'required|numeric|min:0',
+            'formula' => 'required|string|max:500',
+            'cost' => 'required|numeric|min:0',
             'tax_rate' => 'nullable|integer|min:0|max:100',
         ]);
 

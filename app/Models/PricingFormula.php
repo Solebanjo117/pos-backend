@@ -16,8 +16,8 @@ class PricingFormula extends Model
     ];
 
     protected $casts = [
-        'is_preset'  => 'boolean',
-        'is_active'  => 'boolean',
+        'is_preset' => 'boolean',
+        'is_active' => 'boolean',
         'sort_order' => 'integer',
     ];
 

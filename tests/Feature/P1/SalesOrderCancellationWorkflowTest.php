@@ -1,8 +1,8 @@
 <?php
 
 use App\Models\Brand;
-use App\Models\CashMovement;
 use App\Models\CashierQueueEntry;
+use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
 use App\Models\InventoryMovement;

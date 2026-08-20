@@ -27,7 +27,7 @@ class InventoryTransferController extends Controller
             $wId = $request->input('warehouse_id');
             $query->where(function ($q) use ($wId) {
                 $q->where('from_warehouse_id', $wId)
-                  ->orWhere('to_warehouse_id', $wId);
+                    ->orWhere('to_warehouse_id', $wId);
             });
         }
 
@@ -90,6 +90,7 @@ class InventoryTransferController extends Controller
     {
         try {
             $transfer = $this->transferService->dispatch($inventoryTransfer);
+
             return response()->json([
                 'message' => 'Transferencia despachada. Mercancía en tránsito.',
                 'transfer' => $transfer,
@@ -106,6 +107,7 @@ class InventoryTransferController extends Controller
     {
         try {
             $transfer = $this->transferService->receive($inventoryTransfer, $request->user()->id);
+
             return response()->json([
                 'message' => 'Transferencia recibida exitosamente.',
                 'transfer' => $transfer,
@@ -122,6 +124,7 @@ class InventoryTransferController extends Controller
     {
         try {
             $transfer = $this->transferService->cancel($inventoryTransfer);
+
             return response()->json([
                 'message' => 'Transferencia cancelada.',
                 'transfer' => $transfer,

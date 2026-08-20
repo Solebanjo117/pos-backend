@@ -18,32 +18,34 @@ uses(RefreshDatabase::class);
 function makeWorkOrderUser(Warehouse $warehouse): User
 {
     $user = User::factory()->create([
-        'role'                 => 'seller',
-        'is_active'            => true,
+        'role' => 'seller',
+        'is_active' => true,
         'current_warehouse_id' => $warehouse->id,
     ]);
     $user->warehouses()->attach($warehouse->id);
+
     return $user;
 }
 
 function makeProductWithInventory(Warehouse $warehouse, int $qty = 10): array
 {
-    $brand   = Brand::create(['name' => 'Brand WO', 'status' => 'active']);
-    $product = Product::create(['sku_base' => 'SKU-WO-' . uniqid(), 'name' => 'Producto WO', 'status' => 'active']);
+    $brand = Brand::create(['name' => 'Brand WO', 'status' => 'active']);
+    $product = Product::create(['sku_base' => 'SKU-WO-'.uniqid(), 'name' => 'Producto WO', 'status' => 'active']);
     $variant = ProductVariant::create([
         'product_id' => $product->id,
-        'brand_id'   => $brand->id,
-        'sku'        => 'SKU-WO-V-' . uniqid(),
-        'status'     => 'active',
+        'brand_id' => $brand->id,
+        'sku' => 'SKU-WO-V-'.uniqid(),
+        'status' => 'active',
         'is_default' => true,
     ]);
     ProductInventory::create([
-        'product_id'         => $product->id,
-        'variant_id'         => $variant->id,
-        'warehouse_id'       => $warehouse->id,
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'warehouse_id' => $warehouse->id,
         'quantity_available' => $qty,
-        'quantity_reserved'  => 0,
+        'quantity_reserved' => 0,
     ]);
+
     return compact('product', 'variant');
 }
 
@@ -53,11 +55,11 @@ function makeProductWithInventory(Warehouse $warehouse, int $qty = 10): array
 
 it('creates a minimal work order (no customer, no items) and returns 201', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W1', 'name' => 'WO Warehouse 1']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
-            'warehouse_id'        => $warehouse->id,
+            'warehouse_id' => $warehouse->id,
             'vehicle_description' => 'Toyota Corolla 2020',
         ])
         ->assertStatus(201)
@@ -67,7 +69,7 @@ it('creates a minimal work order (no customer, no items) and returns 201', funct
 
 it('auto-generates a folio when none is provided', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W2', 'name' => 'WO Warehouse 2']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     $response = $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
@@ -79,19 +81,19 @@ it('auto-generates a folio when none is provided', function () {
 });
 
 it('creates a work order with items and decrements inventory', function () {
-    $warehouse              = Warehouse::create(['code' => 'WO-W3', 'name' => 'WO Warehouse 3']);
-    $user                   = makeWorkOrderUser($warehouse);
+    $warehouse = Warehouse::create(['code' => 'WO-W3', 'name' => 'WO Warehouse 3']);
+    $user = makeWorkOrderUser($warehouse);
     ['product' => $product, 'variant' => $variant] = makeProductWithInventory($warehouse, 10);
 
     $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
             'warehouse_id' => $warehouse->id,
-            'items'        => [[
-                'product_id'   => $product->id,
-                'variant_id'   => $variant->id,
+            'items' => [[
+                'product_id' => $product->id,
+                'variant_id' => $variant->id,
                 'warehouse_id' => $warehouse->id,
-                'quantity'     => 3,
-                'unit_price'   => 150.00,
+                'quantity' => 3,
+                'unit_price' => 150.00,
             ]],
         ])
         ->assertStatus(201);
@@ -106,7 +108,7 @@ it('creates a work order with items and decrements inventory', function () {
 
 it('rejects work order creation when warehouse_id is missing', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W4', 'name' => 'WO Warehouse 4']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
@@ -118,16 +120,16 @@ it('rejects work order creation when warehouse_id is missing', function () {
 
 it('rejects work order when item references non-existent product', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W5', 'name' => 'WO Warehouse 5']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
             'warehouse_id' => $warehouse->id,
-            'items'        => [[
-                'product_id'   => 999999,
+            'items' => [[
+                'product_id' => 999999,
                 'warehouse_id' => $warehouse->id,
-                'quantity'     => 1,
-                'unit_price'   => 100.00,
+                'quantity' => 1,
+                'unit_price' => 100.00,
             ]],
         ])
         ->assertStatus(422);
@@ -135,18 +137,18 @@ it('rejects work order when item references non-existent product', function () {
 
 it('rejects work order when requested quantity exceeds available stock', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W6', 'name' => 'WO Warehouse 6']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
     ['product' => $product, 'variant' => $variant] = makeProductWithInventory($warehouse, 2);
 
     $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
             'warehouse_id' => $warehouse->id,
-            'items'        => [[
-                'product_id'   => $product->id,
-                'variant_id'   => $variant->id,
+            'items' => [[
+                'product_id' => $product->id,
+                'variant_id' => $variant->id,
                 'warehouse_id' => $warehouse->id,
-                'quantity'     => 5,
-                'unit_price'   => 100.00,
+                'quantity' => 5,
+                'unit_price' => 100.00,
             ]],
         ])
         ->assertStatus(422)
@@ -155,12 +157,12 @@ it('rejects work order when requested quantity exceeds available stock', functio
 
 it('lists work orders and returns paginated response', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W7', 'name' => 'WO Warehouse 7']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     WorkOrder::create([
         'warehouse_id' => $warehouse->id,
-        'created_by'   => $user->id,
-        'status'       => 'pending',
+        'created_by' => $user->id,
+        'status' => 'pending',
     ]);
 
     $this->actingAs($user)
@@ -171,12 +173,12 @@ it('lists work orders and returns paginated response', function () {
 
 it('allows transitioning from pending to in_progress', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W8', 'name' => 'WO Warehouse 8']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     $wo = WorkOrder::create([
         'warehouse_id' => $warehouse->id,
-        'created_by'   => $user->id,
-        'status'       => 'pending',
+        'created_by' => $user->id,
+        'status' => 'pending',
     ]);
 
     $this->actingAs($user)
@@ -187,12 +189,12 @@ it('allows transitioning from pending to in_progress', function () {
 
 it('rejects invalid status transition', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W9', 'name' => 'WO Warehouse 9']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
 
     $wo = WorkOrder::create([
         'warehouse_id' => $warehouse->id,
-        'created_by'   => $user->id,
-        'status'       => 'pending',
+        'created_by' => $user->id,
+        'status' => 'pending',
     ]);
 
     $this->actingAs($user)
@@ -202,18 +204,18 @@ it('rejects invalid status transition', function () {
 
 it('restores inventory when work order is cancelled', function () {
     $warehouse = Warehouse::create(['code' => 'WO-W10', 'name' => 'WO Warehouse 10']);
-    $user      = makeWorkOrderUser($warehouse);
+    $user = makeWorkOrderUser($warehouse);
     ['product' => $product, 'variant' => $variant] = makeProductWithInventory($warehouse, 10);
 
     $createResponse = $this->actingAs($user)
         ->postJson('/api/v1/work-orders', [
             'warehouse_id' => $warehouse->id,
-            'items'        => [[
-                'product_id'   => $product->id,
-                'variant_id'   => $variant->id,
+            'items' => [[
+                'product_id' => $product->id,
+                'variant_id' => $variant->id,
                 'warehouse_id' => $warehouse->id,
-                'quantity'     => 4,
-                'unit_price'   => 80.00,
+                'quantity' => 4,
+                'unit_price' => 80.00,
             ]],
         ])
         ->assertStatus(201);

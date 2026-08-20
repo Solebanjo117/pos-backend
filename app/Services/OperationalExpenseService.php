@@ -2,8 +2,8 @@
 
 namespace App\Services;
 
-use App\Models\CashMovement;
 use App\Models\CashierQueueEntry;
+use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\OperationalExpense;
 use App\Models\OperationalExpenseBeneficiary;
@@ -212,7 +212,7 @@ class OperationalExpenseService
     /** @param array<string, mixed> $data */
     public function settleFromQueue(OperationalExpense $expense, CashierQueueEntry $entry, array $data, User $user): OperationalExpense
     {
-        return DB::transaction(function () use ($expense, $entry, $data, $user): OperationalExpense {
+        return DB::transaction(function () use ($expense, $data, $user): OperationalExpense {
             $expense = OperationalExpense::query()->lockForUpdate()->findOrFail($expense->id);
             if (! in_array($expense->status, ['pending', 'scheduled', 'queued'], true)) {
                 throw new \InvalidArgumentException('Este gasto ya no esta disponible para pago.');

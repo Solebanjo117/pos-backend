@@ -48,7 +48,7 @@ class SalesOrderItem extends Model
     protected $appends = ['formatted_total', 'product_name', 'product_sku', 'warehouse_name', 'seller_name'];
 
     // ==================== RELATIONSHIPS ====================
-    
+
     public function salesOrder(): BelongsTo
     {
         return $this->belongsTo(SalesOrder::class);
@@ -75,10 +75,10 @@ class SalesOrderItem extends Model
     }
 
     // ==================== ACCESSORS ====================
-    
+
     public function getFormattedTotalAttribute(): string
     {
-        return '$' . number_format($this->total, 2);
+        return '$'.number_format($this->total, 2);
     }
 
     public function getProductNameAttribute(): ?string
@@ -115,11 +115,12 @@ class SalesOrderItem extends Model
     public function getProfitAttribute(): float
     {
         $effectivePrice = (float) $this->unit_price * (1 - ((float) $this->discount_percent / 100));
+
         return ($effectivePrice - (float) $this->unit_cost) * $this->quantity;
     }
 
     // ==================== BUSINESS METHODS ====================
-    
+
     /**
      * Calculate subtotal (quantity * unit_price - discount)
      */
@@ -127,13 +128,13 @@ class SalesOrderItem extends Model
     {
         $subtotal = $this->quantity * $this->unit_price;
         $this->discount_amount = 0.0;
-        
+
         if ($this->discount_percent > 0) {
             $this->discount_amount = $subtotal * ($this->discount_percent / 100);
         }
-        
+
         $this->subtotal = $subtotal - $this->discount_amount;
-        
+
         return (float) $this->subtotal;
     }
 
@@ -143,11 +144,11 @@ class SalesOrderItem extends Model
     public function calculateTax(): float
     {
         $this->tax_amount = 0.0;
-        
+
         if ($this->tax_percent > 0) {
             $this->tax_amount = $this->subtotal * ($this->tax_percent / 100);
         }
-        
+
         return (float) $this->tax_amount;
     }
 
@@ -159,7 +160,7 @@ class SalesOrderItem extends Model
         $this->calculateSubtotal();
         $this->calculateTax();
         $this->total = $this->subtotal + $this->tax_amount;
-        
+
         return (float) $this->total;
     }
 
@@ -167,6 +168,7 @@ class SalesOrderItem extends Model
     {
         if ($value === null || $value === '') {
             $this->attributes['tax_percent'] = null;
+
             return;
         }
 

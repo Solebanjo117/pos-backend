@@ -1,7 +1,7 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\BackupController;
+use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------

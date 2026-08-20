@@ -2,14 +2,14 @@
 
 $url = 'http://api.pos-frontend.test/api/v1/products';
 $data = [
-    "name" => "",
-    "sku_base" => "",
-    "sku" => "",
-    "brand_id" => 1,
-    "pricing" => [
-        "base_price" => 10,
-        "tax_rate" => 7,
-    ]
+    'name' => '',
+    'sku_base' => '',
+    'sku' => '',
+    'brand_id' => 1,
+    'pricing' => [
+        'base_price' => 10,
+        'tax_rate' => 7,
+    ],
 ];
 
 $ch = curl_init($url);
