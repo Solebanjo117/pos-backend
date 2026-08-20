@@ -12,9 +12,7 @@ use Illuminate\Validation\Rule;
 
 class CashierQueueController extends Controller
 {
-    public function __construct(private readonly CashierQueueService $queue)
-    {
-    }
+    public function __construct(private readonly CashierQueueService $queue) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -92,9 +90,11 @@ class CashierQueueController extends Controller
             $source instanceof \App\Models\SalesQuote => [
                 'id' => $source->id,
                 'document_number' => $source->quote_number,
-                'description' => 'Venta por cobrar',
+                'description' => 'Cotizacion por atender',
                 'party' => $source->customer?->name ?? 'Publico general',
                 'amount' => (float) $source->total,
+                'seller_name' => $source->user?->name,
+                'notes' => $source->notes,
             ],
             $source instanceof \App\Models\OperationalExpense => [
                 'id' => $source->id,

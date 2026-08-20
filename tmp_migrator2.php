@@ -1,4 +1,5 @@
 <?php
+
 use App\Models\Product;
 use App\Models\ProductPricing;
 
@@ -8,7 +9,9 @@ $deleted = 0;
 
 foreach ($products as $product) {
     $hasPricing = ProductPricing::where('product_id', $product->id)->exists();
-    if ($hasPricing) continue;
+    if ($hasPricing) {
+        continue;
+    }
 
     $firstPricing = null;
     foreach ($product->variants as $variant) {

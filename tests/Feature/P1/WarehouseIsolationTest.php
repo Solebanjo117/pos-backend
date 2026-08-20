@@ -48,7 +48,7 @@ it('user from warehouse A does not see stock from warehouse B', function () {
     ]);
 
     $response = $this->actingAs($seller)
-        ->getJson('/api/v1/products?warehouse_id=' . $w2->id . '&per_page=10')
+        ->getJson('/api/v1/products?warehouse_id='.$w2->id.'&per_page=10')
         ->assertStatus(200);
 
     expect($response->json('data.0.total_stock'))->toBe(3);

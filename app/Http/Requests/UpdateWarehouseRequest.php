@@ -25,11 +25,11 @@ class UpdateWarehouseRequest extends FormRequest
         return [
             'name' => ['sometimes', 'required', 'string', 'max:255'],
             'code' => [
-                'sometimes', 
-                'required', 
-                'string', 
-                'max:50', 
-                Rule::unique('warehouses', 'code')->ignore($warehouseId)
+                'sometimes',
+                'required',
+                'string',
+                'max:50',
+                Rule::unique('warehouses', 'code')->ignore($warehouseId),
             ],
             'location' => ['nullable', 'string', 'max:500'],
             'capacity' => ['nullable', 'integer', 'min:0'],

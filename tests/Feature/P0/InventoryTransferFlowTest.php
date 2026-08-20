@@ -4,7 +4,6 @@ namespace Tests\Feature\P0;
 
 use App\Models\Brand;
 use App\Models\InventoryMovement;
-use App\Models\InventoryTransfer;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\ProductVariant;
@@ -121,4 +120,3 @@ class InventoryTransferFlowTest extends TestCase
         $svc->dispatch($transfer);
     }
 }
-

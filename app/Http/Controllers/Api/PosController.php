@@ -15,7 +15,7 @@ class PosController extends Controller
     {
         $singleWarehouseMode = config('pos.single_warehouse_mode', false);
         $defaultWarehouseId = config('pos.default_warehouse_id', 1);
-        
+
         $defaultWarehouse = null;
         if ($singleWarehouseMode && $defaultWarehouseId) {
             $defaultWarehouse = Warehouse::find($defaultWarehouseId);

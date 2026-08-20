@@ -16,18 +16,18 @@ class CashMovementController extends Controller
     {
         $userId = auth()->id();
 
-        if (!$userId) {
+        if (! $userId) {
             return response()->json(['message' => 'No autorizado. Se requiere user_id en la petición.'], 401);
         }
 
         $request->validate([
-            'type'   => 'required|in:in,out',
+            'type' => 'required|in:in,out',
             'subtype' => 'nullable|in:cash_in,cash_out,deposit,withdrawal,adjustment_positive,adjustment_negative',
             'amount' => 'required|numeric|min:0.01',
             'reason' => 'required|string|max:255',
             'reference_number' => 'nullable|string|max:120',
             'business_datetime' => 'nullable|date',
-            'notes'  => 'nullable|string|max:1000',
+            'notes' => 'nullable|string|max:1000',
         ]);
 
         $subtype = $request->input('subtype', $request->type === 'in' ? 'cash_in' : 'cash_out');
@@ -44,7 +44,7 @@ class CashMovementController extends Controller
             ->where('status', 'open')
             ->first();
 
-        if (!$session) {
+        if (! $session) {
             return response()->json([
                 'message' => 'No hay una sesión de caja abierta para registrar movimientos.',
             ], 404);
@@ -57,22 +57,22 @@ class CashMovementController extends Controller
 
         $movement = CashMovement::create([
             'pos_session_id' => $session->id,
-            'user_id'        => $userId,
-            'type'           => $request->type,
-            'subtype'        => $subtype,
-            'amount'         => $amount,
+            'user_id' => $userId,
+            'type' => $request->type,
+            'subtype' => $subtype,
+            'amount' => $amount,
             'balance_before' => $balanceBefore,
-            'balance_after'  => round($balanceBefore + ($request->type === 'in' ? $amount : -$amount), 2),
-            'reason'         => $request->reason,
+            'balance_after' => round($balanceBefore + ($request->type === 'in' ? $amount : -$amount), 2),
+            'reason' => $request->reason,
             'reference_number' => $request->reference_number,
             'payment_method' => 'cash',
             'business_datetime' => $request->business_datetime ?? now(),
-            'notes'          => $request->notes,
+            'notes' => $request->notes,
         ]);
 
         return response()->json([
             'message' => 'Movimiento de caja registrado correctamente.',
-            'data'    => $movement,
+            'data' => $movement,
         ], 201);
     }
 
@@ -83,7 +83,7 @@ class CashMovementController extends Controller
     {
         $userId = $request->input('user_id') ?? auth()->id();
 
-        if (!$userId) {
+        if (! $userId) {
             return response()->json(['message' => 'No autorizado.'], 401);
         }
 
@@ -91,7 +91,7 @@ class CashMovementController extends Controller
             ->where('status', 'open')
             ->first();
 
-        if (!$session) {
+        if (! $session) {
             return response()->json(['data' => []], 200);
         }
 

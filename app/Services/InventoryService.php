@@ -48,7 +48,7 @@ class InventoryService
             ->where('warehouse_id', $warehouseId)
             ->first();
 
-        if (!$inventory || $inventory->stock_available < $quantity) {
+        if (! $inventory || $inventory->stock_available < $quantity) {
             return false;
         }
 

@@ -13,7 +13,7 @@ echo "=== CREANDO BASE DE DATOS ===\n\n";
 
 // Get or create first warehouse
 $warehouse = Warehouse::first();
-if (!$warehouse) {
+if (! $warehouse) {
     echo "Creando almacén predeterminado...\n";
     $warehouse = Warehouse::create([
         'name' => 'Almacén Principal',
@@ -57,6 +57,7 @@ foreach ($users as $userData) {
     $existing = User::where('email', $userData['email'])->first();
     if ($existing) {
         echo "⚠️  Usuario ya existe: {$userData['email']}\n";
+
         continue;
     }
 

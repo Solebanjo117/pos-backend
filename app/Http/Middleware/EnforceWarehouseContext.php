@@ -11,7 +11,7 @@ class EnforceWarehouseContext
     public function handle(Request $request, Closure $next): Response
     {
         $user = $request->user();
-        if (!$user) {
+        if (! $user) {
             return $next($request);
         }
 
@@ -31,7 +31,7 @@ class EnforceWarehouseContext
             }
         } else {
             $effective = $user->getEffectiveWarehouseId();
-            if (!$effective) {
+            if (! $effective) {
                 return response()->json([
                     'message' => 'Debe tener una sucursal asignada para realizar esta acción.',
                 ], 409);

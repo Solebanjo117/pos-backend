@@ -2,10 +2,10 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
-use App\Services\InventoryMovementService;
 use App\Models\Product;
 use App\Models\Warehouse;
+use App\Services\InventoryMovementService;
+use Illuminate\Database\Seeder;
 
 class InventoryMovementSeeder extends Seeder
 {
@@ -25,13 +25,14 @@ class InventoryMovementSeeder extends Seeder
 
         if ($products->isEmpty() || $warehouses->isEmpty()) {
             echo "⚠️  No hay productos o almacenes. Ejecuta los seeders primero.\n";
+
             return;
         }
 
         // Crear 10 movimientos de entrada
         foreach ($products as $product) {
             $warehouse = $warehouses->random();
-            
+
             $this->inventoryService->recordInbound([
                 'product_id' => $product->id,
                 'warehouse_id' => $warehouse->id,

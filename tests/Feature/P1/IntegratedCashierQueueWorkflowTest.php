@@ -1,7 +1,7 @@
 <?php
 
-use App\Models\CashMovement;
 use App\Models\CashierQueueEntry;
+use App\Models\CashMovement;
 use App\Models\JournalEntry;
 use App\Models\OperationalExpense;
 use App\Models\OperationalExpenseCategory;

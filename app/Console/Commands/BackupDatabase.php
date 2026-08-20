@@ -8,14 +8,15 @@ use ZipArchive;
 
 class BackupDatabase extends Command
 {
-    protected $signature   = 'db:backup';
+    protected $signature = 'db:backup';
+
     protected $description = 'Create a database backup. Supports SQLite, MySQL, and PostgreSQL.';
 
     public function handle(): int
     {
         $connection = config('database.default');
-        $timestamp  = now()->format('Y-m-d_His');
-        $backupDir  = storage_path('app/backups');
+        $timestamp = now()->format('Y-m-d_His');
+        $backupDir = storage_path('app/backups');
 
         if (! File::exists($backupDir)) {
             File::makeDirectory($backupDir, 0755, true);
@@ -24,14 +25,14 @@ class BackupDatabase extends Command
         try {
             $filePath = match ($connection) {
                 'sqlite' => $this->backupSqlite($backupDir, $timestamp),
-                'mysql'  => $this->backupMysql($backupDir, $timestamp),
-                'pgsql'  => $this->backupPgsql($backupDir, $timestamp),
-                default  => throw new \RuntimeException("Backup not supported for connection: {$connection}"),
+                'mysql' => $this->backupMysql($backupDir, $timestamp),
+                'pgsql' => $this->backupPgsql($backupDir, $timestamp),
+                default => throw new \RuntimeException("Backup not supported for connection: {$connection}"),
             };
 
             // Compress to ZIP
-            $zipPath = $filePath . '.zip';
-            $zip     = new ZipArchive();
+            $zipPath = $filePath.'.zip';
+            $zip = new ZipArchive;
             if ($zip->open($zipPath, ZipArchive::CREATE) === true) {
                 $zip->addFile($filePath, basename($filePath));
                 $zip->close();
@@ -46,23 +47,25 @@ class BackupDatabase extends Command
 
             return self::SUCCESS;
         } catch (\Exception $e) {
-            $this->error("Backup failed: " . $e->getMessage());
+            $this->error('Backup failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
 
     private function backupSqlite(string $dir, string $timestamp): string
     {
-        $dbPath   = config('database.connections.sqlite.database');
+        $dbPath = config('database.connections.sqlite.database');
         $destPath = "{$dir}/backup_{$timestamp}.sqlite";
         File::copy($dbPath, $destPath);
+
         return $destPath;
     }
 
     private function backupMysql(string $dir, string $timestamp): string
     {
-        $host     = config('database.connections.mysql.host');
-        $port     = config('database.connections.mysql.port', 3306);
+        $host = config('database.connections.mysql.host');
+        $port = config('database.connections.mysql.port', 3306);
         $database = config('database.connections.mysql.database');
         $username = config('database.connections.mysql.username');
         $password = config('database.connections.mysql.password');
@@ -89,8 +92,8 @@ class BackupDatabase extends Command
 
     private function backupPgsql(string $dir, string $timestamp): string
     {
-        $host     = config('database.connections.pgsql.host', '127.0.0.1');
-        $port     = config('database.connections.pgsql.port', 5432);
+        $host = config('database.connections.pgsql.host', '127.0.0.1');
+        $port = config('database.connections.pgsql.port', 5432);
         $database = config('database.connections.pgsql.database');
         $username = config('database.connections.pgsql.username');
         $password = config('database.connections.pgsql.password');
@@ -126,7 +129,7 @@ class BackupDatabase extends Command
 
         foreach ($files->slice($keepLast) as $old) {
             File::delete($old->getRealPath());
-            $this->line("Pruned old backup: " . $old->getFilename());
+            $this->line('Pruned old backup: '.$old->getFilename());
         }
     }
 }

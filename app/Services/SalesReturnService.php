@@ -2,15 +2,15 @@
 
 namespace App\Services;
 
+use App\Models\CashierQueueEntry;
+use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
-use App\Models\CashMovement;
-use App\Models\CashierQueueEntry;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
+use App\Models\SalesCreditNote;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderPayment;
-use App\Models\SalesCreditNote;
 use App\Models\SalesReturn;
 use App\Models\SalesReturnItem;
 use App\Models\User;
@@ -508,8 +508,7 @@ class SalesReturnService
             $item = $items->first();
             $quantity = (int) $items->sum('quantity');
             $weightedCost = $quantity > 0
-                ? (float) $items->sum(fn ($returnItem): float =>
-                    (float) $returnItem->quantity * (float) ($returnItem->salesOrderItem?->unit_cost ?? 0)
+                ? (float) $items->sum(fn ($returnItem): float => (float) $returnItem->quantity * (float) ($returnItem->salesOrderItem?->unit_cost ?? 0)
                 ) / $quantity
                 : 0.0;
 
@@ -527,19 +526,19 @@ class SalesReturnService
         $unitCost ??= (float) ($item->salesOrderItem?->unit_cost ?? 0);
 
         app(InventoryFifoService::class)->receiveStock([
-                'product_id' => $item->product_id,
-                'variant_id' => $item->variant_id,
-                'warehouse_id' => $salesReturn->warehouse_id,
-                'quantity' => $quantity,
-                'unit_cost_base' => $unitCost,
-                'landed_unit_cost' => $unitCost,
-                'reference_type' => 'sales_return',
-                'reference_id' => $salesReturn->id,
-                'source_type' => 'sales_return',
-                'source_id' => $salesReturn->id,
-                'notes' => "Devolucion {$salesReturn->return_number} - Orden {$salesReturn->salesOrder?->order_number}",
-                'user_id' => $user->id,
-                'received_at' => now(),
+            'product_id' => $item->product_id,
+            'variant_id' => $item->variant_id,
+            'warehouse_id' => $salesReturn->warehouse_id,
+            'quantity' => $quantity,
+            'unit_cost_base' => $unitCost,
+            'landed_unit_cost' => $unitCost,
+            'reference_type' => 'sales_return',
+            'reference_id' => $salesReturn->id,
+            'source_type' => 'sales_return',
+            'source_id' => $salesReturn->id,
+            'notes' => "Devolucion {$salesReturn->return_number} - Orden {$salesReturn->salesOrder?->order_number}",
+            'user_id' => $user->id,
+            'received_at' => now(),
         ]);
     }
 
@@ -605,8 +604,7 @@ class SalesReturnService
         User $user,
         ?string $method = null,
         ?string $reference = null,
-    ): void
-    {
+    ): void {
         $amount = $this->money($amount);
         if ($amount <= 0) {
             return;

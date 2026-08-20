@@ -23,7 +23,7 @@ class RequestTimingMiddleware
             ]);
         }
 
-        $response->headers->set('X-Response-Time', $duration . 'ms');
+        $response->headers->set('X-Response-Time', $duration.'ms');
 
         return $response;
     }

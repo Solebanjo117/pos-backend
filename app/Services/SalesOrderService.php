@@ -3,9 +3,9 @@
 namespace App\Services;
 
 use App\Helpers\TaxRateHelper;
+use App\Models\PosSession;
 use App\Models\Product;
 use App\Models\ProductInventory;
-use App\Models\PosSession;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesQuote;
@@ -16,9 +16,7 @@ use Illuminate\Validation\ValidationException;
 
 class SalesOrderService
 {
-    public function __construct(private readonly CashierQueueService $cashierQueueService)
-    {
-    }
+    public function __construct(private readonly CashierQueueService $cashierQueueService) {}
 
     /**
      * Get all sales orders with filters
@@ -100,6 +98,7 @@ class SalesOrderService
                         Auth::user(),
                         (float) $existingOrder->total,
                     );
+
                     return $existingOrder;
                 }
             }
@@ -273,7 +272,7 @@ class SalesOrderService
      * Cashiers may change only the customer and line taxes. Commercial line data
      * is rebuilt from the locked quote so direct API calls cannot alter a sale.
      *
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array{0: array<string, mixed>, 1: SalesQuote, 2: SalesOrder|null}
      */
     private function prepareCashierCheckout(array $data): array
@@ -319,10 +318,11 @@ class SalesOrderService
         }
 
         $data['user_id'] = Auth::id();
+        $data['customer_id'] = $quote->customer_id;
         $data['warehouse_id'] = $quote->warehouse_id;
         $data['status'] = 'confirmed';
         $data['discount_amount'] = (float) $quote->discount_amount;
-        $data['items'] = $quote->items->map(function ($quoteItem) use ($submitted): array {
+        $data['items'] = $quote->items->map(function ($quoteItem) use ($quote, $submitted): array {
             $incoming = $submitted->get($quoteItem->id, []);
 
             return [
@@ -334,7 +334,7 @@ class SalesOrderService
                 'discount_percent' => (float) $quoteItem->discount_percent,
                 'discount_amount' => (float) $quoteItem->discount_amount,
                 'tax_percent' => isset($incoming['tax_percent']) ? (int) round((float) $incoming['tax_percent']) : (int) $quoteItem->tax_percent,
-                'seller_id' => null,
+                'seller_id' => $quote->user_id,
                 'notes' => $quoteItem->notes,
                 'is_custom_line' => (bool) $quoteItem->is_custom_line,
                 'custom_description' => $quoteItem->custom_description,

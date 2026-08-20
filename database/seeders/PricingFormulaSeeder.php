@@ -20,10 +20,10 @@ class PricingFormulaSeeder extends Seeder
         ];
 
         foreach ($presets as $preset) {
-            if (!PricingFormula::where('formula', $preset['formula'])->exists()) {
+            if (! PricingFormula::where('formula', $preset['formula'])->exists()) {
                 PricingFormula::create(array_merge($preset, [
-                    'is_preset'   => true,
-                    'is_active'   => true,
+                    'is_preset' => true,
+                    'is_active' => true,
                     'description' => null,
                 ]));
             }

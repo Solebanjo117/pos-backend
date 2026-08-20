@@ -52,10 +52,11 @@ class ProductPricing extends Model
                 ? (float) $this->cost_total
                 : ($this->cost !== null ? (float) $this->cost : (float) $this->base_price);
             $result = $service->preview(
-                $this->pricing_formula, 
+                $this->pricing_formula,
                 $formulaCost,
                 $this->resolveSaleTaxRateForCalculation()
             );
+
             return $result['success'] ? (float) $result['result'] : (float) $this->base_price;
         } catch (\Exception $e) {
             return (float) $this->base_price;
@@ -130,7 +131,7 @@ class ProductPricing extends Model
 
     public function getCostMiscellaneousAttribute($value): float
     {
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return 0.0;
         }
 
@@ -159,7 +160,7 @@ class ProductPricing extends Model
         $this->attributes['tax_rate'] = $normalized;
 
         // Keep legacy alias synchronized with explicit sale tax.
-        if (!array_key_exists('sale_tax_rate', $this->attributes) || $this->attributes['sale_tax_rate'] === null) {
+        if (! array_key_exists('sale_tax_rate', $this->attributes) || $this->attributes['sale_tax_rate'] === null) {
             $this->attributes['sale_tax_rate'] = $normalized;
         }
     }
@@ -219,7 +220,7 @@ class ProductPricing extends Model
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 
@@ -232,7 +233,7 @@ class ProductPricing extends Model
             return null;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return null;
         }
 

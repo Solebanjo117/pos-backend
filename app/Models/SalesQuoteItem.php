@@ -29,15 +29,15 @@ class SalesQuoteItem extends Model
     ];
 
     protected $casts = [
-        'quantity'         => 'integer',
-        'unit_price'       => 'decimal:2',
+        'quantity' => 'integer',
+        'unit_price' => 'decimal:2',
         'discount_percent' => 'decimal:2',
-        'discount_amount'  => 'decimal:2',
-        'tax_percent'      => 'integer',
-        'tax_amount'       => 'decimal:2',
-        'subtotal'         => 'decimal:2',
-        'total'            => 'decimal:2',
-        'is_custom_line'   => 'boolean',
+        'discount_amount' => 'decimal:2',
+        'tax_percent' => 'integer',
+        'tax_amount' => 'decimal:2',
+        'subtotal' => 'decimal:2',
+        'total' => 'decimal:2',
+        'is_custom_line' => 'boolean',
     ];
 
     protected $appends = ['product_name', 'product_sku'];
@@ -96,6 +96,7 @@ class SalesQuoteItem extends Model
         }
 
         $this->subtotal = $subtotal - $this->discount_amount;
+
         return (float) $this->subtotal;
     }
 
@@ -105,6 +106,7 @@ class SalesQuoteItem extends Model
         if ($this->tax_percent > 0) {
             $this->tax_amount = $this->subtotal * ($this->tax_percent / 100);
         }
+
         return (float) $this->tax_amount;
     }
 
@@ -113,6 +115,7 @@ class SalesQuoteItem extends Model
         $this->calculateSubtotal();
         $this->calculateTax();
         $this->total = $this->subtotal + $this->tax_amount;
+
         return (float) $this->total;
     }
 
@@ -120,6 +123,7 @@ class SalesQuoteItem extends Model
     {
         if ($value === null || $value === '') {
             $this->attributes['tax_percent'] = null;
+
             return;
         }
 

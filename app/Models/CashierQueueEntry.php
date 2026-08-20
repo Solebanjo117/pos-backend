@@ -9,12 +9,17 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
 class CashierQueueEntry extends Model
 {
     public const TYPE_SALE = 'sale_collection';
+
     public const TYPE_EXPENSE = 'expense_payment';
+
     public const TYPE_RETURN = 'sales_return_refund';
 
     public const STATUS_PENDING = 'pending';
+
     public const STATUS_OPENED = 'opened';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_CANCELLED = 'cancelled';
 
     protected $fillable = [

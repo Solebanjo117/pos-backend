@@ -23,9 +23,9 @@ class SalesReturnItem extends Model
     ];
 
     protected $casts = [
-        'quantity'   => 'integer',
+        'quantity' => 'integer',
         'unit_price' => 'decimal:2',
-        'subtotal'   => 'decimal:2',
+        'subtotal' => 'decimal:2',
     ];
 
     protected $appends = ['product_name', 'product_sku', 'user_name'];
@@ -74,6 +74,7 @@ class SalesReturnItem extends Model
         if ($this->variant) {
             return $this->variant->sku ?? '';
         }
+
         return $this->product->sku_base ?? '';
     }
 

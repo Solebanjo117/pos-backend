@@ -22,10 +22,11 @@ class PricingFormulaService
     /**
      * Evaluate a pricing formula with the given context values.
      *
-     * @param string $formula  The formula string (e.g. "ROUND(costo * 2)")
-     * @param float  $cost     The product cost (maps to 'costo')
-     * @param float  $taxRate  The tax rate in percent (maps to 'ITBM', e.g. 7 for 7%)
-     * @return float           The calculated price
+     * @param  string  $formula  The formula string (e.g. "ROUND(costo * 2)")
+     * @param  float  $cost  The product cost (maps to 'costo')
+     * @param  float  $taxRate  The tax rate in percent (maps to 'ITBM', e.g. 7 for 7%)
+     * @return float The calculated price
+     *
      * @throws \InvalidArgumentException if the formula is invalid
      */
     public function evaluate(string $formula, float $cost, float $taxRate = 7.0): float
@@ -62,6 +63,7 @@ class PricingFormulaService
         try {
             // Test with a sample cost of 10 and tax rate of 7
             $result = $this->evaluate($formula, 10.0, 7.0);
+
             return is_numeric($result) && $result >= 0;
         } catch (\Exception $e) {
             return false;
@@ -75,18 +77,19 @@ class PricingFormulaService
     {
         try {
             $result = $this->evaluate($formula, $cost, $taxRate);
+
             return [
                 'success' => true,
-                'result'  => round($result, 2),
+                'result' => round($result, 2),
                 'formula' => $formula,
-                'cost'    => $cost,
+                'cost' => $cost,
             ];
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error'   => $e->getMessage(),
+                'error' => $e->getMessage(),
                 'formula' => $formula,
-                'cost'    => $cost,
+                'cost' => $cost,
             ];
         }
     }
@@ -94,10 +97,10 @@ class PricingFormulaService
     /**
      * Aplica ITBM sobre el precio si la categoría lo tiene activo.
      * El ITBM se aplica SOBRE el resultado de la fórmula, no sobre el costo.
-     * 
-     * @param float $price       El precio base
-     * @param bool  $appliesItbm Si true, aplica ITBM
-     * @param float $itbmPercent Porcentaje de ITBM (default 7%)
+     *
+     * @param  float  $price  El precio base
+     * @param  bool  $appliesItbm  Si true, aplica ITBM
+     * @param  float  $itbmPercent  Porcentaje de ITBM (default 7%)
      */
     public function applyItbm(float $price, bool $appliesItbm, float $itbmPercent = 7.0): float
     {
@@ -112,11 +115,11 @@ class PricingFormulaService
      * Precio final para una categoría: evalúa fórmula → aplica ITBM si corresponde.
      * Retorna null si la fórmula es vacía o inválida.
      *
-     * @param  string $formula      Fórmula de la categoría (ej: "costo * 1.3 + 5")
-     * @param  float  $costo        Costo del producto
-     * @param  bool   $appliesItbm  Si true, aplica ITBM sobre el precio resultante
+     * @param  string  $formula  Fórmula de la categoría (ej: "costo * 1.3 + 5")
+     * @param  float  $costo  Costo del producto
+     * @param  bool  $appliesItbm  Si true, aplica ITBM sobre el precio resultante
      * @param  float  $itbmPercent  Porcentaje de ITBM (default 7%)
-     * @return float|null           Precio calculado o null si la fórmula es inválida
+     * @return float|null Precio calculado o null si la fórmula es inválida
      */
     public function calculate(string $formula, float $costo, bool $appliesItbm, float $itbmPercent = 7.0): ?float
     {
@@ -150,7 +153,7 @@ class PricingFormulaService
         return [
             ['label' => 'Costo × 2',                   'formula' => 'costo * 2'],
             ['label' => 'Costo × 1.5 (redondeado)',    'formula' => 'ROUND(costo * 1.5)'],
-            ['label' => 'Costo × 2 (redondear arriba)','formula' => 'ROUNDUP(costo * 2)'],
+            ['label' => 'Costo × 2 (redondear arriba)', 'formula' => 'ROUNDUP(costo * 2)'],
             ['label' => 'Costo × 2 (termina en .88)',  'formula' => 'FLOOR(costo * 2) + 0.88'],
             ['label' => 'Costo × 2 (termina en .99)',  'formula' => 'FLOOR(costo * 2) + 0.99'],
             ['label' => 'Costo + ITBM',                'formula' => 'costo + costo * ITBM'],
@@ -182,6 +185,7 @@ class PricingFormulaService
                     // Skip if function name is part of another word
                     if ($pos > 0 && ctype_alpha($expr[$pos - 1])) {
                         $pos++;
+
                         continue;
                     }
 
@@ -195,6 +199,7 @@ class PricingFormulaService
                     // Must be followed by opening parenthesis
                     if ($afterFn >= strlen($expr) || $expr[$afterFn] !== '(') {
                         $pos++;
+
                         continue;
                     }
 
@@ -202,8 +207,12 @@ class PricingFormulaService
                     $depth = 0;
                     $end = $afterFn;
                     for ($i = $afterFn; $i < strlen($expr); $i++) {
-                        if ($expr[$i] === '(') $depth++;
-                        if ($expr[$i] === ')') $depth--;
+                        if ($expr[$i] === '(') {
+                            $depth++;
+                        }
+                        if ($expr[$i] === ')') {
+                            $depth--;
+                        }
                         if ($depth === 0) {
                             $end = $i;
                             break;
@@ -222,13 +231,15 @@ class PricingFormulaService
                     $result = $this->applyFunction($fn, (float) $innerValue);
 
                     // Replace function call with result
-                    $expr = substr($expr, 0, $pos) . (string) $result . substr($expr, $end + 1);
+                    $expr = substr($expr, 0, $pos).(string) $result.substr($expr, $end + 1);
 
                     $found = true;
                     break 2; // Break both foreach and while
                 }
             }
-            if (!$found) break;
+            if (! $found) {
+                break;
+            }
         }
 
         return $expr;
@@ -240,12 +251,12 @@ class PricingFormulaService
     private function applyFunction(string $fn, float $value): float
     {
         return match (strtoupper($fn)) {
-            'ROUND'     => round($value),
-            'ROUNDUP'   => ceil($value),
+            'ROUND' => round($value),
+            'ROUNDUP' => ceil($value),
             'ROUNDDOWN' => floor($value),
-            'CEIL'      => ceil($value),
-            'FLOOR'     => floor($value),
-            default     => $value,
+            'CEIL' => ceil($value),
+            'FLOOR' => floor($value),
+            default => $value,
         };
     }
 
@@ -260,7 +271,7 @@ class PricingFormulaService
         $expr = trim($expr);
 
         // Safety: only allow digits, operators, dots, spaces, and parentheses
-        if (!preg_match('/^[\d\s\+\-\*\/\.\(\)]+$/', $expr)) {
+        if (! preg_match('/^[\d\s\+\-\*\/\.\(\)]+$/', $expr)) {
             throw new \InvalidArgumentException("Expresión aritmética inválida: {$expr}");
         }
 
@@ -287,12 +298,14 @@ class PricingFormulaService
 
             if ($ch === ' ') {
                 $i++;
+
                 continue;
             }
 
             if (in_array($ch, ['+', '-', '*', '/', '(', ')'])) {
                 $tokens[] = $ch;
                 $i++;
+
                 continue;
             }
 
@@ -302,6 +315,7 @@ class PricingFormulaService
                     $num .= $expr[$i++];
                 }
                 $tokens[] = $num;
+
                 continue;
             }
 
@@ -358,16 +372,19 @@ class PricingFormulaService
                 throw new \InvalidArgumentException('Paréntesis sin cerrar en la fórmula');
             }
             $pos++; // consume ')'
+
             return $result;
         }
 
         if ($token === '-') {
             $pos++;
+
             return -$this->parseFactor($tokens, $pos);
         }
 
         if (is_numeric($token)) {
             $pos++;
+
             return floatval($token);
         }
 

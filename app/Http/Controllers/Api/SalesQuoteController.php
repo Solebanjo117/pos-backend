@@ -510,7 +510,7 @@ class SalesQuoteController extends Controller
     public function openAtCashier(Request $request, int $id): JsonResponse
     {
         $quote = SalesQuote::query()
-            ->with(['customer', 'warehouse', 'items.product', 'items.variant.brand'])
+            ->with(['customer', 'user', 'warehouse', 'items.product', 'items.variant.brand'])
             ->findOrFail($id);
 
         if ($quote->status !== 'sent_to_cashier' || $quote->converted_order_id !== null) {
@@ -528,7 +528,11 @@ class SalesQuoteController extends Controller
             ->where('status', 'open')
             ->exists();
         if (! $hasOpenSession) {
-            return response()->json(['message' => 'Debe abrir Caja antes de cobrar esta venta.'], 422);
+            return response()->json([
+                'message' => 'Debe abrir Caja antes de cobrar esta venta.',
+                'requires_session' => true,
+                'data' => $quote,
+            ], 422);
         }
 
         activity()

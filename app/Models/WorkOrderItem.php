@@ -22,11 +22,11 @@ class WorkOrderItem extends Model
 
     protected $casts = [
         'work_order_id' => 'integer',
-        'product_id'    => 'integer',
-        'variant_id'    => 'integer',
-        'warehouse_id'  => 'integer',
-        'quantity'      => 'integer',
-        'unit_price'    => 'decimal:2',
+        'product_id' => 'integer',
+        'variant_id' => 'integer',
+        'warehouse_id' => 'integer',
+        'quantity' => 'integer',
+        'unit_price' => 'decimal:2',
     ];
 
     public function workOrder(): BelongsTo

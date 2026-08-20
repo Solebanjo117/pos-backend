@@ -14,11 +14,11 @@ class StoreInventoryRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'variant_id'   => 'required|exists:product_variants,id',
+            'variant_id' => 'required|exists:product_variants,id',
             'warehouse_id' => 'required|exists:warehouses,id',
-            'quantity'     => 'required|integer|min:1',
-            'reason'       => 'required|string|max:255',
-            'notes'        => 'nullable|string|max:500',
+            'quantity' => 'required|integer|min:1',
+            'reason' => 'required|string|max:255',
+            'notes' => 'nullable|string|max:500',
         ];
     }
 }

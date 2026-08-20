@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('dashboard')->middleware(['role:admin,manager,buyer,seller,cashier,assistant', 'warehouse_context'])->group(function () {
     // Get all dashboard data in one request
     Route::get('/', [DashboardController::class, 'index']);
-    
+
     // Individual metric endpoints
     Route::get('/stats', [DashboardController::class, 'stats']);
     Route::get('/top-products', [DashboardController::class, 'topProducts']);

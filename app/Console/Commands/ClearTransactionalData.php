@@ -15,20 +15,22 @@ class ClearTransactionalData extends Command
 
     public function handle(): int
     {
-        if (!$this->option('force')) {
+        if (! $this->option('force')) {
             $confirmed = $this->confirm('Esto borrara datos transaccionales (ventas, compras, cotizaciones, sesiones POS, movimientos). Deseas continuar?');
-            if (!$confirmed) {
+            if (! $confirmed) {
                 $this->warn('Operacion cancelada.');
+
                 return self::FAILURE;
             }
         }
 
-        if (!$this->option('no-backup')) {
+        if (! $this->option('no-backup')) {
             $this->info('Creando backup antes del reinicio...');
             $backupCode = Artisan::call('db:backup');
             if ($backupCode !== self::SUCCESS) {
                 $this->error('No se pudo crear backup. Operacion cancelada.');
                 $this->line(trim(Artisan::output()));
+
                 return self::FAILURE;
             }
             $this->line(trim(Artisan::output()));
@@ -41,7 +43,7 @@ class ClearTransactionalData extends Command
             if ($driver === 'pgsql') {
                 DB::beginTransaction();
                 foreach ($tables as $table) {
-                    if (!Schema::hasTable($table)) {
+                    if (! Schema::hasTable($table)) {
                         continue;
                     }
                     DB::statement("TRUNCATE TABLE \"{$table}\" RESTART IDENTITY CASCADE");
@@ -51,7 +53,7 @@ class ClearTransactionalData extends Command
             } else {
                 Schema::disableForeignKeyConstraints();
                 foreach ($tables as $table) {
-                    if (!Schema::hasTable($table)) {
+                    if (! Schema::hasTable($table)) {
                         continue;
                     }
                     DB::table($table)->truncate();
@@ -67,7 +69,8 @@ class ClearTransactionalData extends Command
                 Schema::enableForeignKeyConstraints();
             }
 
-            $this->error('Error limpiando datos: ' . $e->getMessage());
+            $this->error('Error limpiando datos: '.$e->getMessage());
+
             return self::FAILURE;
         }
 
@@ -80,6 +83,7 @@ class ClearTransactionalData extends Command
         if ($seedCode !== self::SUCCESS) {
             $this->error('Datos limpiados, pero fallo el seeder esencial.');
             $this->line(trim(Artisan::output()));
+
             return self::FAILURE;
         }
 

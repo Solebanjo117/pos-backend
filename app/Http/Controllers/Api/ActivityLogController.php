@@ -3,8 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Spatie\Activitylog\Models\Activity;
 
 class ActivityLogController extends Controller
@@ -26,7 +26,7 @@ class ActivityLogController extends Controller
         // Filter by causer (user id)
         if ($request->filled('causer_id')) {
             $query->where('causer_id', $request->causer_id)
-                  ->where('causer_type', 'App\\Models\\User');
+                ->where('causer_type', 'App\\Models\\User');
         }
 
         // Filter by event

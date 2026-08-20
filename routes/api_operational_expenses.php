@@ -1,8 +1,8 @@
 <?php
 
-use App\Http\Controllers\Api\OperationalExpenseController;
-use App\Http\Controllers\Api\OperationalExpenseCategoryController;
 use App\Http\Controllers\Api\OperationalExpenseBeneficiaryController;
+use App\Http\Controllers\Api\OperationalExpenseCategoryController;
+use App\Http\Controllers\Api\OperationalExpenseController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('operational-expense-categories')->middleware('role:admin,manager')->group(function (): void {

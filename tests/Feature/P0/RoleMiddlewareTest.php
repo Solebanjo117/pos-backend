@@ -23,4 +23,3 @@ class RoleMiddlewareTest extends TestCase
         $this->getJson('/api/v1/backups')->assertStatus(403);
     }
 }
-

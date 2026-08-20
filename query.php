@@ -1,4 +1,5 @@
 <?php
+
 require __DIR__.'/vendor/autoload.php';
 $app = require_once __DIR__.'/bootstrap/app.php';
 $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
@@ -15,4 +16,4 @@ $sql = "
 
 $results = \Illuminate\Support\Facades\DB::select($sql);
 file_put_contents(__DIR__.'/query_results.json', json_encode($results, JSON_PRETTY_PRINT));
-echo "Done. Found " . count($results) . " records.\n";
+echo 'Done. Found '.count($results)." records.\n";

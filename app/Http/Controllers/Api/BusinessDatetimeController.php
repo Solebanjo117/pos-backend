@@ -10,9 +10,7 @@ use Illuminate\Validation\Rule;
 
 class BusinessDatetimeController extends Controller
 {
-    public function __construct(private BusinessDatetimeService $businessDatetimeService)
-    {
-    }
+    public function __construct(private BusinessDatetimeService $businessDatetimeService) {}
 
     public function show(string $recordType, int $recordId): JsonResponse
     {
