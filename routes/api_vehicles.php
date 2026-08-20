@@ -1,7 +1,9 @@
 <?php
 
 use App\Http\Controllers\Api\ProductCompatibilityController;
+use App\Http\Controllers\Api\VehicleCatalogController;
 use App\Http\Controllers\Api\VehicleChassisController;
+use App\Http\Controllers\Api\VehicleConfigurationController;
 use App\Http\Controllers\Api\VehicleEngineController;
 use App\Http\Controllers\Api\VehicleMakeController;
 use App\Http\Controllers\Api\VehicleModelController;
@@ -17,6 +19,15 @@ use Illuminate\Support\Facades\Route;
 Route::get('vehicle-makes/all', [VehicleMakeController::class, 'all']);
 Route::apiResource('vehicle-makes', VehicleMakeController::class)->only(['index', 'show'])->whereNumber('vehicle_make');
 Route::apiResource('vehicle-makes', VehicleMakeController::class)->only(['store', 'update', 'destroy'])->middleware('role:admin,manager')->whereNumber('vehicle_make');
+
+Route::get('vehicle-catalog/summary', [VehicleCatalogController::class, 'summary']);
+Route::get('vehicle-catalog/export', [VehicleCatalogController::class, 'export']);
+Route::post('vehicle-catalog/bulk-delete', [VehicleCatalogController::class, 'bulkDelete'])->middleware('role:admin,manager');
+
+Route::get('vehicle-configurations', [VehicleConfigurationController::class, 'index']);
+Route::post('vehicle-configurations', [VehicleConfigurationController::class, 'store'])->middleware('role:admin,manager');
+Route::patch('vehicle-configurations/{model}/{engine}', [VehicleConfigurationController::class, 'update'])->middleware('role:admin,manager')->where(['model' => '[0-9]+', 'engine' => '[0-9]+']);
+Route::delete('vehicle-configurations/{model}/{engine}', [VehicleConfigurationController::class, 'destroy'])->middleware('role:admin,manager')->where(['model' => '[0-9]+', 'engine' => '[0-9]+']);
 
 // Vehicle Models
 Route::apiResource('vehicle-models', VehicleModelController::class)->only(['index', 'show']);

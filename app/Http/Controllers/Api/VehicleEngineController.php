@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\VehicleEngine;
 use App\Models\VehicleModel;
+use App\Services\VehicleCatalogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -17,6 +18,8 @@ class VehicleEngineController extends Controller
         'Hybrid',
         'Electric',
     ];
+
+    public function __construct(private VehicleCatalogService $catalogService) {}
 
     /**
      * Display a listing of vehicle engines.
@@ -55,17 +58,40 @@ class VehicleEngineController extends Controller
         if ($request->has('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('engine_code', 'ilike', "%{$search}%")
-                    ->orWhere('displacement', 'ilike', "%{$search}%")
-                    ->orWhere('fuel_type', 'ilike', "%{$search}%");
+                $like = '%'.mb_strtolower($search).'%';
+                $q->whereRaw('LOWER(engine_code) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(COALESCE(displacement, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(fuel_type, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(aspiration, ?)) LIKE ?', ['', $like])
+                    ->orWhereHas('make', fn ($makeQuery) => $makeQuery->whereRaw('LOWER(name) LIKE ?', [$like]));
             });
         }
 
-        // Pagination
-        $perPage = $request->input('per_page', 50);
-        $engines = $query->orderBy('engine_code')->paginate($perPage);
+        $sorts = [
+            'make' => 'make_id',
+            'code' => 'engine_code',
+            'displacement' => 'displacement',
+            'fuel_type' => 'fuel_type',
+        ];
+        $sort = $sorts[(string) $request->input('sort')] ?? 'engine_code';
+        $direction = $request->input('direction') === 'desc' ? 'desc' : 'asc';
+        $perPage = min(max((int) $request->input('per_page', 20), 1), 500);
+        $engines = $query->orderBy($sort, $direction)->orderBy('engine_code')->paginate($perPage);
+        $counts = $this->catalogService->configurationCountsByEngine(
+            collect($engines->items())->pluck('id')->map(fn ($id): int => (int) $id)->all(),
+        );
+        $canManage = in_array($request->user()?->role, ['admin', 'manager'], true);
         $data = collect($engines->items())
-            ->map(fn (VehicleEngine $item) => $this->serializeEngine($item))
+            ->map(function (VehicleEngine $item) use ($counts, $canManage): VehicleEngine {
+                $engine = $this->serializeEngine($item);
+                $blockReason = $this->catalogService->engineDeleteBlockReason($engine);
+                $engine->setAttribute('vehicles_count', $counts[$engine->id] ?? 0);
+                $engine->setAttribute('can_edit', $canManage);
+                $engine->setAttribute('can_delete', $canManage && $blockReason === null);
+                $engine->setAttribute('delete_block_reason', $blockReason);
+
+                return $engine;
+            })
             ->values();
 
         return response()->json([
@@ -206,14 +232,7 @@ class VehicleEngineController extends Controller
     {
         $engine = VehicleEngine::findOrFail($id);
 
-        // Check if engine has products
-        if ($engine->compatibility()->count() > 0) {
-            return response()->json([
-                'message' => 'No se puede eliminar el motor porque tiene productos compatibles asociados',
-            ], 422);
-        }
-
-        $engine->delete();
+        $this->catalogService->deleteEngine($engine);
 
         return response()->json([
             'message' => 'Motor eliminado exitosamente',
