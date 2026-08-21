@@ -20,6 +20,7 @@ class Category extends Model
 
     protected $fillable = [
         'name',
+        'normalized_name',
         'slug',
         'parent_id',
         'description',
@@ -57,6 +58,15 @@ class Category extends Model
                 $category->slug = Str::slug($category->name);
             }
         });
+
+        static::saving(function (Category $category): void {
+            $category->normalized_name = self::normalizeName($category->name);
+        });
+    }
+
+    public static function normalizeName(string $name): string
+    {
+        return Str::lower((string) preg_replace('/\s+/u', ' ', trim($name)));
     }
 
     /**

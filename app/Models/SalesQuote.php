@@ -17,6 +17,7 @@ class SalesQuote extends Model
     protected $fillable = [
         'quote_number',
         'customer_id',
+        'customer_vehicle_id',
         'user_id',
         'warehouse_id',
         'pos_session_id',
@@ -50,6 +51,11 @@ class SalesQuote extends Model
     public function customer(): BelongsTo
     {
         return $this->belongsTo(Customer::class);
+    }
+
+    public function customerVehicle(): BelongsTo
+    {
+        return $this->belongsTo(CustomerVehicle::class);
     }
 
     public function user(): BelongsTo

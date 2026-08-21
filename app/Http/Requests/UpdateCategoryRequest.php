@@ -15,6 +15,9 @@ class UpdateCategoryRequest extends FormRequest
 
     protected function prepareForValidation(): void
     {
+        if ($this->has('name')) {
+            $this->merge(['name' => preg_replace('/\s+/u', ' ', trim((string) $this->input('name'))) ?? '']);
+        }
         $this->normalizeIntegerPercentField('itbm_percent');
     }
 
@@ -67,6 +70,22 @@ class UpdateCategoryRequest extends FormRequest
                         'parent_ids',
                         'La categoria no puede ser padre de si misma ni formar ciclos.'
                     );
+                }
+
+                $name = (string) $this->input('name', $category->name);
+                $parentId = $this->has('parent_ids')
+                    ? $this->input('parent_ids.0')
+                    : $this->input('parent_id', $category->parent_id);
+                $duplicate = Category::query()
+                    ->whereKeyNot($category->id)
+                    ->where('normalized_name', Category::normalizeName($name))
+                    ->when($parentId, fn ($query) => $query->where('parent_id', (int) $parentId), fn ($query) => $query->whereNull('parent_id'))
+                    ->exists();
+                $identityChanged = Category::normalizeName($name) !== $category->normalized_name
+                    || (int) ($parentId ?? 0) !== (int) ($category->parent_id ?? 0);
+
+                if ($duplicate && $identityChanged) {
+                    $validator->errors()->add('name', 'Ya existe una categoría con ese nombre bajo el mismo padre.');
                 }
             },
         ];

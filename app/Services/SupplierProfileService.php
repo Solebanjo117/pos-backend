@@ -13,6 +13,55 @@ use Illuminate\Support\Facades\DB;
 
 class SupplierProfileService
 {
+    public function relationshipSummary(Supplier $supplier): array
+    {
+        $configuredBrands = $supplier->brands()->get(['brands.id', 'brands.name'])->keyBy('id');
+        $configuredProducts = $supplier->productSuppliers()
+            ->with(['product.category:id,name', 'product.extraCategories:id,name', 'variant.brand:id,name'])
+            ->get();
+        $purchasedItems = PurchaseOrderItem::query()
+            ->where(function (Builder $query) use ($supplier): void {
+                $query->where('supplier_id', $supplier->id)
+                    ->orWhereHas('purchaseOrder', fn (Builder $query) => $query->where('supplier_id', $supplier->id));
+            })
+            ->with(['product.category:id,name', 'product.extraCategories:id,name', 'variant.brand:id,name', 'purchaseOrder:id,supplier_id,payment_status'])
+            ->get();
+
+        $configuredBrandRows = $configuredBrands->toBase()->map(fn ($brand): array => ['id' => $brand->id, 'name' => $brand->name]);
+        $productBrands = $configuredProducts->toBase()->pluck('variant.brand')->filter()->map(fn ($brand): array => ['id' => $brand->id, 'name' => $brand->name]);
+        $purchasedBrands = $purchasedItems->toBase()->pluck('variant.brand')->filter()->map(fn ($brand): array => ['id' => $brand->id, 'name' => $brand->name]);
+
+        $configuredCategories = $configuredProducts->toBase()->flatMap(fn (ProductSupplier $link) => collect([$link->product?->category])
+            ->merge($link->product?->extraCategories ?? collect()))
+            ->filter()
+            ->map(fn ($category): array => ['id' => $category->id, 'name' => $category->name]);
+        $purchasedCategories = $purchasedItems->toBase()->flatMap(fn (PurchaseOrderItem $item) => collect([$item->product?->category])
+            ->merge($item->product?->extraCategories ?? collect()))
+            ->filter()
+            ->map(fn ($category): array => ['id' => $category->id, 'name' => $category->name]);
+
+        return [
+            'brands' => $this->mergeRelationshipSources($configuredBrandRows->merge($productBrands), $purchasedBrands),
+            'categories' => $this->mergeRelationshipSources($configuredCategories, $purchasedCategories),
+            'configured_products_count' => $configuredProducts->count(),
+            'purchased_products_count' => $purchasedItems->filter(fn (PurchaseOrderItem $item): bool => $item->variant_id !== null || $item->product_id !== null)->unique(fn (PurchaseOrderItem $item): string => $item->product_id.'-'.($item->variant_id ?? ''))->count(),
+            'purchase_orders_count' => $purchasedItems->pluck('purchase_order_id')->unique()->count(),
+            'accounts_payable_orders_count' => PurchaseOrder::query()->where('supplier_id', $supplier->id)->whereNotIn('payment_status', ['paid'])->count(),
+        ];
+    }
+
+    private function mergeRelationshipSources(\Illuminate\Support\Collection $configured, \Illuminate\Support\Collection $purchased): array
+    {
+        $configured = $configured->unique('id')->keyBy('id');
+        $purchased = $purchased->unique('id')->keyBy('id');
+
+        return $configured->keys()->merge($purchased->keys())->unique()->map(function ($id) use ($configured, $purchased): array {
+            $row = $configured->get($id) ?? $purchased->get($id);
+
+            return [...$row, 'source' => $configured->has($id) && $purchased->has($id) ? 'both' : ($configured->has($id) ? 'configured' : 'purchased')];
+        })->sortBy('name')->values()->all();
+    }
+
     /**
      * @param  array<string, mixed>  $filters
      * @return array<string, mixed>
@@ -359,8 +408,17 @@ class SupplierProfileService
                     });
                 });
             })
+            ->whereNotExists(function ($query): void {
+                $query->selectRaw('1')
+                    ->from('product_suppliers')
+                    ->whereColumn('product_suppliers.product_id', 'product_inventory.product_id')
+                    ->where(function ($query): void {
+                        $query->whereNull('product_suppliers.variant_id')
+                            ->orWhereColumn('product_suppliers.variant_id', 'product_inventory.variant_id');
+                    });
+            })
+            ->limit(min(100, max(1, (int) ($filters['per_page'] ?? 25))))
             ->get()
-            ->filter(fn (ProductInventory $inventory): bool => ! $this->hasSupplierCoverage($inventory))
             ->map(fn (ProductInventory $inventory): array => [
                 'product_id' => $inventory->product_id,
                 'variant_id' => $inventory->variant_id,
@@ -377,20 +435,6 @@ class SupplierProfileService
                 'reorder_quantity' => (int) $inventory->reorder_quantity,
                 'needs_reorder' => (int) $inventory->quantity_available <= (int) $inventory->reorder_point,
             ]);
-    }
-
-    private function hasSupplierCoverage(ProductInventory $inventory): bool
-    {
-        return ProductSupplier::query()
-            ->where('product_id', $inventory->product_id)
-            ->where(function (Builder $query) use ($inventory): void {
-                $query->whereNull('variant_id');
-
-                if ($inventory->variant_id !== null) {
-                    $query->orWhere('variant_id', $inventory->variant_id);
-                }
-            })
-            ->exists();
     }
 
     /**

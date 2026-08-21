@@ -7,7 +7,9 @@ use App\Models\VehicleEngine;
 use App\Models\VehicleMake;
 use App\Models\VehicleModel;
 use App\Models\VehicleVin;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 
 uses(RefreshDatabase::class);
 
@@ -56,7 +58,113 @@ it('counts pivot-only configurations once in the centralized summary', function 
         ->assertJsonPath('data.0.engines_count', 1)
         ->assertJsonPath('data.0.vehicles_count', 1);
 
+    $this->getJson('/api/v1/vehicle-models')
+        ->assertOk()
+        ->assertJsonPath('data.0.engines_count', 1)
+        ->assertJsonPath('data.0.vehicles_count', 1);
+
+    $this->getJson('/api/v1/vehicle-engines')
+        ->assertOk()
+        ->assertJsonPath('data.0.vehicles_count', 1);
+
     expect($make->exists)->toBeTrue();
+});
+
+it('derives an engine make from legacy and pivot models without double counting', function (): void {
+    [$make, $model, $directEngine] = vehicleCatalogPair('DERIVED-MAKE');
+    $directEngine->delete();
+    $engine = VehicleEngine::create([
+        'make_id' => null,
+        'model_id' => $model->id,
+        'engine_code' => 'ENG-DERIVED-MAKE',
+    ]);
+    $engine->models()->attach($model->id);
+
+    $this->getJson('/api/v1/vehicle-makes')
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $make->id)
+        ->assertJsonPath('data.0.engines_count', 1);
+});
+
+it('builds PostgreSQL safe aggregate queries for vehicle catalog counts', function (): void {
+    [, $model, $engine] = vehicleCatalogPair('SQL');
+    $engine->models()->attach($model->id);
+    $queries = [];
+
+    DB::listen(function (QueryExecuted $query) use (&$queries): void {
+        $sql = mb_strtolower(ltrim($query->sql));
+        if (str_contains($sql, 'vehicle_pairs') && str_contains($sql, 'count(*) as aggregate')) {
+            $queries[] = $sql;
+        }
+    });
+
+    $this->getJson('/api/v1/vehicle-makes')->assertOk();
+    $this->getJson('/api/v1/vehicle-models')->assertOk();
+    $this->getJson('/api/v1/vehicle-engines')->assertOk();
+
+    expect($queries)->toHaveCount(3);
+    foreach ($queries as $query) {
+        expect($query)->not->toMatch('/^select\s+["`]?vehicle_pairs["`]?\.["`]?model_id/');
+    }
+});
+
+it('searches catalog tabs with tokens distributed across related fields', function (): void {
+    [$make, $model, $engine] = vehicleCatalogPair('SEARCH');
+    $make->update(['name' => 'Toyota']);
+    $model->update(['name' => 'Corolla']);
+    $engine->update(['engine_code' => '2ZR FE']);
+    $engine->models()->attach($model->id);
+
+    $this->getJson('/api/v1/vehicle-models?search=Toyota%20Corolla')
+        ->assertOk()
+        ->assertJsonPath('meta.total', 1);
+    $this->getJson('/api/v1/vehicle-engines?search=Toyota%202ZR')
+        ->assertOk()
+        ->assertJsonPath('meta.total', 1);
+    $this->getJson('/api/v1/vehicle-configurations?search=Toyota%20Corolla%202ZR')
+        ->assertOk()
+        ->assertJsonPath('meta.total', 1);
+});
+
+it('sorts models and engines alphabetically by make name', function (): void {
+    vehicleCatalogPair('ZULU')[0]->update(['name' => 'Zulu']);
+    vehicleCatalogPair('ALFA')[0]->update(['name' => 'Alfa']);
+
+    $this->getJson('/api/v1/vehicle-models?sort=make&direction=asc')
+        ->assertOk()
+        ->assertJsonPath('data.0.make.name', 'Alfa');
+    $this->getJson('/api/v1/vehicle-engines?sort=make&direction=asc')
+        ->assertOk()
+        ->assertJsonPath('data.0.make.name', 'Alfa');
+});
+
+it('protects active relationships when changing a model make or engine models', function (): void {
+    [, $model, $engine] = vehicleCatalogPair('PROTECTED-PAIR');
+    $engine->models()->attach($model->id);
+    VehicleVin::create([
+        'model_id' => $model->id,
+        'engine_id' => $engine->id,
+        'vin' => 'PROTECTED-VIN',
+    ]);
+    $otherMake = VehicleMake::create(['name' => 'Otra marca']);
+
+    $this->putJson("/api/v1/vehicle-models/{$model->id}", [
+        'make_id' => $otherMake->id,
+        'name' => $model->name,
+        'year_from' => $model->year_from,
+        'year_to' => $model->year_to,
+        'generation' => $model->generation,
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors('make_id');
+
+    $this->putJson("/api/v1/vehicle-engines/{$engine->id}", [
+        'model_ids' => [],
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors('model_ids');
+
+    expect($model->fresh()->make_id)->not->toBe($otherMake->id)
+        ->and($engine->models()->whereKey($model->id)->exists())->toBeTrue()
+        ->and(VehicleVin::where('vin', 'PROTECTED-VIN')->exists())->toBeTrue();
 });
 
 it('creates a model engine configuration and normalizes its vins', function (): void {

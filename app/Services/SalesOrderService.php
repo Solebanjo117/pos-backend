@@ -319,6 +319,7 @@ class SalesOrderService
 
         $data['user_id'] = Auth::id();
         $data['customer_id'] = $quote->customer_id;
+        $data['customer_vehicle_id'] = $quote->customer_vehicle_id;
         $data['warehouse_id'] = $quote->warehouse_id;
         $data['status'] = 'confirmed';
         $data['discount_amount'] = (float) $quote->discount_amount;

@@ -2,12 +2,18 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exports\CustomerExport;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CustomerSalesHistoryRequest;
+use App\Http\Requests\StoreCustomerRequest;
+use App\Http\Requests\UpdateCustomerRequest;
 use App\Models\Customer;
 use App\Services\CustomerService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class CustomerController extends Controller
 {
@@ -20,16 +26,41 @@ class CustomerController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Customer::query();
+        $canManage = in_array($request->user()?->role, ['admin', 'manager'], true);
+        $query = Customer::query()
+            ->with(['customerType', 'vehicles.model.make', 'vehicles.engine'])
+            ->withExists([
+                'salesOrders as has_sales_orders',
+                'salesQuotes as has_sales_quotes',
+                'workOrders as has_work_orders',
+                'transactions as has_transactions',
+            ]);
 
         if ($request->filled('search')) {
             $search = $request->search;
-            $query->where(function ($q) use ($search) {
-                $q->where('name', 'ilike', "%{$search}%")
-                    ->orWhere('email', 'ilike', "%{$search}%")
-                    ->orWhere('phone', 'ilike', "%{$search}%")
-                    ->orWhere('code', 'ilike', "%{$search}%");
+            $operator = DB::connection()->getDriverName() === 'sqlite' ? 'like' : 'ilike';
+            $query->where(function ($q) use ($search, $operator) {
+                $q->where('name', $operator, "%{$search}%")
+                    ->orWhere('email', $operator, "%{$search}%")
+                    ->orWhere('phone', $operator, "%{$search}%")
+                    ->orWhere('code', $operator, "%{$search}%")
+                    ->orWhere('tax_id', $operator, "%{$search}%")
+                    ->orWhere('tax_name', $operator, "%{$search}%")
+                    ->orWhere('address', $operator, "%{$search}%")
+                    ->orWhereHas('vehicles', function ($query) use ($search, $operator): void {
+                        $query->where('vin', $operator, "%{$search}%")
+                            ->orWhere('plate_number', $operator, "%{$search}%")
+                            ->orWhereHas('model', fn ($query) => $query->where('name', $operator, "%{$search}%"))
+                            ->orWhereHas('engine', fn ($query) => $query->where('engine_code', $operator, "%{$search}%"));
+                    });
             });
+        }
+
+        if ($request->filled('customer_type_id')) {
+            $query->where('customer_type_id', $request->integer('customer_type_id'));
+        }
+        if ($request->filled('status')) {
+            $query->where('status', (string) $request->input('status'));
         }
 
         if ($request->boolean('has_balance')) {
@@ -41,42 +72,35 @@ class CustomerController extends Controller
         // If other filters were meant to be kept, they would need to be re-implemented here.
         // For now, strictly following the provided snippet.
 
-        $perPage = $request->input('per_page', 15);
-        $customers = $query->latest()->paginate($perPage);
+        $perPage = min(100, max(5, (int) $request->input('per_page', 15)));
+        $sortBy = in_array($request->input('order_by'), ['name', 'created_at', 'current_balance'], true) ? $request->input('order_by') : 'name';
+        $direction = $request->input('order_direction') === 'desc' ? 'desc' : 'asc';
+        $customers = $query->orderBy($sortBy, $direction)->paginate($perPage);
+        $customers->getCollection()->transform(function (Customer $customer) use ($canManage): Customer {
+            $customer->setAttribute('can_edit', true);
+            $reason = $this->customerService->customerDeleteBlockReason($customer);
+            $customer->setAttribute('can_delete', $canManage && $reason === null);
+            $customer->setAttribute('delete_block_reason', $canManage ? $reason : 'No tienes permiso para eliminar clientes.');
+
+            return $customer;
+        });
 
         return response()->json($customers);
+    }
+
+    public function export(): BinaryFileResponse
+    {
+        return Excel::download(new CustomerExport, 'clientes.xlsx');
     }
 
     /**
      * Store a new customer
      */
-    public function store(Request $request): JsonResponse
+    public function store(StoreCustomerRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'code' => 'sometimes|string|max:50|unique:customers',
-            'type' => 'required|in:individual,business',
-            'name' => 'required|string|max:255',
-            'email' => 'nullable|email|max:255',
-            'phone' => 'nullable|string|max:50',
-            'tax_id' => 'nullable|string|max:100',
-            'tax_name' => 'nullable|string|max:255',
-            'address' => 'nullable|string',
-            'city' => 'nullable|string|max:100',
-            'state' => 'nullable|string|max:100',
-            'country' => 'nullable|string|max:100',
-            'postal_code' => 'nullable|string|max:20',
-            'credit_limit' => 'nullable|numeric|min:0',
-            'credit_days' => 'nullable|integer|min:0',
-            'contact_person' => 'nullable|string|max:255',
-            'contact_phone' => 'nullable|string|max:50',
-            'notes' => 'nullable|string',
-            'status' => 'nullable|in:active,inactive,blocked',
-            'initial_balance' => 'nullable|numeric',
-        ]);
+        $customer = $this->customerService->createCustomer($request->validated());
 
-        $customer = $this->customerService->createCustomer($validated);
-
-        return response()->json($customer, 201);
+        return response()->json($customer->load(['customerType', 'vehicles.model.make', 'vehicles.chassis', 'vehicles.engine', 'vehicles.catalogVin']), 201);
     }
 
     /**
@@ -91,6 +115,7 @@ class CustomerController extends Controller
             'customer' => $customer,
             'balance_summary' => $balanceSummary,
             'profile_summary' => $this->customerService->getProfileSummary($customer),
+            'quotes' => $customer->salesQuotes()->with('customerVehicle.model.make')->latest('date')->limit(25)->get(),
         ]);
     }
 
@@ -111,32 +136,11 @@ class CustomerController extends Controller
     /**
      * Update a customer
      */
-    public function update(Request $request, Customer $customer): JsonResponse
+    public function update(UpdateCustomerRequest $request, Customer $customer): JsonResponse
     {
-        $validated = $request->validate([
-            'code' => 'sometimes|string|max:50|unique:customers,code,'.$customer->id,
-            'type' => 'sometimes|in:individual,business',
-            'name' => 'sometimes|string|max:255',
-            'email' => 'nullable|email|max:255',
-            'phone' => 'nullable|string|max:50',
-            'tax_id' => 'nullable|string|max:100',
-            'tax_name' => 'nullable|string|max:255',
-            'address' => 'nullable|string',
-            'city' => 'nullable|string|max:100',
-            'state' => 'nullable|string|max:100',
-            'country' => 'nullable|string|max:100',
-            'postal_code' => 'nullable|string|max:20',
-            'credit_limit' => 'nullable|numeric|min:0',
-            'credit_days' => 'nullable|integer|min:0',
-            'contact_person' => 'nullable|string|max:255',
-            'contact_phone' => 'nullable|string|max:50',
-            'notes' => 'nullable|string',
-            'status' => 'nullable|in:active,inactive,blocked',
-        ]);
+        $customer = $this->customerService->updateCustomer($customer, $request->validated());
 
-        $customer = $this->customerService->updateCustomer($customer, $validated);
-
-        return response()->json($customer);
+        return response()->json($customer->load(['customerType', 'vehicles.model.make', 'vehicles.chassis', 'vehicles.engine', 'vehicles.catalogVin']));
     }
 
     /**
@@ -144,13 +148,9 @@ class CustomerController extends Controller
      */
     public function destroy(Customer $customer): JsonResponse
     {
-        try {
-            $this->customerService->deleteCustomer($customer);
+        $this->customerService->deleteCustomer($customer);
 
-            return response()->json(['message' => 'Cliente eliminado exitosamente']);
-        } catch (\Exception $e) {
-            return response()->json(['error' => $e->getMessage()], 400);
-        }
+        return response()->json(['message' => 'Cliente eliminado exitosamente']);
     }
 
     /**

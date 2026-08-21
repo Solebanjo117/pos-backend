@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
+use App\Models\CustomerVehicle;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\SalesOrder;
@@ -33,7 +34,7 @@ class SalesQuoteController extends Controller
     public function index(Request $request): JsonResponse
     {
         try {
-            $query = SalesQuote::with(['customer', 'user', 'warehouse', 'items.product'])
+            $query = SalesQuote::with(['customer', 'customerVehicle.model.make', 'customerVehicle.engine', 'user', 'warehouse', 'items.product'])
                 ->orderByDesc('created_at');
 
             if ($request->filled('status')) {
@@ -77,7 +78,7 @@ class SalesQuoteController extends Controller
     public function show(int $id): JsonResponse
     {
         try {
-            $quote = SalesQuote::with(['customer', 'user', 'warehouse', 'items.product', 'items.variant', 'convertedOrder'])
+            $quote = SalesQuote::with(['customer', 'customerVehicle.model.make', 'customerVehicle.engine', 'user', 'warehouse', 'items.product', 'items.variant', 'convertedOrder'])
                 ->findOrFail($id);
 
             return response()->json($quote);
@@ -110,6 +111,7 @@ class SalesQuoteController extends Controller
 
         $validated = $request->validate([
             'customer_id' => 'nullable|exists:customers,id',
+            'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
             'warehouse_id' => 'nullable|exists:warehouses,id',
             'date' => 'nullable|date',
             'valid_until' => 'nullable|date|after_or_equal:date',
@@ -126,6 +128,7 @@ class SalesQuoteController extends Controller
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
+        $this->validateCustomerVehicle($validated);
 
         $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
 
@@ -153,6 +156,7 @@ class SalesQuoteController extends Controller
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
                     'customer_id' => $validated['customer_id'] ?? null,
+                    'customer_vehicle_id' => $validated['customer_vehicle_id'] ?? null,
                     'user_id' => $request->user()->id,
                     'warehouse_id' => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
                     'date' => $validated['date'] ?? now(),
@@ -178,7 +182,7 @@ class SalesQuoteController extends Controller
 
                 $quote->calculateTotals();
 
-                return $quote->load(['customer', 'user', 'items.product']);
+                return $quote->load(['customer', 'customerVehicle.model.make', 'customerVehicle.engine', 'user', 'items.product']);
             });
 
             return response()->json([
@@ -206,6 +210,7 @@ class SalesQuoteController extends Controller
 
         $validated = $request->validate([
             'customer_id' => 'nullable|exists:customers,id',
+            'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
             'warehouse_id' => 'nullable|exists:warehouses,id',
             'valid_until' => 'nullable|date',
             'notes' => 'nullable|string',
@@ -222,6 +227,7 @@ class SalesQuoteController extends Controller
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
+        $this->validateCustomerVehicle($validated, $quote);
 
         if (! empty($validated['items'])) {
             $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
@@ -255,7 +261,7 @@ class SalesQuoteController extends Controller
 
         try {
             DB::transaction(function () use ($quote, $validated) {
-                $quote->update(collect($validated)->only(['customer_id', 'warehouse_id', 'valid_until', 'notes', 'internal_notes', 'status'])->toArray());
+                $quote->update(collect($validated)->only(['customer_id', 'customer_vehicle_id', 'warehouse_id', 'valid_until', 'notes', 'internal_notes', 'status'])->toArray());
 
                 if (isset($validated['items'])) {
                     $quote->items()->delete();
@@ -281,7 +287,7 @@ class SalesQuoteController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Cotización actualizada',
-                'data' => $quote->fresh(['customer', 'user', 'items.product']),
+                'data' => $quote->fresh(['customer', 'customerVehicle.model.make', 'customerVehicle.engine', 'user', 'items.product']),
             ] + (! empty($stockWarnings) ? ['warnings' => $stockWarnings] : []));
         } catch (\Exception $e) {
             return response()->json(['message' => 'Error al actualizar', 'error' => $e->getMessage()], 500);
@@ -298,6 +304,7 @@ class SalesQuoteController extends Controller
 
         $validated = $request->validate([
             'customer_id' => 'nullable|exists:customers,id',
+            'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
             'warehouse_id' => 'nullable|exists:warehouses,id',
             'notes' => 'nullable|string',
             'internal_notes' => 'nullable|string',
@@ -312,6 +319,7 @@ class SalesQuoteController extends Controller
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
+        $this->validateCustomerVehicle($validated);
 
         $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
 
@@ -339,6 +347,7 @@ class SalesQuoteController extends Controller
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
                     'customer_id' => $validated['customer_id'] ?? null,
+                    'customer_vehicle_id' => $validated['customer_vehicle_id'] ?? null,
                     'user_id' => $request->user()->id,
                     'warehouse_id' => $validated['warehouse_id'] ?? $request->user()->current_warehouse_id,
                     'date' => now(),
@@ -364,7 +373,7 @@ class SalesQuoteController extends Controller
 
                 $quote->calculateTotals();
 
-                return $quote->load(['customer', 'user', 'items.product']);
+                return $quote->load(['customer', 'customerVehicle.model.make', 'customerVehicle.engine', 'user', 'items.product']);
             });
 
             return response()->json([
@@ -585,6 +594,7 @@ class SalesQuoteController extends Controller
                 // Create the SalesOrder from the quote
                 $order = SalesOrder::create([
                     'customer_id' => $quote->customer_id,
+                    'customer_vehicle_id' => $quote->customer_vehicle_id,
                     'user_id' => $request->user()->id,
                     'date' => now(),
                     'status' => 'draft',
@@ -946,5 +956,20 @@ class SalesQuoteController extends Controller
         $price = $pricingQuery->value('base_price');
 
         return $price !== null ? (float) $price : null;
+    }
+
+    private function validateCustomerVehicle(array $data, ?SalesQuote $quote = null): void
+    {
+        $customerId = array_key_exists('customer_id', $data) ? $data['customer_id'] : $quote?->customer_id;
+        $vehicleId = array_key_exists('customer_vehicle_id', $data) ? $data['customer_vehicle_id'] : $quote?->customer_vehicle_id;
+
+        if (! $vehicleId) {
+            return;
+        }
+        if (! $customerId || ! CustomerVehicle::query()->whereKey($vehicleId)->where('customer_id', $customerId)->where('status', 'active')->exists()) {
+            throw ValidationException::withMessages([
+                'customer_vehicle_id' => 'El vehículo seleccionado no pertenece al cliente o está inactivo.',
+            ]);
+        }
     }
 }

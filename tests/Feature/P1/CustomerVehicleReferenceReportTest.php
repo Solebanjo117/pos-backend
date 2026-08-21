@@ -175,7 +175,7 @@ it('stores customer vehicles without vin and does not sync a catalog vin', funct
     ]);
 });
 
-it('allows clearing a customer vehicle vin and removes the linked catalog vin', function (): void {
+it('allows clearing a customer vehicle vin without deleting the master catalog vin', function (): void {
     $customer = Customer::create([
         'code' => 'CV-'.fake()->unique()->randomNumber(5),
         'name' => 'Cliente que borra VIN',
@@ -203,14 +203,14 @@ it('allows clearing a customer vehicle vin and removes the linked catalog vin', 
         'customer_id' => $customer->id,
         'vin' => null,
     ]);
-    $this->assertDatabaseMissing('vehicle_vins', [
+    $this->assertDatabaseHas('vehicle_vins', [
         'model_id' => $model->id,
         'engine_id' => $engine->id,
         'vin' => 'CLEARVIN001',
     ]);
 });
 
-it('moves the linked catalog vin when a customer vehicle changes vin or engine', function (): void {
+it('links the new catalog vin without deleting the previous master vin', function (): void {
     $customer = Customer::create([
         'code' => 'CV-'.fake()->unique()->randomNumber(5),
         'name' => 'Cliente sincronizado',
@@ -242,7 +242,7 @@ it('moves the linked catalog vin when a customer vehicle changes vin or engine',
         'status' => 'active',
     ])->assertOk();
 
-    $this->assertDatabaseMissing('vehicle_vins', [
+    $this->assertDatabaseHas('vehicle_vins', [
         'model_id' => $model->id,
         'engine_id' => $firstEngine->id,
         'vin' => 'OLDVIN001',
@@ -256,7 +256,7 @@ it('moves the linked catalog vin when a customer vehicle changes vin or engine',
     ]);
 });
 
-it('removes the linked catalog vin when the last active customer vehicle is deactivated', function (): void {
+it('keeps the master catalog vin when a customer vehicle is deactivated', function (): void {
     $customer = Customer::create([
         'code' => 'CV-'.fake()->unique()->randomNumber(5),
         'name' => 'Cliente a desactivar',
@@ -275,14 +275,14 @@ it('removes the linked catalog vin when the last active customer vehicle is deac
     $this->deleteJson("/api/v1/customers/{$customer->id}/vehicles/{$vehicleId}")
         ->assertOk();
 
-    $this->assertDatabaseMissing('vehicle_vins', [
+    $this->assertDatabaseHas('vehicle_vins', [
         'model_id' => $model->id,
         'engine_id' => $engine->id,
         'vin' => 'REMOVEVIN',
     ]);
 });
 
-it('keeps a shared linked catalog vin while another active customer vehicle uses it', function (): void {
+it('rejects assigning an active customer vin to a second customer', function (): void {
     $firstCustomer = Customer::create([
         'code' => 'CV-'.fake()->unique()->randomNumber(5),
         'name' => 'Primer cliente',
@@ -293,7 +293,7 @@ it('keeps a shared linked catalog vin while another active customer vehicle uses
     ]);
     [$model, $chassis, $engine] = customerVehicleCatalogScope();
 
-    $firstResponse = $this->postJson("/api/v1/customers/{$firstCustomer->id}/vehicles", [
+    $this->postJson("/api/v1/customers/{$firstCustomer->id}/vehicles", [
         'vehicle_model_id' => $model->id,
         'vehicle_chassis_id' => $chassis->id,
         'vehicle_engine_id' => $engine->id,
@@ -304,16 +304,13 @@ it('keeps a shared linked catalog vin while another active customer vehicle uses
         'vehicle_chassis_id' => $chassis->id,
         'vehicle_engine_id' => $engine->id,
         'vin' => 'SHAREDVIN',
-    ])->assertCreated();
-
-    $this->deleteJson("/api/v1/customers/{$firstCustomer->id}/vehicles/{$firstResponse->json('data.id')}")
-        ->assertOk();
+    ])->assertUnprocessable()->assertJsonValidationErrors(['vin']);
 
     $this->assertDatabaseHas('vehicle_vins', [
         'model_id' => $model->id,
         'engine_id' => $engine->id,
         'vin' => 'SHAREDVIN',
-        'notes' => 'Segundo cliente',
+        'notes' => 'Primer cliente',
     ]);
 });
 

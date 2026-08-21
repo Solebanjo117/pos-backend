@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Str;
 
 class Supplier extends Model
 {
@@ -14,6 +15,7 @@ class Supplier extends Model
 
     protected $fillable = [
         'name',
+        'normalized_name',
         'vendor_external_id',
         'contact_name',
         'email',
@@ -37,6 +39,13 @@ class Supplier extends Model
         'country' => 'Panamá',
     ];
 
+    protected static function booted(): void
+    {
+        static::saving(function (Supplier $supplier): void {
+            $supplier->normalized_name = self::normalizeName($supplier->name);
+        });
+    }
+
     // ==================== RELATIONSHIPS ====================
 
     /**
@@ -53,6 +62,11 @@ class Supplier extends Model
     public function purchaseOrders(): HasMany
     {
         return $this->hasMany(PurchaseOrder::class);
+    }
+
+    public function purchaseOrderItems(): HasMany
+    {
+        return $this->hasMany(PurchaseOrderItem::class);
     }
 
     public function operationalExpenses(): HasMany
@@ -99,5 +113,10 @@ class Supplier extends Model
     public function getProductCountAttribute(): int
     {
         return $this->productSuppliers()->count();
+    }
+
+    public static function normalizeName(string $name): string
+    {
+        return Str::lower((string) preg_replace('/\s+/u', ' ', trim($name)));
     }
 }

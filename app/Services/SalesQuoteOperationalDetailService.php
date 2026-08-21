@@ -16,6 +16,9 @@ class SalesQuoteOperationalDetailService
     {
         $quote->loadMissing([
             'customer:id,code,name,phone,email',
+            'customerVehicle.model.make',
+            'customerVehicle.engine',
+            'customerVehicle.chassis',
             'user:id,name',
             'warehouse:id,name',
             'posSession:id,opened_at,closed_at,status',
@@ -79,6 +82,17 @@ class SalesQuoteOperationalDetailService
                 'name' => $quote->customer->name,
                 'phone' => $quote->customer->phone,
                 'email' => $quote->customer->email,
+            ] : null,
+            'customer_vehicle_id' => $quote->customer_vehicle_id,
+            'customer_vehicle' => $quote->customerVehicle ? [
+                'id' => $quote->customerVehicle->id,
+                'display_name' => $quote->customerVehicle->display_name,
+                'year' => $quote->customerVehicle->year,
+                'vin' => $quote->customerVehicle->vin,
+                'plate_number' => $quote->customerVehicle->plate_number,
+                'model' => $quote->customerVehicle->model,
+                'engine' => $quote->customerVehicle->engine,
+                'chassis' => $quote->customerVehicle->chassis,
             ] : null,
             'user' => $quote->user ? [
                 'id' => $quote->user->id,

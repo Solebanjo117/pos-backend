@@ -106,7 +106,7 @@ class DemoDataSeeder extends Seeder
                     $variant->id,
                     $warehouse->id,
                     (int) $inventory->quantity_available,
-                    (float) ($variant->pricing->first()?->cost ?? $variant->pricing->first()?->cost_base ?? 0)
+                    (float) ($variant->pricing?->cost ?? $variant->pricing?->cost_base ?? 0)
                 );
             }
         }

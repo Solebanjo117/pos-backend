@@ -1,12 +1,17 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\Customer;
+use App\Models\CustomerVehicle;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\ProductVariant;
 use App\Models\SalesOrder;
 use App\Models\SalesQuote;
 use App\Models\User;
+use App\Models\VehicleEngine;
+use App\Models\VehicleMake;
+use App\Models\VehicleModel;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -120,4 +125,57 @@ it('rejects quotes that are already in the warehouse queue', function () {
         ->assertUnprocessable();
 
     expect(SalesOrder::count())->toBe(0);
+});
+
+it('validates the quote customer vehicle and copies it to the resulting sale', function () {
+    $customer = Customer::query()->create(['code' => 'C-Q-1', 'name' => 'Cliente Cotización']);
+    $otherCustomer = Customer::query()->create(['code' => 'C-Q-2', 'name' => 'Otro Cliente']);
+    $make = VehicleMake::query()->create(['name' => 'Honda']);
+    $model = VehicleModel::query()->create([
+        'make_id' => $make->id,
+        'name' => 'Civic',
+        'year_from' => 2012,
+        'year_to' => 2026,
+    ]);
+    $engine = VehicleEngine::query()->create([
+        'make_id' => $make->id,
+        'model_id' => $model->id,
+        'engine_code' => 'R18',
+    ]);
+    $engine->models()->syncWithoutDetaching([$model->id]);
+    $vehicle = CustomerVehicle::query()->create([
+        'customer_id' => $customer->id,
+        'vehicle_model_id' => $model->id,
+        'vehicle_engine_id' => $engine->id,
+        'status' => 'active',
+    ]);
+
+    $payload = [
+        'customer_id' => $otherCustomer->id,
+        'customer_vehicle_id' => $vehicle->id,
+        'warehouse_id' => $this->warehouse->id,
+        'items' => [[
+            'product_id' => $this->product->id,
+            'variant_id' => $this->variant->id,
+            'warehouse_id' => $this->warehouse->id,
+            'quantity' => 1,
+            'unit_price' => 100,
+        ]],
+    ];
+
+    $this->postJson('/api/v1/sales-quotes', $payload)
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['customer_vehicle_id']);
+
+    $payload['customer_id'] = $customer->id;
+    $quoteId = $this->postJson('/api/v1/sales-quotes', $payload)
+        ->assertCreated()
+        ->assertJsonPath('data.customer_vehicle_id', $vehicle->id)
+        ->json('data.id');
+
+    $this->putJson("/api/v1/sales-quotes/{$quoteId}", ['status' => 'sent'])->assertOk();
+    $this->postJson("/api/v1/sales-quotes/{$quoteId}/send-to-deposit")->assertCreated();
+
+    expect(SalesQuote::query()->findOrFail($quoteId)->convertedOrder?->customer_vehicle_id)
+        ->toBe($vehicle->id);
 });

@@ -19,7 +19,7 @@ class CustomerVehicleController extends Controller
     public function index(Customer $customer): JsonResponse
     {
         $vehicles = $customer->vehicles()
-            ->with(['model.make', 'chassis', 'engine'])
+            ->with(['model.make', 'chassis', 'engine', 'catalogVin'])
             ->orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
             ->latest()
             ->get();
@@ -33,10 +33,19 @@ class CustomerVehicleController extends Controller
             $data = $request->validated();
             $data['status'] = $data['status'] ?? 'active';
 
-            $duplicateExists = filled($data['vin'] ?? null)
-                && $customer->vehicles()
-                    ->where('vin', $data['vin'])
-                    ->exists();
+            $hasVinIdentity = filled($data['vin'] ?? null) || ! empty($data['vehicle_vin_id']);
+            $duplicateExists = $hasVinIdentity && CustomerVehicle::query()
+                ->where('status', 'active')
+                ->where(function ($query) use ($data): void {
+                    if (filled($data['vin'] ?? null)) {
+                        $query->whereRaw('UPPER(vin) = ?', [strtoupper((string) $data['vin'])]);
+                    }
+                    if (! empty($data['vehicle_vin_id'])) {
+                        $method = filled($data['vin'] ?? null) ? 'orWhere' : 'where';
+                        $query->{$method}('vehicle_vin_id', $data['vehicle_vin_id']);
+                    }
+                })
+                ->exists();
 
             if ($duplicateExists) {
                 throw ValidationException::withMessages([
@@ -51,7 +60,7 @@ class CustomerVehicleController extends Controller
         });
 
         return response()->json([
-            'data' => $vehicle->load(['model.make', 'chassis', 'engine']),
+            'data' => $vehicle->load(['model.make', 'chassis', 'engine', 'catalogVin']),
         ], 201);
     }
 
@@ -59,18 +68,32 @@ class CustomerVehicleController extends Controller
     {
         $this->ensureVehicleBelongsToCustomer($customer, $vehicle);
 
-        $vehicle = DB::transaction(function () use ($request, $customer, $vehicle): CustomerVehicle {
+        $vehicle = DB::transaction(function () use ($request, $vehicle): CustomerVehicle {
             $data = $request->validated();
 
             if (filled($data['vin'] ?? null)) {
-                $duplicateExists = $customer->vehicles()
-                    ->where('vin', $data['vin'])
-                    ->whereKeyNot($vehicle->id)
+                $duplicateExists = CustomerVehicle::query()
+                    ->where('status', 'active')
+                    ->whereRaw('UPPER(vin) = ?', [strtoupper((string) $data['vin'])])
+                    ->where('id', '!=', $vehicle->id)
                     ->exists();
 
                 if ($duplicateExists) {
                     throw ValidationException::withMessages([
                         'vin' => 'Este cliente ya tiene un carro con ese VIN.',
+                    ]);
+                }
+            }
+
+            if (! empty($data['vehicle_vin_id'])) {
+                $catalogDuplicate = CustomerVehicle::query()
+                    ->where('status', 'active')
+                    ->where('vehicle_vin_id', $data['vehicle_vin_id'])
+                    ->where('id', '!=', $vehicle->id)
+                    ->exists();
+                if ($catalogDuplicate) {
+                    throw ValidationException::withMessages([
+                        'vehicle_vin_id' => 'Este VIN ya está asociado a otro cliente.',
                     ]);
                 }
             }
@@ -89,7 +112,7 @@ class CustomerVehicleController extends Controller
         });
 
         return response()->json([
-            'data' => $vehicle->load(['model.make', 'chassis', 'engine']),
+            'data' => $vehicle->load(['model.make', 'chassis', 'engine', 'catalogVin']),
         ]);
     }
 
@@ -98,16 +121,14 @@ class CustomerVehicleController extends Controller
         $this->ensureVehicleBelongsToCustomer($customer, $vehicle);
 
         $vehicle = DB::transaction(function () use ($vehicle): CustomerVehicle {
-            $previousScope = $this->vinSyncService->scopeFromVehicle($vehicle);
             $vehicle->update(['status' => 'inactive']);
-            $this->vinSyncService->cleanupScope($previousScope);
 
             return $vehicle->fresh();
         });
 
         return response()->json([
             'message' => 'Carro del cliente desactivado',
-            'data' => $vehicle->load(['model.make', 'chassis', 'engine']),
+            'data' => $vehicle->load(['model.make', 'chassis', 'engine', 'catalogVin']),
         ]);
     }
 

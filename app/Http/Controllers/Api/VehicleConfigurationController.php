@@ -38,8 +38,11 @@ class VehicleConfigurationController extends Controller
             ]);
 
         $search = mb_strtolower(trim((string) $request->input('search', '')));
-        if ($search !== '') {
-            $like = "%{$search}%";
+        foreach (preg_split('/\s+/u', $search) ?: [] as $token) {
+            if ($token === '') {
+                continue;
+            }
+            $like = "%{$token}%";
             $query->where(function ($scope) use ($like): void {
                 $scope->whereRaw('LOWER(vehicle_makes.name) LIKE ?', [$like])
                     ->orWhereRaw('LOWER(vehicle_models.name) LIKE ?', [$like])

@@ -16,6 +16,10 @@ class StoreCustomerVehicleRequest extends FormRequest
 
             $this->merge(['vin' => $vin === '' ? null : strtoupper($vin)]);
         }
+        if ($this->has('plate_number')) {
+            $plate = trim((string) $this->input('plate_number'));
+            $this->merge(['plate_number' => $plate === '' ? null : strtoupper($plate)]);
+        }
     }
 
     public function authorize(): bool
@@ -29,7 +33,10 @@ class StoreCustomerVehicleRequest extends FormRequest
             'vehicle_model_id' => 'required|integer|exists:vehicle_models,id',
             'vehicle_chassis_id' => 'nullable|integer|exists:vehicle_chassis,id',
             'vehicle_engine_id' => 'required|integer|exists:vehicle_engines,id',
+            'vehicle_vin_id' => 'nullable|integer|exists:vehicle_vins,id',
             'vin' => 'nullable|string|max:40',
+            'year' => 'nullable|integer|min:1886|max:'.(now()->year + 1),
+            'plate_number' => 'nullable|string|max:30',
             'label' => 'nullable|string|max:255',
             'notes' => 'nullable|string|max:5000',
             'status' => 'nullable|in:active,inactive',

@@ -86,6 +86,18 @@ class SupplierImport extends BaseImport
             $errors[] = 'El estado debe ser "active/activo" o "inactive/inactivo".';
         }
 
+        $brandsRaw = $this->nullIfEmpty($row['marcas'] ?? null);
+        if ($brandsRaw) {
+            foreach ($this->splitDelimitedValues($brandsRaw) as $brandName) {
+                $count = Brand::query()->where('normalized_name', Brand::normalizeName($brandName))->count();
+                if ($count !== 1) {
+                    $errors[] = $count === 0
+                        ? "La marca '{$brandName}' no existe; créala antes de importar."
+                        : "La marca '{$brandName}' es ambigua.";
+                }
+            }
+        }
+
         return $errors;
     }
 
@@ -95,7 +107,7 @@ class SupplierImport extends BaseImport
         $status = $this->normalizeStatus($row['estado'] ?? null);
 
         $existing = Supplier::query()
-            ->whereRaw('LOWER(name) = ?', [mb_strtolower($name)])
+            ->where('normalized_name', Supplier::normalizeName($name))
             ->first();
 
         $data = [
@@ -122,7 +134,7 @@ class SupplierImport extends BaseImport
         $brandsRaw = $this->nullIfEmpty($row['marcas'] ?? null);
         if ($brandsRaw) {
             foreach ($this->splitDelimitedValues($brandsRaw) as $brandName) {
-                $brandId = $this->resolveIdOrCreateByName(Brand::class, 'name', $brandName, ['status' => 'active']);
+                $brandId = Brand::query()->where('normalized_name', Brand::normalizeName($brandName))->sole()->id;
                 $supplier->brands()->syncWithoutDetaching([$brandId]);
             }
         }
