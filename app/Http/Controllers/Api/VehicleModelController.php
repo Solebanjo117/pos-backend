@@ -5,19 +5,21 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\VehicleChassis;
 use App\Models\VehicleModel;
+use App\Services\VehicleCatalogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class VehicleModelController extends Controller
 {
+    public function __construct(private VehicleCatalogService $catalogService) {}
+
     /**
      * Display a listing of vehicle models.
      */
     public function index(Request $request): JsonResponse
     {
         $query = VehicleModel::query()
-            ->with(['make', 'engines', 'chassis'])
-            ->withCount('engines');
+            ->with(['make', 'engines', 'enginesMany', 'chassis']);
 
         // Filter by make
         if ($request->has('make_id')) {
@@ -28,9 +30,11 @@ class VehicleModelController extends Controller
         if ($request->has('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('name', 'ilike', "%{$search}%")
+                $like = '%'.mb_strtolower($search).'%';
+                $q->whereRaw('LOWER(name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(COALESCE(generation, ?)) LIKE ?', ['', $like])
                     ->orWhereHas('make', function ($makeQuery) use ($search) {
-                        $makeQuery->where('name', 'ilike', "%{$search}%");
+                        $makeQuery->whereRaw('LOWER(name) LIKE ?', ['%'.mb_strtolower($search).'%']);
                     });
             });
         }
@@ -42,12 +46,34 @@ class VehicleModelController extends Controller
                 ->where('year_to', '>=', $year);
         }
 
-        // Pagination
-        $perPage = $request->input('per_page', 20);
-        $models = $query->orderBy('name')->paginate($perPage);
+        $sorts = [
+            'make' => 'make_id',
+            'name' => 'name',
+            'years' => 'year_from',
+            'generation' => 'generation',
+        ];
+        $sort = $sorts[(string) $request->input('sort')] ?? 'name';
+        $direction = $request->input('direction') === 'desc' ? 'desc' : 'asc';
+        $perPage = min(max((int) $request->input('per_page', 20), 1), 500);
+        $models = $query->orderBy($sort, $direction)->orderBy('name')->paginate($perPage);
+        $items = collect($models->items());
+        $counts = $this->catalogService->configurationCountsByModel(
+            $items->pluck('id')->map(fn ($id): int => (int) $id)->all(),
+        );
+        $canManage = in_array($request->user()?->role, ['admin', 'manager'], true);
+        $data = $items->map(function (VehicleModel $model) use ($counts, $canManage): VehicleModel {
+            $blockReason = $this->catalogService->modelDeleteBlockReason($model);
+            $model->setAttribute('engines_count', $counts[$model->id] ?? 0);
+            $model->setAttribute('vehicles_count', $counts[$model->id] ?? 0);
+            $model->setAttribute('can_edit', $canManage);
+            $model->setAttribute('can_delete', $canManage && $blockReason === null);
+            $model->setAttribute('delete_block_reason', $blockReason);
+
+            return $model;
+        })->values();
 
         return response()->json([
-            'data' => $models->items(),
+            'data' => $data,
             'meta' => [
                 'current_page' => $models->currentPage(),
                 'last_page' => $models->lastPage(),
@@ -146,14 +172,7 @@ class VehicleModelController extends Controller
     {
         $model = VehicleModel::findOrFail($id);
 
-        // Check if model has engines
-        if ($model->engines()->count() > 0) {
-            return response()->json([
-                'message' => 'No se puede eliminar el modelo porque tiene motores asociados',
-            ], 422);
-        }
-
-        $model->delete();
+        $this->catalogService->deleteModel($model);
 
         return response()->json([
             'message' => 'Modelo eliminado exitosamente',
