@@ -4,10 +4,12 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\VehicleEngine;
+use App\Models\VehicleMake;
 use App\Models\VehicleModel;
 use App\Services\VehicleCatalogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class VehicleEngineController extends Controller
@@ -55,28 +57,38 @@ class VehicleEngineController extends Controller
         }
 
         // Search
-        if ($request->has('search')) {
-            $search = $request->input('search');
-            $query->where(function ($q) use ($search) {
-                $like = '%'.mb_strtolower($search).'%';
-                $q->whereRaw('LOWER(engine_code) LIKE ?', [$like])
-                    ->orWhereRaw('LOWER(COALESCE(displacement, ?)) LIKE ?', ['', $like])
-                    ->orWhereRaw('LOWER(COALESCE(fuel_type, ?)) LIKE ?', ['', $like])
-                    ->orWhereRaw('LOWER(COALESCE(aspiration, ?)) LIKE ?', ['', $like])
-                    ->orWhereHas('make', fn ($makeQuery) => $makeQuery->whereRaw('LOWER(name) LIKE ?', [$like]));
-            });
+        if ($request->filled('search')) {
+            $tokens = preg_split('/\s+/u', mb_strtolower(trim((string) $request->input('search')))) ?: [];
+            foreach ($tokens as $token) {
+                $like = "%{$token}%";
+                $query->where(function ($scope) use ($like): void {
+                    $scope->whereRaw('LOWER(engine_code) LIKE ?', [$like])
+                        ->orWhereRaw('LOWER(COALESCE(displacement, ?)) LIKE ?', ['', $like])
+                        ->orWhereRaw('LOWER(COALESCE(fuel_type, ?)) LIKE ?', ['', $like])
+                        ->orWhereRaw('LOWER(COALESCE(aspiration, ?)) LIKE ?', ['', $like])
+                        ->orWhereHas('make', fn ($makeQuery) => $makeQuery->whereRaw('LOWER(name) LIKE ?', [$like]));
+                });
+            }
         }
 
         $sorts = [
-            'make' => 'make_id',
             'code' => 'engine_code',
             'displacement' => 'displacement',
             'fuel_type' => 'fuel_type',
         ];
-        $sort = $sorts[(string) $request->input('sort')] ?? 'engine_code';
+        $requestedSort = (string) $request->input('sort');
+        $sort = $sorts[$requestedSort] ?? 'engine_code';
         $direction = $request->input('direction') === 'desc' ? 'desc' : 'asc';
         $perPage = min(max((int) $request->input('per_page', 20), 1), 500);
-        $engines = $query->orderBy($sort, $direction)->orderBy('engine_code')->paginate($perPage);
+        if ($requestedSort === 'make') {
+            $query->orderBy(
+                VehicleMake::query()->select('name')->whereColumn('vehicle_makes.id', 'vehicle_engines.make_id'),
+                $direction,
+            );
+        } else {
+            $query->orderBy($sort, $direction);
+        }
+        $engines = $query->orderBy('engine_code')->paginate($perPage);
         $counts = $this->catalogService->configurationCountsByEngine(
             collect($engines->items())->pluck('id')->map(fn ($id): int => (int) $id)->all(),
         );
@@ -213,11 +225,20 @@ class VehicleEngineController extends Controller
         }
         unset($validated['model_ids']);
 
-        $engine->update($validated);
+        DB::transaction(function () use ($engine, $validated, $modelIds): void {
+            $lockedEngine = VehicleEngine::query()->lockForUpdate()->findOrFail($engine->id);
+            if ($modelIds !== null) {
+                $this->catalogService->assertEngineModelChangesAreSafe($lockedEngine, $modelIds);
+            }
 
-        if ($modelIds !== null) {
-            $engine->models()->sync($modelIds);
-        }
+            $lockedEngine->update($validated);
+
+            if ($modelIds !== null) {
+                $lockedEngine->models()->sync($modelIds);
+            }
+        });
+
+        $engine->refresh();
 
         return response()->json([
             'message' => 'Motor actualizado exitosamente',

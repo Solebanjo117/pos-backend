@@ -26,6 +26,8 @@ class CategoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        $canManage = in_array($request->user()?->role, ['admin', 'manager'], true);
+
         if ($request->boolean('tree')) {
             $categories = Category::with('parents')
                 ->orderBy('priority')
@@ -43,7 +45,30 @@ class CategoryController extends Controller
             return response()->json($categories);
         }
 
-        $categories = Category::with('parents')->orderBy('priority')->get();
+        $query = Category::with('parents')->withCount(['products', 'childrenThroughParents'])->orderBy('priority');
+
+        if ($request->filled('search')) {
+            $operator = DB::connection()->getDriverName() === 'sqlite' ? 'like' : 'ilike';
+            $query->where('name', $operator, '%'.trim((string) $request->input('search')).'%');
+        }
+
+        $enrichCapabilities = function (Category $category) use ($canManage): Category {
+            $reason = $category->products_count > 0 || $category->children_through_parents_count > 0 ? 'Tiene productos o categorías dependientes.' : null;
+            $category->setAttribute('can_edit', $canManage);
+            $category->setAttribute('can_delete', $canManage && $reason === null);
+            $category->setAttribute('delete_block_reason', $canManage ? $reason : 'No tienes permiso para eliminar categorías.');
+
+            return $category;
+        };
+
+        if ($request->filled('per_page')) {
+            $categories = $query->paginate(min(100, max(5, $request->integer('per_page'))));
+            $categories->getCollection()->transform($enrichCapabilities);
+
+            return response()->json($categories);
+        }
+
+        $categories = $query->get()->map($enrichCapabilities);
 
         return response()->json($categories);
     }
@@ -288,6 +313,12 @@ class CategoryController extends Controller
         if ($hasProducts) {
             return response()->json([
                 'message' => 'Cannot delete category with associated products',
+            ], 422);
+        }
+
+        if ($category->children()->exists() || $category->childrenThroughParents()->exists()) {
+            return response()->json([
+                'message' => 'No se puede eliminar: existen categorías dependientes.',
             ], 422);
         }
 

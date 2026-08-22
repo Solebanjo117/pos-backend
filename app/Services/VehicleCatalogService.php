@@ -24,8 +24,7 @@ class VehicleCatalogService
             ->selectRaw('model_id, id as engine_id');
 
         return DB::query()
-            ->fromSub($pivotPairs->union($legacyPairs), 'vehicle_pairs')
-            ->select(['vehicle_pairs.model_id', 'vehicle_pairs.engine_id']);
+            ->fromSub($pivotPairs->union($legacyPairs), 'vehicle_pairs');
     }
 
     /**
@@ -96,9 +95,20 @@ class VehicleCatalogService
             return [];
         }
 
-        return VehicleEngine::query()
+        $directMakes = DB::table('vehicle_engines')
+            ->whereNotNull('make_id')
+            ->selectRaw('id as engine_id, make_id');
+        $legacyModelMakes = DB::table('vehicle_engines')
+            ->join('vehicle_models', 'vehicle_models.id', '=', 'vehicle_engines.model_id')
+            ->selectRaw('vehicle_engines.id as engine_id, vehicle_models.make_id as make_id');
+        $pivotModelMakes = DB::table('vehicle_engine_model')
+            ->join('vehicle_models', 'vehicle_models.id', '=', 'vehicle_engine_model.model_id')
+            ->selectRaw('vehicle_engine_model.engine_id as engine_id, vehicle_models.make_id as make_id');
+
+        return DB::query()
+            ->fromSub($directMakes->union($legacyModelMakes)->union($pivotModelMakes), 'engine_makes')
             ->whereIn('make_id', $makeIds)
-            ->selectRaw('make_id, COUNT(*) as aggregate')
+            ->selectRaw('make_id, COUNT(DISTINCT engine_id) as aggregate')
             ->groupBy('make_id')
             ->pluck('aggregate', 'make_id')
             ->map(fn ($count): int => (int) $count)
@@ -177,6 +187,33 @@ class VehicleCatalogService
         }
 
         return null;
+    }
+
+    /**
+     * @param  array<int>  $targetModelIds
+     */
+    public function assertEngineModelChangesAreSafe(VehicleEngine $engine, array $targetModelIds): void
+    {
+        $currentModelIds = $this->configurationPairsQuery()
+            ->where('engine_id', $engine->id)
+            ->pluck('model_id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+
+        foreach (array_diff($currentModelIds, $targetModelIds) as $modelId) {
+            if (VehicleVin::query()->where('model_id', $modelId)->where('engine_id', $engine->id)->exists()) {
+                throw ValidationException::withMessages([
+                    'model_ids' => ['Elimina primero los VIN de la configuración desde el tab Vehículos.'],
+                ]);
+            }
+
+            $reason = $this->configurationDeleteBlockReason($modelId, (int) $engine->id);
+            if ($reason !== null) {
+                throw ValidationException::withMessages([
+                    'model_ids' => ["No se puede desvincular el modelo: {$reason}"],
+                ]);
+            }
+        }
     }
 
     /**

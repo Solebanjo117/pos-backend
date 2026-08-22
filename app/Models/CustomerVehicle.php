@@ -15,7 +15,10 @@ class CustomerVehicle extends Model
         'vehicle_model_id',
         'vehicle_chassis_id',
         'vehicle_engine_id',
+        'vehicle_vin_id',
         'vin',
+        'year',
+        'plate_number',
         'label',
         'notes',
         'status',
@@ -26,6 +29,8 @@ class CustomerVehicle extends Model
         'vehicle_model_id' => 'integer',
         'vehicle_chassis_id' => 'integer',
         'vehicle_engine_id' => 'integer',
+        'vehicle_vin_id' => 'integer',
+        'year' => 'integer',
     ];
 
     protected $appends = ['display_name', 'make'];
@@ -48,6 +53,11 @@ class CustomerVehicle extends Model
     public function engine(): BelongsTo
     {
         return $this->belongsTo(VehicleEngine::class, 'vehicle_engine_id');
+    }
+
+    public function catalogVin(): BelongsTo
+    {
+        return $this->belongsTo(VehicleVin::class, 'vehicle_vin_id');
     }
 
     public function getDisplayNameAttribute(): string

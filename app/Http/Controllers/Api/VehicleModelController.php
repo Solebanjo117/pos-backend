@@ -4,10 +4,12 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\VehicleChassis;
+use App\Models\VehicleMake;
 use App\Models\VehicleModel;
 use App\Services\VehicleCatalogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class VehicleModelController extends Controller
 {
@@ -27,16 +29,16 @@ class VehicleModelController extends Controller
         }
 
         // Search
-        if ($request->has('search')) {
-            $search = $request->input('search');
-            $query->where(function ($q) use ($search) {
-                $like = '%'.mb_strtolower($search).'%';
-                $q->whereRaw('LOWER(name) LIKE ?', [$like])
-                    ->orWhereRaw('LOWER(COALESCE(generation, ?)) LIKE ?', ['', $like])
-                    ->orWhereHas('make', function ($makeQuery) use ($search) {
-                        $makeQuery->whereRaw('LOWER(name) LIKE ?', ['%'.mb_strtolower($search).'%']);
-                    });
-            });
+        if ($request->filled('search')) {
+            $tokens = preg_split('/\s+/u', mb_strtolower(trim((string) $request->input('search')))) ?: [];
+            foreach ($tokens as $token) {
+                $like = "%{$token}%";
+                $query->where(function ($scope) use ($like): void {
+                    $scope->whereRaw('LOWER(name) LIKE ?', [$like])
+                        ->orWhereRaw('LOWER(COALESCE(generation, ?)) LIKE ?', ['', $like])
+                        ->orWhereHas('make', fn ($makeQuery) => $makeQuery->whereRaw('LOWER(name) LIKE ?', [$like]));
+                });
+            }
         }
 
         // Filter by year
@@ -47,15 +49,23 @@ class VehicleModelController extends Controller
         }
 
         $sorts = [
-            'make' => 'make_id',
             'name' => 'name',
             'years' => 'year_from',
             'generation' => 'generation',
         ];
-        $sort = $sorts[(string) $request->input('sort')] ?? 'name';
+        $requestedSort = (string) $request->input('sort');
+        $sort = $sorts[$requestedSort] ?? 'name';
         $direction = $request->input('direction') === 'desc' ? 'desc' : 'asc';
         $perPage = min(max((int) $request->input('per_page', 20), 1), 500);
-        $models = $query->orderBy($sort, $direction)->orderBy('name')->paginate($perPage);
+        if ($requestedSort === 'make') {
+            $query->orderBy(
+                VehicleMake::query()->select('name')->whereColumn('vehicle_makes.id', 'vehicle_models.make_id'),
+                $direction,
+            );
+        } else {
+            $query->orderBy($sort, $direction);
+        }
+        $models = $query->orderBy('name')->paginate($perPage);
         $items = collect($models->items());
         $counts = $this->catalogService->configurationCountsByModel(
             $items->pluck('id')->map(fn ($id): int => (int) $id)->all(),
@@ -149,6 +159,16 @@ class VehicleModelController extends Controller
         $generation = $validated['generation'] ?? $model->generation;
         $mergedForValidation = array_merge($model->toArray(), $validated);
         $this->validateChassisConsistency($generation, $chassisId, $mergedForValidation);
+
+        $targetMakeId = (int) ($validated['make_id'] ?? $model->make_id);
+        if ($targetMakeId !== (int) $model->make_id) {
+            $reason = $this->catalogService->modelDeleteBlockReason($model);
+            if ($reason !== null) {
+                throw ValidationException::withMessages([
+                    'make_id' => ["No se puede cambiar la marca: {$reason}"],
+                ]);
+            }
+        }
 
         $model->update($validated);
 

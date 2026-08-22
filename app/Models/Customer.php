@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
@@ -14,6 +15,7 @@ class Customer extends Model
     protected $fillable = [
         'code',
         'type',
+        'customer_type_id',
         'name',
         'email',
         'phone',
@@ -37,6 +39,7 @@ class Customer extends Model
         'credit_limit' => 'decimal:2',
         'current_balance' => 'decimal:2',
         'credit_days' => 'integer',
+        'customer_type_id' => 'integer',
     ];
 
     protected $attributes = [
@@ -74,6 +77,21 @@ class Customer extends Model
     public function vehicles(): HasMany
     {
         return $this->hasMany(CustomerVehicle::class);
+    }
+
+    public function customerType(): BelongsTo
+    {
+        return $this->belongsTo(CustomerType::class);
+    }
+
+    public function salesQuotes(): HasMany
+    {
+        return $this->hasMany(SalesQuote::class);
+    }
+
+    public function workOrders(): HasMany
+    {
+        return $this->hasMany(WorkOrder::class);
     }
 
     /**

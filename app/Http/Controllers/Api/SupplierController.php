@@ -6,12 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSupplierRequest;
 use App\Http\Requests\SupplierCommercialDashboardRequest;
 use App\Http\Requests\SupplierPurchaseHistoryRequest;
+use App\Http\Requests\UpdateSupplierRequest;
 use App\Http\Requests\UpsertSupplierVariantRequest;
 use App\Models\Product;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\Supplier;
 use App\Services\SupplierProfileService;
+use App\Services\SupplierService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Http\JsonResponse;
@@ -20,7 +22,8 @@ use Illuminate\Http\Request;
 class SupplierController extends Controller
 {
     public function __construct(
-        private SupplierProfileService $supplierProfileService
+        private SupplierProfileService $supplierProfileService,
+        private SupplierService $supplierService
     ) {}
 
     /**
@@ -42,16 +45,35 @@ class SupplierController extends Controller
         }
 
         // Sorting
-        $sortBy = $request->get('sort_by', 'name');
+        $sortBy = in_array($request->get('sort_by'), ['name', 'created_at', 'status'], true)
+            ? $request->get('sort_by')
+            : 'name';
         $sortDirection = $request->get('sort_direction', 'asc');
+        $sortDirection = $sortDirection === 'desc' ? 'desc' : 'asc';
         $query->orderBy($sortBy, $sortDirection);
 
         // Include counts
-        $query->withCount('productSuppliers as products_count');
+        $query->with('brands:id,name')
+            ->withCount('productSuppliers as products_count')
+            ->withExists([
+                'purchaseOrders as has_purchase_orders',
+                'purchaseOrderItems as has_purchase_order_items',
+                'productSuppliers as has_product_suppliers',
+                'brands as has_brands',
+                'operationalExpenses as has_operational_expenses',
+            ]);
 
         // Paginate
-        $perPage = $request->get('per_page', 15);
+        $perPage = min(100, max(5, (int) $request->get('per_page', 15)));
         $suppliers = $query->paginate($perPage);
+        $suppliers->getCollection()->transform(function (Supplier $supplier): Supplier {
+            $reason = $this->supplierService->deleteBlockReason($supplier);
+            $supplier->setAttribute('can_edit', true);
+            $supplier->setAttribute('can_delete', $reason === null);
+            $supplier->setAttribute('delete_block_reason', $reason);
+
+            return $supplier;
+        });
 
         return response()->json($suppliers);
     }
@@ -98,6 +120,7 @@ class SupplierController extends Controller
         return response()->json([
             'data' => $supplier,
             'products' => $products,
+            'relationships' => $this->supplierProfileService->relationshipSummary($supplier),
         ]);
     }
 
@@ -107,9 +130,7 @@ class SupplierController extends Controller
      */
     public function store(StoreSupplierRequest $request): JsonResponse
     {
-        $validated = $request->validated();
-
-        $supplier = Supplier::create($validated);
+        $supplier = $this->supplierService->create($request->validated());
 
         return response()->json([
             'message' => 'Proveedor creado exitosamente',
@@ -121,29 +142,15 @@ class SupplierController extends Controller
      * PUT /api/v1/suppliers/{id}
      * Update existing supplier
      */
-    public function update(Request $request, int $id): JsonResponse
+    public function update(UpdateSupplierRequest $request, int $id): JsonResponse
     {
         $supplier = Supplier::findOrFail($id);
 
-        $validated = $request->validate([
-            'name' => 'sometimes|required|string|max:255',
-            'contact_name' => 'nullable|string|max:255',
-            'email' => 'nullable|email|max:255',
-            'phone' => 'nullable|string|max:50',
-            'address' => 'nullable|string|max:500',
-            'city' => 'nullable|string|max:100',
-            'country' => 'nullable|string|max:100',
-            'payment_terms' => 'nullable|string|max:255',
-            'lead_time_days' => 'nullable|integer|min:0',
-            'notes' => 'nullable|string',
-            'status' => 'nullable|in:active,inactive',
-        ]);
-
-        $supplier->update($validated);
+        $supplier = $this->supplierService->update($supplier, $request->validated());
 
         return response()->json([
             'message' => 'Proveedor actualizado exitosamente',
-            'data' => $supplier->fresh(),
+            'data' => $supplier,
         ]);
     }
 
@@ -155,14 +162,7 @@ class SupplierController extends Controller
     {
         $supplier = Supplier::findOrFail($id);
 
-        // Check for active purchase orders
-        if ($supplier->purchaseOrders()->whereNotIn('status', ['received', 'cancelled'])->exists()) {
-            return response()->json([
-                'message' => 'No se puede eliminar: tiene órdenes de compra activas',
-            ], 422);
-        }
-
-        $supplier->delete();
+        $this->supplierService->delete($supplier);
 
         return response()->json([
             'message' => 'Proveedor eliminado exitosamente',

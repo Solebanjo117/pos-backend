@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\ProductSupplier;
@@ -9,6 +10,7 @@ use App\Models\PurchaseOrder;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -366,4 +368,40 @@ it('returns supplier commercial dashboard with uncovered low stock products', fu
         ->assertJsonPath('data.products_without_supplier.0.product_name', 'Articulo sin proveedor')
         ->assertJsonPath('data.products_without_supplier.0.variant_sku', 'SIN-PROV-VAR')
         ->assertJsonPath('data.products_without_supplier.0.needs_reorder', true);
+});
+
+it('includes primary and additional product categories in supplier relationships', function () {
+    ['buyer' => $buyer, 'supplier' => $supplier, 'product' => $product, 'variant' => $variant] = supplierProfileContext();
+    $primary = Category::create(['name' => 'Categoría principal proveedor']);
+    $additional = Category::create(['name' => 'Categoría adicional proveedor']);
+    $product->update(['category_id' => $primary->id]);
+    $product->extraCategories()->attach($additional->id);
+    ProductSupplier::create([
+        'product_id' => $product->id,
+        'variant_id' => $variant->id,
+        'supplier_id' => $supplier->id,
+    ]);
+
+    $response = $this->actingAs($buyer)->getJson("/api/v1/suppliers/{$supplier->id}");
+
+    $response->assertOk();
+    expect(collect($response->json('relationships.categories'))->pluck('name')->all())
+        ->toContain('Categoría principal proveedor', 'Categoría adicional proveedor');
+    expect(collect($response->json('relationships.categories'))->pluck('source')->unique()->all())
+        ->toBe(['configured']);
+});
+
+it('enforces one product-level supplier link when no variant is selected', function () {
+    ['supplier' => $supplier, 'product' => $product] = supplierProfileContext();
+    ProductSupplier::create([
+        'product_id' => $product->id,
+        'variant_id' => null,
+        'supplier_id' => $supplier->id,
+    ]);
+
+    expect(fn () => ProductSupplier::create([
+        'product_id' => $product->id,
+        'variant_id' => null,
+        'supplier_id' => $supplier->id,
+    ]))->toThrow(QueryException::class);
 });

@@ -280,6 +280,8 @@ it('imports brands without prefix and links suppliers from comma lists', functio
 });
 
 it('imports supplier brand links from comma lists', function () {
+    Brand::query()->create(['name' => 'Bosch', 'status' => 'active']);
+    Brand::query()->create(['name' => 'ACDelco', 'status' => 'active']);
     $import = new SupplierImport;
 
     $import->execute([
@@ -300,6 +302,15 @@ it('imports supplier brand links from comma lists', function () {
     expect($supplier->status)->toBe('inactive')
         ->and($supplier->brands()->where('name', 'Bosch')->exists())->toBeTrue()
         ->and($supplier->brands()->where('name', 'ACDelco')->exists())->toBeTrue();
+});
+
+it('does not silently create unknown brands while importing suppliers', function () {
+    $import = new SupplierImport;
+    $import->execute([['__row' => 2, 'nombre' => 'Proveedor ambiguo', 'marcas' => 'Marca inexistente']]);
+
+    expect($import->successCount)->toBe(0)->and($import->errorCount)->toBe(1);
+    $this->assertDatabaseMissing('brands', ['name' => 'Marca inexistente']);
+    $this->assertDatabaseMissing('suppliers', ['name' => 'Proveedor ambiguo']);
 });
 
 it('imports vehicle engine metadata with closed fuel catalog normalization', function () {
@@ -327,6 +338,7 @@ it('imports vehicle engine metadata with closed fuel catalog normalization', fun
     $engine = VehicleEngine::where('engine_code', '1NZFE')->firstOrFail();
 
     expect($model->generation)->toBe('P10')
+        ->and($engine->make_id)->toBe($model->make_id)
         ->and($engine->fuel_type)->toBe('Gasoline')
         ->and($engine->displacement)->toBe('1.5L')
         ->and($engine->aspiration)->toBe('Natural');
@@ -483,6 +495,7 @@ it('keeps same make and model separated by chassis code during vehicle import', 
 
     expect($import->successCount)->toBe(2)
         ->and(VehicleModel::where('name', 'YARIS')->count())->toBe(2)
+        ->and(VehicleEngine::where('engine_code', '1NZFE')->count())->toBe(1)
         ->and(VehicleModel::where('name', 'YARIS')->where('generation', 'P10')->exists())->toBeTrue()
         ->and(VehicleModel::where('name', 'YARIS')->where('generation', 'P90')->exists())->toBeTrue();
 });

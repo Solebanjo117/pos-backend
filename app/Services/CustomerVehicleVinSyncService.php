@@ -9,13 +9,32 @@ class CustomerVehicleVinSyncService
 {
     public function sync(CustomerVehicle $vehicle): void
     {
-        if ($vehicle->status !== 'active' || blank($vehicle->vin)) {
+        if ($vehicle->status !== 'active') {
+            return;
+        }
+
+        if ($vehicle->vehicle_vin_id) {
+            $catalogVin = VehicleVin::query()->findOrFail($vehicle->vehicle_vin_id);
+            if (blank($vehicle->vin)) {
+                $vehicle->forceFill(['vehicle_vin_id' => null])->saveQuietly();
+
+                return;
+            }
+            if ((int) $vehicle->vehicle_model_id === (int) $catalogVin->model_id
+                && (int) $vehicle->vehicle_engine_id === (int) $catalogVin->engine_id
+                && $vehicle->vin === $catalogVin->vin) {
+                return;
+            }
+            $vehicle->forceFill(['vehicle_vin_id' => null])->saveQuietly();
+        }
+
+        if (blank($vehicle->vin)) {
             return;
         }
 
         $vehicle->loadMissing('customer');
 
-        VehicleVin::query()->updateOrCreate(
+        $catalogVin = VehicleVin::query()->updateOrCreate(
             [
                 'model_id' => $vehicle->vehicle_model_id,
                 'engine_id' => $vehicle->vehicle_engine_id,
@@ -26,6 +45,10 @@ class CustomerVehicleVinSyncService
                 'notes' => $vehicle->customer?->name,
             ]
         );
+
+        if ((int) $vehicle->vehicle_vin_id !== (int) $catalogVin->id) {
+            $vehicle->forceFill(['vehicle_vin_id' => $catalogVin->id])->saveQuietly();
+        }
     }
 
     /**
@@ -37,26 +60,8 @@ class CustomerVehicleVinSyncService
             return;
         }
 
-        $replacement = CustomerVehicle::query()
-            ->with('customer')
-            ->where('vehicle_model_id', $scope['vehicle_model_id'])
-            ->where('vehicle_engine_id', $scope['vehicle_engine_id'])
-            ->where('vin', $scope['vin'])
-            ->where('status', 'active')
-            ->latest()
-            ->first();
-
-        if ($replacement) {
-            $this->sync($replacement);
-
-            return;
-        }
-
-        VehicleVin::query()
-            ->where('model_id', $scope['vehicle_model_id'])
-            ->where('engine_id', $scope['vehicle_engine_id'])
-            ->where('vin', $scope['vin'])
-            ->delete();
+        // Customer associations never own the master VIN lifecycle. Removing a
+        // customer vehicle must not delete a VIN from the shared catalog.
     }
 
     /**

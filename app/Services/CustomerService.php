@@ -4,14 +4,19 @@ namespace App\Services;
 
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\CustomerType;
+use App\Models\CustomerVehicle;
 use App\Models\PaymentMethod;
 use App\Models\SalesOrder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class CustomerService
 {
+    public function __construct(private CustomerVehicleVinSyncService $vinSyncService) {}
+
     /**
      * Get paginated list of customers
      */
@@ -60,7 +65,11 @@ class CustomerService
                 $data['code'] = Customer::generateCode();
             }
 
+            $vehicles = $data['vehicles'] ?? [];
+            unset($data['vehicles'], $data['sync_vehicles']);
+            $data = $this->applyCustomerType($data);
             $customer = Customer::create($data);
+            $this->syncVehicles($customer, $vehicles, true);
 
             // Create initial transaction if balance is set
             if (! empty($data['initial_balance']) && $data['initial_balance'] != 0) {
@@ -92,7 +101,13 @@ class CustomerService
         DB::beginTransaction();
 
         try {
-            $customer->update($data);
+            $shouldSyncVehicles = (bool) ($data['sync_vehicles'] ?? false);
+            $vehicles = $data['vehicles'] ?? [];
+            unset($data['vehicles'], $data['sync_vehicles']);
+            $customer->update($this->applyCustomerType($data));
+            if ($shouldSyncVehicles) {
+                $this->syncVehicles($customer, $vehicles, true);
+            }
 
             DB::commit();
 
@@ -108,12 +123,16 @@ class CustomerService
      */
     public function deleteCustomer(Customer $customer): bool
     {
-        // Check if customer has pending orders
-        if ($customer->salesOrders()->where('status', '!=', 'completed')->exists()) {
-            throw new \Exception('No se puede eliminar un cliente con órdenes pendientes');
+        $reason = $this->customerDeleteBlockReason($customer);
+        if ($reason !== null) {
+            throw ValidationException::withMessages(['customer' => $reason]);
         }
 
-        return $customer->delete();
+        return DB::transaction(function () use ($customer): bool {
+            $customer->vehicles()->where('status', 'active')->update(['status' => 'inactive']);
+
+            return $customer->delete();
+        });
     }
 
     /**
@@ -122,13 +141,95 @@ class CustomerService
     public function getCustomerWithTransactions(int $customerId): Customer
     {
         return Customer::with([
+            'customerType',
             'vehicles.model.make',
             'vehicles.chassis',
             'vehicles.engine',
+            'vehicles.catalogVin',
             'transactions' => function ($query) {
                 $query->orderBy('transaction_date', 'desc')->limit(50);
             },
         ])->findOrFail($customerId);
+    }
+
+    public function customerDeleteBlockReason(Customer $customer): ?string
+    {
+        if ($this->relationExists($customer, 'has_sales_orders', fn (): bool => $customer->salesOrders()->exists())) {
+            return 'No se puede eliminar: el cliente tiene ventas relacionadas. Desactívalo en su lugar.';
+        }
+        if ($this->relationExists($customer, 'has_sales_quotes', fn (): bool => $customer->salesQuotes()->exists())) {
+            return 'No se puede eliminar: el cliente tiene cotizaciones relacionadas. Desactívalo en su lugar.';
+        }
+        if ($this->relationExists($customer, 'has_work_orders', fn (): bool => $customer->workOrders()->exists())) {
+            return 'No se puede eliminar: el cliente tiene órdenes de trabajo relacionadas. Desactívalo en su lugar.';
+        }
+        if ((float) $customer->current_balance !== 0.0
+            || $this->relationExists($customer, 'has_transactions', fn (): bool => $customer->transactions()->exists())) {
+            return 'No se puede eliminar: el cliente tiene movimientos o saldo en cuentas por cobrar. Desactívalo en su lugar.';
+        }
+
+        return null;
+    }
+
+    private function applyCustomerType(array $data): array
+    {
+        if (array_key_exists('customer_type_id', $data)) {
+            $type = CustomerType::query()->findOrFail($data['customer_type_id']);
+            $data['type'] = $type->base_kind;
+        }
+
+        return $data;
+    }
+
+    private function syncVehicles(Customer $customer, array $vehicles, bool $deactivateMissing): void
+    {
+        $keptIds = [];
+        foreach ($vehicles as $data) {
+            $vehicleId = $data['id'] ?? null;
+            unset($data['id']);
+            $data['status'] = $data['status'] ?? 'active';
+
+            $vehicle = $vehicleId
+                ? $customer->vehicles()->whereKey($vehicleId)->firstOrFail()
+                : $this->reusableCustomerVehicle($customer, $data);
+            $vehicle->fill($data);
+            $vehicle->customer_id = $customer->id;
+            $vehicle->save();
+            $this->vinSyncService->sync($vehicle);
+            $keptIds[] = $vehicle->id;
+        }
+
+        if ($deactivateMissing) {
+            $customer->vehicles()->whereNotIn('id', $keptIds ?: [0])->update(['status' => 'inactive']);
+        }
+    }
+
+    private function reusableCustomerVehicle(Customer $customer, array $data): CustomerVehicle
+    {
+        $query = $customer->vehicles()
+            ->where('status', 'inactive')
+            ->where('vehicle_model_id', $data['vehicle_model_id'] ?? 0)
+            ->where('vehicle_engine_id', $data['vehicle_engine_id'] ?? 0);
+
+        if (! empty($data['vehicle_vin_id'])) {
+            $query->where('vehicle_vin_id', $data['vehicle_vin_id']);
+        } elseif (! empty($data['vin'])) {
+            $query->whereRaw('UPPER(vin) = ?', [mb_strtoupper(trim((string) $data['vin']))]);
+        } else {
+            $query->whereNull('vin');
+        }
+
+        return $query->latest('id')->first()
+            ?? new CustomerVehicle(['customer_id' => $customer->id]);
+    }
+
+    private function relationExists(Customer $customer, string $attribute, callable $fallback): bool
+    {
+        if (array_key_exists($attribute, $customer->getAttributes())) {
+            return (bool) $customer->getAttribute($attribute);
+        }
+
+        return $fallback();
     }
 
     /**

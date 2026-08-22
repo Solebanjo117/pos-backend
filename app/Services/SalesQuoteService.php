@@ -31,6 +31,7 @@ class SalesQuoteService
 
             $order = SalesOrder::create([
                 'customer_id' => $quote->customer_id,
+                'customer_vehicle_id' => $quote->customer_vehicle_id,
                 'user_id' => $user->id,
                 'pos_session_id' => $quote->pos_session_id,
                 'date' => now(),

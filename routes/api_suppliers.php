@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\SupplierCatalogController;
 use App\Http\Controllers\Api\SupplierController;
 use Illuminate\Support\Facades\Route;
 
@@ -31,4 +32,10 @@ Route::prefix('suppliers')->middleware('role:admin,manager,buyer')->group(functi
     Route::get('/{id}/brands', [SupplierController::class, 'brands']);
     Route::post('/{id}/brands', [SupplierController::class, 'attachBrand']);
     Route::delete('/{id}/brands/{brandId}', [SupplierController::class, 'detachBrand']);
+});
+
+Route::prefix('supplier-catalog')->middleware('role:admin,manager,buyer')->group(function () {
+    Route::get('/summary', [SupplierCatalogController::class, 'summary']);
+    Route::get('/export', [SupplierCatalogController::class, 'export']);
+    Route::post('/bulk-action', [SupplierCatalogController::class, 'bulkAction'])->middleware('role:admin,manager');
 });

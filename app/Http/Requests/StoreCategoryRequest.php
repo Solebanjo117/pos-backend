@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Models\Category;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class StoreCategoryRequest extends FormRequest
 {
@@ -13,7 +15,25 @@ class StoreCategoryRequest extends FormRequest
 
     protected function prepareForValidation(): void
     {
+        if ($this->has('name')) {
+            $this->merge(['name' => preg_replace('/\s+/u', ' ', trim((string) $this->input('name'))) ?? '']);
+        }
         $this->normalizeIntegerPercentField('itbm_percent');
+    }
+
+    public function after(): array
+    {
+        return [function (Validator $validator): void {
+            $parentId = $this->input('parent_ids.0', $this->input('parent_id'));
+            $duplicate = Category::query()
+                ->where('normalized_name', Category::normalizeName((string) $this->input('name')))
+                ->when($parentId, fn ($query) => $query->where('parent_id', (int) $parentId), fn ($query) => $query->whereNull('parent_id'))
+                ->exists();
+
+            if ($duplicate) {
+                $validator->errors()->add('name', 'Ya existe una categoría con ese nombre bajo el mismo padre.');
+            }
+        }];
     }
 
     /**

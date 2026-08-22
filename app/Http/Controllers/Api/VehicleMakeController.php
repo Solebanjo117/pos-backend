@@ -20,9 +20,10 @@ class VehicleMakeController extends Controller
         $query = VehicleMake::query()->withCount('models');
 
         // Search
-        if ($request->has('search')) {
-            $search = $request->input('search');
-            $query->whereRaw('LOWER(name) LIKE ?', ['%'.mb_strtolower($search).'%']);
+        if ($request->filled('search')) {
+            foreach (preg_split('/\s+/u', mb_strtolower(trim((string) $request->input('search')))) ?: [] as $token) {
+                $query->whereRaw('LOWER(name) LIKE ?', ["%{$token}%"]);
+            }
         }
 
         $direction = $request->input('direction') === 'desc' ? 'desc' : 'asc';

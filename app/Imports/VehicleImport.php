@@ -171,14 +171,16 @@ class VehicleImport extends BaseImport
         $engine = null;
         if ($engineCode) {
             $engine = VehicleEngine::query()
-                ->where(function ($query) use ($model) {
-                    $query->where('model_id', $model->id)
-                        ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('vehicle_models.id', $model->id));
+                ->where(function ($query) use ($makeId) {
+                    $query->where('make_id', $makeId)
+                        ->orWhereHas('model', fn ($modelQuery) => $modelQuery->where('make_id', $makeId))
+                        ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('make_id', $makeId));
                 })
                 ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower($engineCode)])
                 ->first();
 
             $engineData = [
+                'make_id' => $makeId,
                 'model_id' => $model->id,
                 'engine_code' => $engineCode,
                 'displacement' => $this->nullIfEmpty($row['displacement'] ?? null),
