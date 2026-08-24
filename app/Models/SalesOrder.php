@@ -17,6 +17,7 @@ class SalesOrder extends Model
 
     protected $fillable = [
         'order_number',
+        'idempotency_key',
         'customer_id',
         'customer_vehicle_id',
         'referred_by_customer_id',

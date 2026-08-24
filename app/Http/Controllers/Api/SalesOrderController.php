@@ -122,6 +122,7 @@ class SalesOrderController extends Controller
             }
 
             $validated = $request->validate([
+                'idempotency_key' => 'nullable|uuid',
                 'user_id' => 'nullable|integer|min:1',
                 'customer_id' => 'nullable|exists:customers,id',
                 'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
@@ -1015,7 +1016,7 @@ class SalesOrderController extends Controller
         $warehouseId = $request->header('X-Warehouse-Id')
             ?? $request->user()?->current_warehouse_id;
 
-        $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product'])
+        $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product', 'items.variant.brand'])
             ->when($warehouseId, fn ($q) => $q->whereHas('items', function ($iq) use ($warehouseId) {
                 $iq->where('warehouse_id', $warehouseId);
             }))

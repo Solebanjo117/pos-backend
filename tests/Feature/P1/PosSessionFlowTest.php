@@ -753,8 +753,14 @@ it('filters open sessions by opened date and closed sessions by closed date', fu
         'status' => 'closed',
     ]);
 
+    $otherManager = User::factory()->create([
+        'role' => 'manager',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $otherManager->warehouses()->attach($warehouse->id);
     $openOutsideRange = PosSession::create([
-        'user_id' => $manager->id,
+        'user_id' => $otherManager->id,
         'warehouse_id' => $warehouse->id,
         'opened_at' => '2026-05-09 09:00:00',
         'opening_amount' => 100,

@@ -109,6 +109,20 @@ it('exposes sale entries as cotizacion por atender with the quote seller', funct
         ->assertJsonPath('data.0.source.document_number', $this->quote->fresh()->quote_number);
 });
 
+it('returns the invoice summary for a cashier with items, totals, customer and seller', function (): void {
+    $response = $this->getJson("/api/v1/sales-quotes/{$this->quote->id}/summary")
+        ->assertOk()
+        ->assertJsonPath('data.id', $this->quote->id)
+        ->assertJsonPath('data.customer_name', 'Cliente Cola')
+        ->assertJsonPath('data.seller_name', 'Vendedor Uno')
+        ->assertJsonPath('data.total', 96.3)
+        ->assertJsonPath('data.items.0.product_name', 'Producto Cola')
+        ->assertJsonPath('data.items.0.sku', 'COLA-V1')
+        ->assertJsonPath('data.items.0.quantity', 1);
+
+    expect((float) $response->json('data.items.0.unit_price'))->toBe(100.0);
+});
+
 it('open at cashier without session returns the quote payload and keeps the queue intact', function (): void {
     $this->postJson("/api/v1/sales-quotes/{$this->quote->id}/open-at-cashier")
         ->assertUnprocessable()

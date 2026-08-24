@@ -86,6 +86,15 @@ class SalesOrderService
     public function create(array $data): SalesOrder
     {
         return DB::transaction(function () use ($data) {
+            // Idempotency: replay the already-created order for this key (double submit / retry / concurrency).
+            $idempotencyKey = $data['idempotency_key'] ?? null;
+            if ($idempotencyKey) {
+                $replay = SalesOrder::query()->where('idempotency_key', $idempotencyKey)->first();
+                if ($replay) {
+                    return $replay;
+                }
+            }
+
             $isCashier = Auth::user()?->role === 'cashier';
             $sourceQuote = null;
 
@@ -130,6 +139,7 @@ class SalesOrderService
 
             // Create order
             $order = SalesOrder::create([
+                'idempotency_key' => $idempotencyKey,
                 'customer_id' => $data['customer_id'] ?? null,
                 'customer_vehicle_id' => $data['customer_vehicle_id'] ?? null,
                 'referred_by_customer_id' => $data['referred_by_customer_id'] ?? null,

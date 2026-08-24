@@ -15,6 +15,7 @@ it('records deposits and withdrawals with running cash balances', function (): v
         'current_warehouse_id' => $warehouse->id,
         'is_active' => true,
     ]);
+    $cashier->warehouses()->attach($warehouse->id);
     PosSession::create([
         'user_id' => $cashier->id,
         'warehouse_id' => $warehouse->id,
@@ -58,6 +59,7 @@ it('restricts cash adjustments to administrators and validates their direction',
         'current_warehouse_id' => $warehouse->id,
         'is_active' => true,
     ]);
+    $cashier->warehouses()->attach($warehouse->id);
     foreach ([$cashier, $admin] as $user) {
         PosSession::create([
             'user_id' => $user->id,

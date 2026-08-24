@@ -20,7 +20,7 @@ Route::prefix('suppliers')->middleware('role:admin,manager,buyer')->group(functi
     Route::get('/commercial-dashboard', [SupplierController::class, 'commercialDashboard']);
     Route::get('/{id}', [SupplierController::class, 'show']);
     Route::put('/{id}', [SupplierController::class, 'update']);
-    Route::delete('/{id}', [SupplierController::class, 'destroy']);
+    Route::delete('/{id}', [SupplierController::class, 'destroy'])->middleware('role:admin,manager');
 
     // Sub-resources
     Route::get('/{supplier}/purchase-history', [SupplierController::class, 'purchaseHistory']);

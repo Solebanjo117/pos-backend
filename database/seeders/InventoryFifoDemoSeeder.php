@@ -85,6 +85,7 @@ class InventoryFifoDemoSeeder extends Seeder
                 'password' => bcrypt('password'),
                 'role' => 'admin',
                 'is_active' => true,
+                'can_manage_financial_adjustments' => true,
             ]
         );
     }

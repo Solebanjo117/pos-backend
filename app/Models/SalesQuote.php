@@ -16,8 +16,8 @@ class SalesQuote extends Model
 
     protected $fillable = [
         'quote_number',
+        'idempotency_key',
         'customer_id',
-        'customer_vehicle_id',
         'user_id',
         'warehouse_id',
         'pos_session_id',

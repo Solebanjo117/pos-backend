@@ -29,6 +29,22 @@ class SalesQuoteController extends Controller
     ) {}
 
     /**
+     * Returns an already-created quote for the given idempotency key, if any.
+     * Prevents duplicate quotes from double submits / retries / concurrent requests.
+     */
+    private function replayQuoteForKey(?string $key): ?SalesQuote
+    {
+        if (! $key) {
+            return null;
+        }
+
+        return SalesQuote::query()
+            ->where('idempotency_key', $key)
+            ->with(['customer', 'customerVehicle.model.make', 'customerVehicle.engine', 'user', 'items.product'])
+            ->first();
+    }
+
+    /**
      * GET /api/sales-quotes
      */
     public function index(Request $request): JsonResponse
@@ -110,6 +126,7 @@ class SalesQuoteController extends Controller
         $this->normalizeTaxPercentPayload($request);
 
         $validated = $request->validate([
+            'idempotency_key' => 'nullable|uuid',
             'customer_id' => 'nullable|exists:customers,id',
             'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
             'warehouse_id' => 'nullable|exists:warehouses,id',
@@ -129,6 +146,14 @@ class SalesQuoteController extends Controller
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
         $this->validateCustomerVehicle($validated);
+
+        if ($existing = $this->replayQuoteForKey($validated['idempotency_key'] ?? null)) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Cotización creada exitosamente',
+                'data' => $existing,
+            ], 201);
+        }
 
         $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
 
@@ -155,6 +180,7 @@ class SalesQuoteController extends Controller
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
+                    'idempotency_key' => $validated['idempotency_key'] ?? null,
                     'customer_id' => $validated['customer_id'] ?? null,
                     'customer_vehicle_id' => $validated['customer_vehicle_id'] ?? null,
                     'user_id' => $request->user()->id,
@@ -190,6 +216,17 @@ class SalesQuoteController extends Controller
                 'message' => 'Cotización creada exitosamente',
                 'data' => $quote,
             ] + (! empty($stockWarnings) ? ['warnings' => $stockWarnings] : []), 201);
+        } catch (\Illuminate\Database\QueryException $e) {
+            // Concurrent request won the unique idempotency_key: replay the winner.
+            if ($existing = $this->replayQuoteForKey($validated['idempotency_key'] ?? null)) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Cotización creada exitosamente',
+                    'data' => $existing,
+                ], 201);
+            }
+
+            return response()->json(['message' => 'Error al crear cotización', 'error' => $e->getMessage()], 500);
         } catch (\Exception $e) {
             return response()->json(['message' => 'Error al crear cotización', 'error' => $e->getMessage()], 500);
         }
@@ -303,6 +340,7 @@ class SalesQuoteController extends Controller
         $this->normalizeTaxPercentPayload($request);
 
         $validated = $request->validate([
+            'idempotency_key' => 'nullable|uuid',
             'customer_id' => 'nullable|exists:customers,id',
             'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
             'warehouse_id' => 'nullable|exists:warehouses,id',
@@ -320,6 +358,14 @@ class SalesQuoteController extends Controller
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
         $this->validateCustomerVehicle($validated);
+
+        if ($existing = $this->replayQuoteForKey($validated['idempotency_key'] ?? null)) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Cotización guardada exitosamente',
+                'data' => $existing,
+            ], 201);
+        }
 
         $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
 
@@ -346,6 +392,7 @@ class SalesQuoteController extends Controller
         try {
             $quote = DB::transaction(function () use ($validated, $request) {
                 $quote = SalesQuote::create([
+                    'idempotency_key' => $validated['idempotency_key'] ?? null,
                     'customer_id' => $validated['customer_id'] ?? null,
                     'customer_vehicle_id' => $validated['customer_vehicle_id'] ?? null,
                     'user_id' => $request->user()->id,
@@ -381,6 +428,17 @@ class SalesQuoteController extends Controller
                 'message' => 'Cotización guardada exitosamente',
                 'data' => $quote,
             ] + (! empty($stockWarnings) ? ['warnings' => $stockWarnings] : []), 201);
+        } catch (\Illuminate\Database\QueryException $e) {
+            // Concurrent request won the unique idempotency_key: replay the winner.
+            if ($existing = $this->replayQuoteForKey($validated['idempotency_key'] ?? null)) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Cotización guardada exitosamente',
+                    'data' => $existing,
+                ], 201);
+            }
+
+            return response()->json(['message' => 'Error al guardar cotización', 'error' => $e->getMessage()], 500);
         } catch (\Exception $e) {
             return response()->json(['message' => 'Error al guardar cotización', 'error' => $e->getMessage()], 500);
         }
@@ -551,6 +609,45 @@ class SalesQuoteController extends Controller
             ->log('cashier_opened');
 
         return response()->json(['data' => $quote]);
+    }
+
+    /**
+     * GET /api/sales-quotes/{id}/summary
+     * Read-only invoice summary for the cashier queue "Ver" modal.
+     */
+    public function summary(int $id): JsonResponse
+    {
+        $quote = SalesQuote::query()
+            ->with(['customer', 'user', 'items.product', 'items.variant.brand'])
+            ->findOrFail($id);
+
+        return response()->json([
+            'data' => [
+                'id' => $quote->id,
+                'quote_number' => $quote->quote_number,
+                'status' => $quote->status,
+                'customer_name' => $quote->customer?->name ?? 'Publico general',
+                'seller_name' => $quote->user?->name,
+                'notes' => $quote->notes,
+                'subtotal' => (float) $quote->subtotal,
+                'tax_amount' => (float) $quote->tax_amount,
+                'discount_amount' => (float) $quote->discount_amount,
+                'total' => (float) $quote->total,
+                'created_at' => $quote->created_at?->toISOString(),
+                'items' => $quote->items->map(fn ($item): array => [
+                    'id' => $item->id,
+                    'product_name' => $item->is_custom_line
+                        ? ($item->custom_description ?: 'Linea personalizada')
+                        : ($item->product?->name ?? 'Producto'),
+                    'sku' => $item->variant?->sku ?? $item->product?->sku_base,
+                    'brand' => $item->variant?->brand?->name,
+                    'quantity' => (int) $item->quantity,
+                    'unit_price' => (float) $item->unit_price,
+                    'subtotal' => (float) $item->subtotal,
+                    'total' => (float) $item->total,
+                ])->values(),
+            ],
+        ]);
     }
 
     /**

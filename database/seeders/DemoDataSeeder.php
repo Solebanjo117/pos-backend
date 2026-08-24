@@ -34,7 +34,7 @@ class DemoDataSeeder extends Seeder
         // ── 1. USERS ──
         $admin = User::updateOrCreate(
             ['email' => 'admin@hermes.com'],
-            ['name' => 'Admin Principal', 'username' => 'admin', 'password' => bcrypt('password'), 'role' => 'admin', 'is_active' => true]
+            ['name' => 'Admin Principal', 'username' => 'admin', 'password' => bcrypt('password'), 'role' => 'admin', 'is_active' => true, 'can_manage_financial_adjustments' => true]
         );
         $cashier = User::updateOrCreate(
             ['email' => 'cajero@hermes.com'],

@@ -14,18 +14,18 @@ Route::prefix('customers')->middleware('role:admin,manager,seller,cashier')->gro
     Route::post('/', [CustomerController::class, 'store']);
     Route::get('/search', [CustomerController::class, 'search']);
     Route::get('/{customer}/vehicles', [CustomerVehicleController::class, 'index']);
-    Route::post('/{customer}/vehicles', [CustomerVehicleController::class, 'store']);
-    Route::put('/{customer}/vehicles/{vehicle}', [CustomerVehicleController::class, 'update']);
-    Route::delete('/{customer}/vehicles/{vehicle}', [CustomerVehicleController::class, 'destroy']);
     Route::get('/{customer}/sales-history', [CustomerController::class, 'salesHistory']);
     Route::get('/{customer}', [CustomerController::class, 'show']);
-    Route::put('/{customer}', [CustomerController::class, 'update']);
     Route::get('/{id}/orders', [CustomerController::class, 'orders']);
+    Route::get('/{id}/transactions', [CustomerController::class, 'transactions']);
 
     Route::middleware('role:admin,manager')->group(function () {
         Route::post('/bulk-action', [CustomerBulkController::class, 'customers']);
+        Route::put('/{customer}', [CustomerController::class, 'update']);
+        Route::post('/{customer}/vehicles', [CustomerVehicleController::class, 'store']);
+        Route::put('/{customer}/vehicles/{vehicle}', [CustomerVehicleController::class, 'update']);
+        Route::delete('/{customer}/vehicles/{vehicle}', [CustomerVehicleController::class, 'destroy']);
         Route::delete('/{customer}', [CustomerController::class, 'destroy']);
-        Route::get('/{id}/transactions', [CustomerController::class, 'transactions']);
         Route::post('/{customer}/adjust-balance', [CustomerController::class, 'adjustBalance']);
     });
 });

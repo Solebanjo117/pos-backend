@@ -82,14 +82,18 @@ class EssentialSeeder extends Seeder
                 'password' => bcrypt('password'),
                 'role' => 'admin',
                 'is_active' => true,
+                'can_manage_financial_adjustments' => true,
                 'current_warehouse_id' => $warehouse->id,
                 'email_verified_at' => now(),
             ]
         );
 
         // If user already existed but has no warehouse assigned, set it
-        if (! $admin->wasRecentlyCreated && ! $admin->current_warehouse_id) {
-            $admin->update(['current_warehouse_id' => $warehouse->id]);
+        if (! $admin->wasRecentlyCreated) {
+            $admin->update([
+                'current_warehouse_id' => $admin->current_warehouse_id ?: $warehouse->id,
+                'can_manage_financial_adjustments' => true,
+            ]);
         }
 
         $this->command->info('✅ User: admin@hermexpos.app (password: password)');

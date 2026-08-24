@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\CashMovement;
 use App\Models\PosSession;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class CashMovementController extends Controller
 {
@@ -39,36 +40,46 @@ class CashMovementController extends Controller
             return response()->json(['message' => 'Solo un administrador puede ajustar el saldo de Caja.'], 403);
         }
 
-        // Find the open session for this user
-        $session = PosSession::where('user_id', $userId)
-            ->where('status', 'open')
-            ->first();
+        $warehouseId = $request->integer('warehouse_id');
 
-        if (! $session) {
+        $movement = DB::transaction(function () use ($request, $userId, $warehouseId, $subtype): ?CashMovement {
+            $session = PosSession::query()
+                ->where('user_id', $userId)
+                ->where('warehouse_id', $warehouseId)
+                ->where('status', 'open')
+                ->lockForUpdate()
+                ->first();
+
+            if (! $session) {
+                return null;
+            }
+
+            $in = (float) $session->cashMovements()->where('type', 'in')->sum('amount');
+            $out = (float) $session->cashMovements()->where('type', 'out')->sum('amount');
+            $balanceBefore = round((float) $session->opening_amount + $in - $out, 2);
+            $amount = round((float) $request->amount, 2);
+
+            return CashMovement::create([
+                'pos_session_id' => $session->id,
+                'user_id' => $userId,
+                'type' => $request->type,
+                'subtype' => $subtype,
+                'amount' => $amount,
+                'balance_before' => $balanceBefore,
+                'balance_after' => round($balanceBefore + ($request->type === 'in' ? $amount : -$amount), 2),
+                'reason' => $request->reason,
+                'reference_number' => $request->reference_number,
+                'payment_method' => 'cash',
+                'business_datetime' => $request->business_datetime ?? now(),
+                'notes' => $request->notes,
+            ]);
+        });
+
+        if (! $movement) {
             return response()->json([
                 'message' => 'No hay una sesión de caja abierta para registrar movimientos.',
             ], 404);
         }
-
-        $in = (float) $session->cashMovements()->where('type', 'in')->sum('amount');
-        $out = (float) $session->cashMovements()->where('type', 'out')->sum('amount');
-        $balanceBefore = round((float) $session->opening_amount + $in - $out, 2);
-        $amount = round((float) $request->amount, 2);
-
-        $movement = CashMovement::create([
-            'pos_session_id' => $session->id,
-            'user_id' => $userId,
-            'type' => $request->type,
-            'subtype' => $subtype,
-            'amount' => $amount,
-            'balance_before' => $balanceBefore,
-            'balance_after' => round($balanceBefore + ($request->type === 'in' ? $amount : -$amount), 2),
-            'reason' => $request->reason,
-            'reference_number' => $request->reference_number,
-            'payment_method' => 'cash',
-            'business_datetime' => $request->business_datetime ?? now(),
-            'notes' => $request->notes,
-        ]);
 
         return response()->json([
             'message' => 'Movimiento de caja registrado correctamente.',
@@ -82,12 +93,14 @@ class CashMovementController extends Controller
     public function index(Request $request)
     {
         $userId = $request->input('user_id') ?? auth()->id();
+        $warehouseId = $request->integer('warehouse_id');
 
         if (! $userId) {
             return response()->json(['message' => 'No autorizado.'], 401);
         }
 
         $session = PosSession::where('user_id', $userId)
+            ->where('warehouse_id', $warehouseId)
             ->where('status', 'open')
             ->first();
 

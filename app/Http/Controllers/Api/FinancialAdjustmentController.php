@@ -60,8 +60,8 @@ class FinancialAdjustmentController extends Controller
             'purchase_orders' => PurchaseOrder::query()->whereNotNull('supplier_id')->whereNotIn('status', ['cancelled'])->latest('id')->limit(500)->get(['id', 'supplier_id', 'po_number', 'supplier_invoice_number', 'total'])->map(fn (PurchaseOrder $order): array => [
                 'value' => $order->id, 'parent_id' => $order->supplier_id, 'label' => $order->supplier_invoice_number ?: $order->po_number, 'total' => (float) $order->total, 'balance' => (float) $order->amount_due,
             ]),
-            'products' => Product::query()->with('variants:id,product_id,name')->where('status', 'active')->orderBy('name')->limit(500)->get(['id', 'name'])->map(fn (Product $product): array => [
-                'value' => $product->id, 'label' => $product->name, 'variants' => $product->variants->map(fn ($variant): array => ['value' => $variant->id, 'label' => $variant->name]),
+            'products' => Product::query()->with('variants:id,product_id,sku')->where('status', 'active')->orderBy('name')->limit(500)->get(['id', 'name'])->map(fn (Product $product): array => [
+                'value' => $product->id, 'label' => $product->name, 'variants' => $product->variants->map(fn ($variant): array => ['value' => $variant->id, 'label' => $variant->sku ?: 'Sin código']),
             ]),
         ]]);
     }
