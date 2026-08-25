@@ -77,6 +77,11 @@ class PurchaseOrder extends Model
         return $this->hasMany(PurchaseOrderPayment::class);
     }
 
+    public function receipts(): HasMany
+    {
+        return $this->hasMany(PurchaseOrderReceipt::class);
+    }
+
     // ==================== SCOPES ====================
 
     public function scopeByStatus($query, $status)
