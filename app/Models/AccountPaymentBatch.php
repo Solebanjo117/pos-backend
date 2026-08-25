@@ -26,6 +26,8 @@ class AccountPaymentBatch extends Model
         'created_by',
         'business_datetime',
         'financial_account_id',
+        'idempotency_key',
+        'request_hash',
     ];
 
     protected $casts = [
@@ -33,6 +35,8 @@ class AccountPaymentBatch extends Model
         'paid_at' => 'datetime',
         'business_datetime' => 'datetime',
     ];
+
+    protected $hidden = ['request_hash'];
 
     public function applications(): HasMany
     {

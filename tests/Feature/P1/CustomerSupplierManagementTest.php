@@ -184,7 +184,7 @@ it('returns catalog and customer capabilities that match effective roles', funct
         ->getJson('/api/v1/customers')
         ->assertOk()
         ->assertJsonPath('data.0.id', $customer->id)
-        ->assertJsonPath('data.0.can_edit', true)
+        ->assertJsonPath('data.0.can_edit', false)
         ->assertJsonPath('data.0.can_delete', false);
     $this->getJson('/api/v1/categories?per_page=15')
         ->assertOk()

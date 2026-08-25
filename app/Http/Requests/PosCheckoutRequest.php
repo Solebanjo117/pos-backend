@@ -101,6 +101,7 @@ class PosCheckoutRequest extends FormRequest
             'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
             'payments.*.reference_number' => 'nullable|string|max:100',
             'payments.*.notes' => 'nullable|string',
+            'payments.*.financial_account_id' => 'nullable|integer|exists:financial_accounts,id',
             'items' => 'nullable|array',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.variant_id' => 'nullable|exists:product_variants,id',
@@ -118,6 +119,27 @@ class PosCheckoutRequest extends FormRequest
     public function withValidator($validator): void
     {
         $validator->after(function ($validator): void {
+            foreach ($this->input('payments', []) as $index => $payment) {
+                if (! is_array($payment) || empty($payment['method'])) {
+                    continue;
+                }
+
+                if (PaymentMethod::liquidityBucket($payment['method']) !== PaymentMethod::LIQUIDITY_BANK) {
+                    continue;
+                }
+
+                $accountId = $payment['financial_account_id'] ?? null;
+                $isEligible = $accountId && \App\Models\FinancialAccount::query()
+                    ->whereKey($accountId)
+                    ->where('is_active', true)
+                    ->where('is_legacy', false)
+                    ->exists();
+
+                if (! $isEligible) {
+                    $validator->errors()->add("payments.{$index}.financial_account_id", 'Selecciona una cuenta financiera activa para este cobro.');
+                }
+            }
+
             if ($this->user()?->role !== 'cashier') {
                 return;
             }

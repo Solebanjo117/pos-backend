@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\PosCheckoutRequest;
@@ -122,6 +123,7 @@ class SalesOrderController extends Controller
             }
 
             $validated = $request->validate([
+                'idempotency_key' => 'nullable|uuid',
                 'user_id' => 'nullable|integer|min:1',
                 'customer_id' => 'nullable|exists:customers,id',
                 'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
@@ -142,6 +144,7 @@ class SalesOrderController extends Controller
                 'payments.*.method' => ['required_with:payments', Rule::in($validPaymentMethods)],
                 'payments.*.reference_number' => 'nullable|string|max:100',
                 'payments.*.notes' => 'nullable|string',
+                'payments.*.financial_account_id' => 'nullable|integer|exists:financial_accounts,id',
                 'items' => 'nullable|array',
                 'items.*.product_id' => 'nullable|exists:products,id',
                 'items.*.variant_id' => 'nullable|exists:product_variants,id',
@@ -319,6 +322,8 @@ class SalesOrderController extends Controller
             }
 
             return response()->json($response, 201);
+        } catch (IdempotencyConflictException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
         } catch (\Illuminate\Validation\ValidationException $e) {
             return response()->json([
                 'message' => 'Error de validación',
@@ -1015,7 +1020,7 @@ class SalesOrderController extends Controller
         $warehouseId = $request->header('X-Warehouse-Id')
             ?? $request->user()?->current_warehouse_id;
 
-        $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product'])
+        $orders = \App\Models\SalesOrder::with(['customer', 'user', 'items.product', 'items.variant.brand'])
             ->when($warehouseId, fn ($q) => $q->whereHas('items', function ($iq) use ($warehouseId) {
                 $iq->where('warehouse_id', $warehouseId);
             }))

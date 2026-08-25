@@ -19,6 +19,7 @@ use App\Services\ReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 use Symfony\Component\HttpFoundation\Response;
 
 class ReportController extends Controller
@@ -594,15 +595,23 @@ class ReportController extends Controller
             'movement_date' => 'required|date',
             'warehouse_id' => 'nullable|exists:warehouses,id',
             'notes' => 'nullable|string|max:1000',
+            'idempotency_key' => 'required|uuid',
         ]);
+
+        try {
+            $result = $this->financialSnapshotService->storeCapitalMovement(
+                $validated,
+                $request->user()?->id,
+            );
+        } catch (InvalidArgumentException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 409);
+        }
 
         return response()->json([
             'success' => true,
-            'data' => $this->financialSnapshotService->storeCapitalMovement(
-                $validated,
-                $request->user()?->id,
-            ),
-        ], 201);
+            'data' => $result['movement'],
+            'replayed' => $result['replayed'],
+        ], $result['replayed'] ? 200 : 201);
     }
 
     public function capitalMovements(Request $request): JsonResponse

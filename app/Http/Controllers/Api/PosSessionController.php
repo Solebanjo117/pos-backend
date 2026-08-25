@@ -11,7 +11,9 @@ use App\Models\PosSession;
 use App\Services\PosSessionOperationalDetailService;
 use App\Services\PosSessionReconciliationService;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 class PosSessionController extends Controller
 {
@@ -58,30 +60,58 @@ class PosSessionController extends Controller
         $userId = Auth::id();
         $warehouseId = $request->integer('warehouse_id');
 
-        $existing = PosSession::where('user_id', $userId)
-            ->where('status', 'open')
-            ->where('warehouse_id', $warehouseId)
-            ->first();
+        try {
+            $result = DB::transaction(function () use ($request, $userId, $warehouseId): array {
+                $existing = PosSession::query()
+                    ->where('user_id', $userId)
+                    ->where('status', 'open')
+                    ->where('warehouse_id', $warehouseId)
+                    ->lockForUpdate()
+                    ->first();
 
-        if ($existing) {
+                if ($existing) {
+                    return ['created' => false, 'session' => $existing];
+                }
+
+                return [
+                    'created' => true,
+                    'session' => PosSession::create([
+                        'user_id' => $userId,
+                        'warehouse_id' => $warehouseId,
+                        'opened_at' => now(),
+                        'opening_amount' => $request->opening_amount,
+                        'expected_amount' => $request->opening_amount,
+                        'status' => 'open',
+                    ]),
+                ];
+            });
+        } catch (QueryException $exception) {
+            if (! $this->isUniqueViolation($exception)) {
+                throw $exception;
+            }
+
+            $existing = PosSession::query()
+                ->where('user_id', $userId)
+                ->where('status', 'open')
+                ->where('warehouse_id', $warehouseId)
+                ->first();
+
             return response()->json([
-                'message' => 'Ya existe una sesion abierta para este usuario en esta sucursal.',
+                'message' => 'La sesion ya fue abierta por otra solicitud.',
                 'data' => $existing,
-            ], 400);
+            ], 409);
         }
 
-        $session = PosSession::create([
-            'user_id' => $userId,
-            'warehouse_id' => $warehouseId,
-            'opened_at' => now(),
-            'opening_amount' => $request->opening_amount,
-            'expected_amount' => $request->opening_amount,
-            'status' => 'open',
-        ]);
+        if (! $result['created']) {
+            return response()->json([
+                'message' => 'Ya existe una sesion abierta para este usuario en esta sucursal.',
+                'data' => $result['session'],
+            ], 409);
+        }
 
         return response()->json([
             'message' => 'Sesion de caja abierta correctamente',
-            'data' => $session,
+            'data' => $result['session'],
         ], 201);
     }
 
@@ -93,24 +123,55 @@ class PosSessionController extends Controller
         $userId = Auth::id();
         $warehouseId = $request->integer('warehouse_id');
 
-        $session = PosSession::where('user_id', $userId)
-            ->where('status', 'open')
-            ->where('warehouse_id', $warehouseId)
-            ->first();
+        $result = DB::transaction(function () use ($request, $userId, $warehouseId): array {
+            $session = PosSession::query()
+                ->where('user_id', $userId)
+                ->where('warehouse_id', $warehouseId)
+                ->where('status', 'open')
+                ->lockForUpdate()
+                ->first();
 
-        if (! $session) {
+            if (! $session) {
+                return ['status' => 'not_found'];
+            }
+
+            $closeTime = now();
+            $closingAmount = (float) $request->closing_amount;
+            $closingDetails = $request->input('closing_details') ?? [];
+            $reconciliation = $this->reconciliationService->build($session, $closeTime, $closingDetails, $closingAmount);
+            $summary = $reconciliation['summary'];
+
+            if (abs((float) $summary['total_difference']) > 0.005 && ! trim((string) $request->input('notes', ''))) {
+                return ['status' => 'validation_error'];
+            }
+
+            $closingDetails['reconciliation_rows'] = $reconciliation['rows'];
+            $closingDetails['summary'] = $summary;
+            $closingDetails['electronic_payments'] = $summary['electronic_breakdown'];
+
+            $session->update([
+                'closed_at' => $closeTime,
+                'closing_amount' => $closingAmount,
+                'expected_amount' => $summary['expected_cash'],
+                'closing_details' => $closingDetails,
+                'status' => 'closed',
+                'notes' => $request->notes,
+            ]);
+            $session->closing_details = $closingDetails;
+
+            $sessionData = $session->toArray();
+            $sessionData['closing_details'] = $closingDetails;
+
+            return ['status' => 'closed', 'data' => $sessionData];
+        });
+
+        if ($result['status'] === 'not_found') {
             return response()->json([
-                'message' => 'No hay una sesion abierta activa para esta sucursal.',
-            ], 404);
+                'message' => 'La caja ya fue cerrada o no existe una sesion abierta para esta sucursal.',
+            ], 409);
         }
 
-        $closeTime = now();
-        $closingAmount = (float) $request->closing_amount;
-        $closingDetails = $request->input('closing_details') ?? [];
-        $reconciliation = $this->reconciliationService->build($session, $closeTime, $closingDetails, $closingAmount);
-        $summary = $reconciliation['summary'];
-
-        if (abs((float) $summary['total_difference']) > 0.005 && ! trim((string) $request->input('notes', ''))) {
+        if ($result['status'] === 'validation_error') {
             return response()->json([
                 'message' => 'Debe agregar una justificacion cuando el cierre tiene diferencias.',
                 'errors' => [
@@ -119,26 +180,9 @@ class PosSessionController extends Controller
             ], 422);
         }
 
-        $closingDetails['reconciliation_rows'] = $reconciliation['rows'];
-        $closingDetails['summary'] = $summary;
-        $closingDetails['electronic_payments'] = $summary['electronic_breakdown'];
-
-        $session->update([
-            'closed_at' => $closeTime,
-            'closing_amount' => $closingAmount,
-            'expected_amount' => $summary['expected_cash'],
-            'closing_details' => $closingDetails,
-            'status' => 'closed',
-            'notes' => $request->notes,
-        ]);
-        $session->closing_details = $closingDetails;
-
-        $sessionData = $session->toArray();
-        $sessionData['closing_details'] = $closingDetails;
-
         return response()->json([
             'message' => 'Sesion de caja cerrada correctamente',
-            'data' => $sessionData,
+            'data' => $result['data'],
         ], 200, [], JSON_PRESERVE_ZERO_FRACTION);
     }
 
@@ -330,5 +374,11 @@ class PosSessionController extends Controller
         if ($request->filled('date_to')) {
             $query->whereDate($column, '<=', $request->date_to);
         }
+    }
+
+    private function isUniqueViolation(QueryException $exception): bool
+    {
+        return in_array((string) $exception->getCode(), ['23000', '23505'], true)
+            || str_contains($exception->getMessage(), 'pos_sessions_one_open_per_user_warehouse');
     }
 }

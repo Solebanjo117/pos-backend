@@ -24,6 +24,8 @@ Route::middleware(['web'])->group(function () {
         ->middleware('role:admin,manager,seller');
     Route::post('/sales-quotes/{id}/open-at-cashier', [SalesQuoteController::class, 'openAtCashier'])
         ->middleware('role:admin,manager,cashier');
+    Route::get('/sales-quotes/{id}/summary', [SalesQuoteController::class, 'summary'])
+        ->middleware('role:admin,manager,cashier,seller');
     Route::post('/sales-quotes/{id}/send-to-deposit', [SalesQuoteController::class, 'sendToDeposit'])
         ->middleware('role:admin,manager,seller');
     Route::post('/sales-quotes/{id}/send-to-cashier', [SalesQuoteController::class, 'sendToCashier'])

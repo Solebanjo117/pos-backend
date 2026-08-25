@@ -14,6 +14,7 @@ use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -403,6 +404,7 @@ it('counts real cash receipt from accounts receivable while keeping original cre
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 30,
         'method' => 'cash',
         'paid_at' => now()->subMinutes(10)->toISOString(),
@@ -553,6 +555,36 @@ it('requires a note when closing totals have a difference', function () {
 
     $response->assertStatus(422)
         ->assertJsonValidationErrors('notes');
+
+    expect(PosSession::query()->where('user_id', $cashier->id)->firstOrFail()->status)->toBe('open');
+});
+
+it('validates the denomination payload used by the closing modal', function () {
+    $warehouse = Warehouse::create(['code' => 'W-DENOMINATIONS', 'name' => 'Warehouse Denominations']);
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach($warehouse->id);
+    $session = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/close', [
+        'closing_amount' => 100,
+        'closing_details' => [
+            'denominations' => ['unit_100' => -1, 'extra' => 0],
+        ],
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors('closing_details.denominations.unit_100');
+
+    expect($session->fresh()->status)->toBe('open');
 });
 
 it('shows normalized documents and an ordered timeline for a pos session', function () {
@@ -753,8 +785,14 @@ it('filters open sessions by opened date and closed sessions by closed date', fu
         'status' => 'closed',
     ]);
 
+    $otherManager = User::factory()->create([
+        'role' => 'manager',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $otherManager->warehouses()->attach($warehouse->id);
     $openOutsideRange = PosSession::create([
-        'user_id' => $manager->id,
+        'user_id' => $otherManager->id,
         'warehouse_id' => $warehouse->id,
         'opened_at' => '2026-05-09 09:00:00',
         'opening_amount' => 100,
@@ -914,6 +952,98 @@ it('close only closes the session of the effective warehouse and leaves the othe
 
     // Session A (other branch) must remain open
     expect($sessionA->fresh()->status)->toBe('open');
+});
+
+it('reconciles only payments belonging to the session being closed', function () {
+    $warehouseA = Warehouse::create(['code' => 'WA-RECON', 'name' => 'Warehouse A Reconciliation']);
+    $warehouseB = Warehouse::create(['code' => 'WB-RECON', 'name' => 'Warehouse B Reconciliation']);
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouseA->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach([$warehouseA->id, $warehouseB->id]);
+    createPaymentMethodForPosTest('cash', 'Efectivo', true, true, 1);
+
+    $sessionA = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseA->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+    $sessionB = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouseB->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 200,
+        'expected_amount' => 200,
+        'status' => 'open',
+    ]);
+
+    foreach ([[$sessionA, 25, 'SO-RECON-A'], [$sessionB, 80, 'SO-RECON-B']] as [$session, $amount, $number]) {
+        $order = SalesOrder::create([
+            'order_number' => $number,
+            'user_id' => $cashier->id,
+            'pos_session_id' => $session->id,
+            'date' => now()->toDateString(),
+            'status' => 'completed',
+            'subtotal' => $amount,
+            'tax_amount' => 0,
+            'discount_amount' => 0,
+            'shipping_cost' => 0,
+            'total' => $amount,
+            'payment_status' => 'paid',
+            'payment_method' => 'cash',
+        ]);
+        SalesOrderPayment::create([
+            'sales_order_id' => $order->id,
+            'amount' => $amount,
+            'method' => 'cash',
+            'paid_at' => now(),
+            'created_by' => $cashier->id,
+        ]);
+    }
+
+    $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/close', [
+        'warehouse_id' => $warehouseA->id,
+        'closing_amount' => 125,
+        'closing_details' => ['payment_method_counts' => ['cash' => 125]],
+    ])->assertOk()
+        ->assertJsonPath('data.closing_details.summary.cash_sales', 25.0)
+        ->assertJsonPath('data.closing_details.summary.expected_cash', 125.0)
+        ->assertJsonPath('data.closing_details.summary.total_difference', 0.0);
+
+    expect($sessionA->fresh()->status)->toBe('closed')
+        ->and($sessionB->fresh()->status)->toBe('open');
+});
+
+it('returns an understandable conflict when a close request is repeated', function () {
+    $warehouse = Warehouse::create(['code' => 'W-CLOSE-REPLAY', 'name' => 'Warehouse Close Replay']);
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach($warehouse->id);
+    $session = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 50,
+        'expected_amount' => 50,
+        'status' => 'open',
+    ]);
+    $payload = ['closing_amount' => 50];
+
+    $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/close', $payload)->assertOk();
+    $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/close', $payload)
+        ->assertConflict()
+        ->assertJsonPath('message', 'La caja ya fue cerrada o no existe una sesion abierta para esta sucursal.');
+
+    expect($session->fresh()->status)->toBe('closed')
+        ->and(PosSession::query()->where('user_id', $cashier->id)->count())->toBe(1);
 });
 
 it('open returns 422 when the user has no effective warehouse context', function () {

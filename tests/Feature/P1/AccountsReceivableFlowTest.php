@@ -14,6 +14,7 @@ use App\Models\Warehouse;
 use Carbon\Carbon;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -122,6 +123,7 @@ it('records a bank receipt in the selected financial account without requiring a
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 30,
         'method' => 'transfer',
         'financial_account_id' => $account->id,
@@ -133,6 +135,151 @@ it('records a bank receipt in the selected financial account without requiring a
     expect((float) $account->fresh()->current_balance)->toBe(130.0)
         ->and(AccountPaymentBatch::firstOrFail()->financial_account_id)->toBe($account->id)
         ->and(FinancialAccountMovement::query()->where('financial_account_id', $account->id)->count())->toBe(1);
+});
+
+it('offers only active non-legacy bank accounts as payment destinations', function () {
+    ['cashier' => $cashier] = accountsReceivableContext();
+    $ledgerAccountId = LedgerAccount::query()->where('code', '1110')->firstOrFail()->id;
+    $eligible = FinancialAccount::create([
+        'name' => 'Banco elegible',
+        'type' => 'bank',
+        'currency' => 'USD',
+        'opening_balance' => 0,
+        'current_balance' => 0,
+        'ledger_account_id' => $ledgerAccountId,
+        'created_by' => $cashier->id,
+    ]);
+    FinancialAccount::create([
+        'name' => 'Banco histórico',
+        'type' => 'bank',
+        'currency' => 'USD',
+        'opening_balance' => 0,
+        'current_balance' => 0,
+        'ledger_account_id' => $ledgerAccountId,
+        'created_by' => $cashier->id,
+        'is_legacy' => true,
+    ]);
+
+    $response = $this->actingAs($cashier)
+        ->getJson('/api/v1/money-accounts/options?type=bank&purpose=settlement')
+        ->assertOk();
+
+    expect(collect($response->json('data'))->pluck('endpoint_id')->all())
+        ->toBe([$eligible->id]);
+});
+
+it('replays an identical receivable receipt and rejects a conflicting key', function () {
+    ['cashier' => $cashier, 'customer' => $customer, 'order' => $order] = accountsReceivableContext();
+    createArPaymentMethod('transfer', 'Transferencia', 1);
+    $account = FinancialAccount::create([
+        'name' => 'Banco idempotente',
+        'type' => 'bank',
+        'currency' => 'USD',
+        'opening_balance' => 0,
+        'current_balance' => 0,
+        'ledger_account_id' => LedgerAccount::query()->where('code', '1110')->firstOrFail()->id,
+        'created_by' => $cashier->id,
+    ]);
+    $payload = [
+        'idempotency_key' => (string) Str::uuid(),
+        'amount' => 30,
+        'method' => 'transfer',
+        'financial_account_id' => $account->id,
+        'applications' => [['document_id' => $order->id, 'amount' => 30]],
+    ];
+
+    $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", $payload)->assertCreated();
+    $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", $payload)->assertCreated();
+    $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        ...$payload,
+        'amount' => 20,
+        'applications' => [['document_id' => $order->id, 'amount' => 20]],
+    ])->assertConflict();
+
+    expect(AccountPaymentBatch::count())->toBe(1)
+        ->and((float) $order->fresh()->amount_due)->toBe(70.0)
+        ->and((float) $account->fresh()->current_balance)->toBe(30.0);
+});
+
+it('keeps direct document payments idempotent and rejects over-application', function () {
+    ['warehouse' => $warehouse, 'cashier' => $cashier, 'order' => $order] = accountsReceivableContext();
+    createArPaymentMethod('cash', 'Efectivo', 1);
+    PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 0,
+        'expected_amount' => 0,
+        'status' => 'open',
+    ]);
+    $key = (string) Str::uuid();
+    $payload = [
+        'idempotency_key' => $key,
+        'amount' => 70,
+        'method' => 'cash',
+    ];
+
+    $this->actingAs($cashier)
+        ->postJson("/api/v1/sales-orders/{$order->id}/payments", $payload)
+        ->assertCreated();
+    $this->actingAs($cashier)
+        ->postJson("/api/v1/sales-orders/{$order->id}/payments", $payload)
+        ->assertOk();
+    $this->actingAs($cashier)
+        ->postJson("/api/v1/sales-orders/{$order->id}/payments", [
+            ...$payload,
+            'amount' => 71,
+        ])
+        ->assertConflict();
+    $this->actingAs($cashier)
+        ->postJson("/api/v1/sales-orders/{$order->id}/payments", [
+            'idempotency_key' => (string) Str::uuid(),
+            'amount' => 40,
+            'method' => 'cash',
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors('amount');
+
+    expect($order->fresh()->payments)->toHaveCount(1)
+        ->and((float) $order->fresh()->amount_due)->toBe(30.0);
+});
+
+it('applies one idempotent receipt to multiple customer documents', function () {
+    ['warehouse' => $warehouse, 'cashier' => $cashier, 'customer' => $customer, 'order' => $firstOrder] = accountsReceivableContext();
+    createArPaymentMethod('cash', 'Efectivo', 1);
+    PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 0,
+        'expected_amount' => 0,
+        'status' => 'open',
+    ]);
+    $secondOrder = $firstOrder->replicate();
+    $secondOrder->order_number = 'SO-AR-SECOND';
+    $secondOrder->save();
+    $customer->update(['current_balance' => 200]);
+    $payload = [
+        'idempotency_key' => (string) Str::uuid(),
+        'amount' => 100,
+        'method' => 'cash',
+        'applications' => [
+            ['document_id' => $firstOrder->id, 'amount' => 50],
+            ['document_id' => $secondOrder->id, 'amount' => 50],
+        ],
+    ];
+
+    $this->actingAs($cashier)
+        ->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", $payload)
+        ->assertCreated();
+    $this->actingAs($cashier)
+        ->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", $payload)
+        ->assertCreated();
+
+    expect($firstOrder->fresh()->payments)->toHaveCount(1)
+        ->and($secondOrder->fresh()->payments)->toHaveCount(1)
+        ->and(AccountPaymentBatch::count())->toBe(1)
+        ->and((float) $customer->fresh()->current_balance)->toBe(100.0);
 });
 
 it('lists credit customer debt and removes it from pending list after full receipt', function () {
@@ -162,6 +309,7 @@ it('lists credit customer debt and removes it from pending list after full recei
         ->assertJsonPath('summary.aging_buckets.current.amount', 100);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 100,
         'method' => 'cash',
         'applications' => [
@@ -193,6 +341,7 @@ it('records partial receivable receipt and keeps remaining document open', funct
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 40,
         'method' => 'cash',
         'applications' => [
@@ -253,6 +402,7 @@ it('exposes receivable dashboard aging and collection metrics for the full filte
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$currentCustomer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 50,
         'method' => 'cash',
         'applications' => [
@@ -312,6 +462,7 @@ it('exposes design ready receivable rows summary trend and recent movements', fu
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$currentCustomer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 50,
         'method' => 'cash',
         'paid_at' => '2026-06-03 12:00:00',
@@ -369,6 +520,7 @@ it('rejects credit as accounts receivable receipt method', function () {
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 10,
         'method' => 'credit',
         'applications' => [
@@ -383,6 +535,7 @@ it('requires an open cash session before recording real receivable receipt', fun
     ['cashier' => $cashier, 'customer' => $customer, 'order' => $order] = accountsReceivableContext();
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 10,
         'method' => 'cash',
         'applications' => [
@@ -406,6 +559,7 @@ it('includes receivable cash receipt in pos session closing', function () {
     ]);
 
     $this->actingAs($cashier)->postJson("/api/v1/accounts-receivable/{$customer->id}/receipts", [
+        'idempotency_key' => (string) Str::uuid(),
         'amount' => 30,
         'method' => 'cash',
         'applications' => [

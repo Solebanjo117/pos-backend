@@ -611,20 +611,4 @@ class CustomerService
             ->limit($limit)
             ->get(['id', 'code', 'name', 'email', 'phone', 'current_balance']);
     }
-
-    /**
-     * Adjust customer balance
-     */
-    public function adjustBalance(Customer $customer, float $amount, string $reason, ?int $userId = null): CustomerTransaction
-    {
-        return $this->createTransaction(
-            $customer,
-            'adjustment',
-            $amount,
-            $reason,
-            null,
-            null,
-            $userId
-        );
-    }
 }

@@ -14,8 +14,9 @@ Route::prefix('pos-sessions')->group(function () {
 
     // Cash movements for the current open session
     Route::post('/current/movements', [CashMovementController::class, 'store'])
-        ->middleware('role:admin,manager,cashier');
-    Route::get('/current/movements', [CashMovementController::class, 'index']);
+        ->middleware(['role:admin,manager,cashier', 'warehouse_context']);
+    Route::get('/current/movements', [CashMovementController::class, 'index'])
+        ->middleware('warehouse_context');
 
     Route::get('/{posSession}', [PosSessionController::class, 'show'])
         ->middleware('role:admin,manager,cashier');

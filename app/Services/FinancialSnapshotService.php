@@ -19,6 +19,8 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 
 class FinancialSnapshotService
 {
@@ -248,21 +250,69 @@ class FinancialSnapshotService
      */
     public function storeCapitalMovement(array $data, ?int $userId = null): array
     {
-        $movement = CapitalMovement::query()->create([
-            'warehouse_id' => $data['warehouse_id'] ?? null,
-            'user_id' => $userId,
+        $idempotencyKey = (string) $data['idempotency_key'];
+        $requestHash = hash('sha256', json_encode([
+            'warehouse_id' => isset($data['warehouse_id']) ? (int) $data['warehouse_id'] : null,
             'movement_type' => $data['movement_type'],
-            'amount' => $this->money($data['amount']),
-            'movement_date' => $data['movement_date'],
-            'reason' => $data['reason'],
-            'notes' => $data['notes'] ?? null,
-            'source_type' => $data['source_type'] ?? null,
-            'source_id' => $data['source_id'] ?? null,
-        ]);
+            'amount' => number_format($this->money($data['amount']), 2, '.', ''),
+            'movement_date' => Carbon::parse($data['movement_date'])->toDateString(),
+            'reason' => trim((string) $data['reason']),
+            'notes' => isset($data['notes']) ? trim((string) $data['notes']) : null,
+        ], JSON_THROW_ON_ERROR));
 
-        $this->rebuildRange($movement->movement_date->toDateString(), now()->toDateString(), $movement->warehouse_id, true);
+        $existing = CapitalMovement::query()->where('idempotency_key', $idempotencyKey)->first();
+        if ($existing) {
+            return $this->capitalMovementIdempotentResult($existing, $requestHash, true);
+        }
 
-        return $this->capitalMovementRow($movement->fresh());
+        try {
+            return DB::transaction(function () use ($data, $userId, $idempotencyKey, $requestHash): array {
+                $movement = CapitalMovement::query()->create([
+                    'warehouse_id' => $data['warehouse_id'] ?? null,
+                    'user_id' => $userId,
+                    'movement_type' => $data['movement_type'],
+                    'amount' => $this->money($data['amount']),
+                    'movement_date' => $data['movement_date'],
+                    'reason' => trim((string) $data['reason']),
+                    'notes' => isset($data['notes']) ? trim((string) $data['notes']) : null,
+                    'source_type' => $data['source_type'] ?? null,
+                    'source_id' => $data['source_id'] ?? null,
+                    'idempotency_key' => $idempotencyKey,
+                    'request_hash' => $requestHash,
+                ]);
+
+                $this->rebuildRange(
+                    $movement->movement_date->toDateString(),
+                    now()->toDateString(),
+                    $movement->warehouse_id,
+                    true,
+                );
+
+                return $this->capitalMovementIdempotentResult($movement->fresh(), $requestHash, false);
+            });
+        } catch (UniqueConstraintViolationException $exception) {
+            $existing = CapitalMovement::query()->where('idempotency_key', $idempotencyKey)->first();
+            if (! $existing) {
+                throw $exception;
+            }
+
+            return $this->capitalMovementIdempotentResult($existing, $requestHash, true);
+        }
+    }
+
+    /**
+     * @return array{movement: array<string, mixed>, replayed: bool}
+     */
+    private function capitalMovementIdempotentResult(CapitalMovement $movement, string $requestHash, bool $replayed): array
+    {
+        if (! hash_equals((string) $movement->request_hash, $requestHash)) {
+            throw new InvalidArgumentException('La clave de idempotencia ya fue utilizada con datos diferentes.');
+        }
+
+        return [
+            'movement' => $this->capitalMovementRow($movement),
+            'replayed' => $replayed,
+        ];
     }
 
     /**

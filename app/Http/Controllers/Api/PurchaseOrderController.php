@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CancelPurchaseOrderRequest;
 use App\Models\PurchaseOrder;
@@ -291,6 +292,7 @@ class PurchaseOrderController extends Controller
             'items.*.quantity_ordered' => 'required|integer|min:1',
             'items.*.unit_cost' => 'required|numeric|min:0',
             'items.*.notes' => 'nullable|string',
+            'idempotency_key' => 'required|uuid',
         ]);
 
         try {
@@ -300,6 +302,10 @@ class PurchaseOrderController extends Controller
                 'message' => 'Backorder (Orden rápida) abastecido exitosamente',
                 'data' => $order,
             ], 201);
+        } catch (IdempotencyConflictException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 409);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => $e->getMessage(),

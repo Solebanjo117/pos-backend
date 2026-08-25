@@ -95,6 +95,7 @@ class CashierQueueController extends Controller
                 'amount' => (float) $source->total,
                 'seller_name' => $source->user?->name,
                 'notes' => $source->notes,
+                'created_at' => $source->created_at?->toISOString(),
             ],
             $source instanceof \App\Models\OperationalExpense => [
                 'id' => $source->id,

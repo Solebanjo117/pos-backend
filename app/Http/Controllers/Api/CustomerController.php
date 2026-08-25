@@ -77,7 +77,7 @@ class CustomerController extends Controller
         $direction = $request->input('order_direction') === 'desc' ? 'desc' : 'asc';
         $customers = $query->orderBy($sortBy, $direction)->paginate($perPage);
         $customers->getCollection()->transform(function (Customer $customer) use ($canManage): Customer {
-            $customer->setAttribute('can_edit', true);
+            $customer->setAttribute('can_edit', $canManage);
             $reason = $this->customerService->customerDeleteBlockReason($customer);
             $customer->setAttribute('can_delete', $canManage && $reason === null);
             $customer->setAttribute('delete_block_reason', $canManage ? $reason : 'No tienes permiso para eliminar clientes.');
@@ -193,22 +193,12 @@ class CustomerController extends Controller
      */
     public function adjustBalance(Request $request, Customer $customer): JsonResponse
     {
-        $validated = $request->validate([
-            'amount' => 'required|numeric',
-            'reason' => 'required|string|max:500',
-        ]);
-
-        $transaction = $this->customerService->adjustBalance(
-            $customer,
-            $validated['amount'],
-            $validated['reason'],
-            auth()->id()
-        );
-
         return response()->json([
-            'message' => 'Saldo ajustado exitosamente',
-            'transaction' => $transaction,
-            'new_balance' => $customer->fresh()->current_balance,
-        ]);
+            'message' => 'Los ajustes directos de saldo fueron retirados. Use un ajuste financiero de Cuentas por cobrar con documento y contrapartida.',
+            'redirect' => sprintf(
+                '/finance/accounting/adjustments?create=1&type=accounts_receivable&customer_id=%d',
+                $customer->id,
+            ),
+        ], 410);
     }
 }

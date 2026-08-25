@@ -115,6 +115,10 @@ class FinancialAccountController extends Controller
             $accounts = FinancialAccount::query()
                 ->where('is_active', true)
                 ->when($type, fn ($query) => $query->where('type', $type))
+                ->when(
+                    ($validated['purpose'] ?? null) === 'settlement',
+                    fn ($query) => $query->where('is_legacy', false)
+                )
                 ->orderBy('name')
                 ->get();
 

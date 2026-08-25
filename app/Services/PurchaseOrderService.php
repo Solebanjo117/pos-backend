@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Helpers\TaxRateHelper;
 use App\Models\InventoryLot;
 use App\Models\ProductBatch;
@@ -11,6 +12,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\Supplier;
 use App\Models\SupplyListItem;
+use Illuminate\Database\QueryException;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -141,6 +143,8 @@ class PurchaseOrderService
                 'tax_amount' => $data['tax_amount'] ?? 0,
                 'shipping_cost' => $data['shipping_cost'] ?? 0,
                 'notes' => $data['notes'] ?? null,
+                'idempotency_key' => $data['idempotency_key'] ?? null,
+                'request_hash' => $data['request_hash'] ?? null,
             ]);
 
             // Add items
@@ -651,33 +655,77 @@ class PurchaseOrderService
      */
     public function quickReceive(array $data): PurchaseOrder
     {
-        return DB::transaction(function () use ($data) {
-            // 1. Create the PO
-            $po = $this->create([
-                'supplier_id' => $data['supplier_id'],
-                'warehouse_id' => $data['warehouse_id'],
-                'order_date' => now()->toDateString(),
-                'expected_date' => now()->toDateString(),
-                'items' => $data['items'],
-                'notes' => 'Generado por Backorder rápido desde POS',
-            ]);
+        $idempotencyKey = (string) $data['idempotency_key'];
+        $requestHash = $this->quickReceiveRequestHash($data);
 
-            // 2. Mark as sent
-            $poSent = $this->send($po->id);
+        if ($existing = PurchaseOrder::query()->where('idempotency_key', $idempotencyKey)->first()) {
+            return $this->replayQuickReceive($existing, $requestHash);
+        }
 
-            // 3. Receive the items immediately
-            $receivePayload = [];
-            foreach ($poSent->items as $item) {
-                // If the user specified an expiry date/batch, we would map it here.
-                // For a quick backorder we only need to receive all that was ordered.
-                $receivePayload[] = [
-                    'item_id' => $item->id,
-                    'quantity_received' => $item->quantity_ordered,
-                ];
+        try {
+            return DB::transaction(function () use ($data, $idempotencyKey, $requestHash) {
+                $po = $this->create([
+                    'supplier_id' => $data['supplier_id'],
+                    'warehouse_id' => $data['warehouse_id'],
+                    'order_date' => now()->toDateString(),
+                    'expected_date' => now()->toDateString(),
+                    'items' => $data['items'],
+                    'notes' => 'Generado por Backorder rápido desde POS',
+                    'idempotency_key' => $idempotencyKey,
+                    'request_hash' => $requestHash,
+                ]);
+
+                $poSent = $this->send($po->id);
+                $receivePayload = [];
+                foreach ($poSent->items as $item) {
+                    $receivePayload[] = [
+                        'item_id' => $item->id,
+                        'quantity_received' => $item->quantity_ordered,
+                    ];
+                }
+
+                return $this->receiveItems($poSent->id, $receivePayload);
+            });
+        } catch (QueryException $exception) {
+            $existing = PurchaseOrder::query()->where('idempotency_key', $idempotencyKey)->first();
+            if ($existing) {
+                return $this->replayQuickReceive($existing, $requestHash);
             }
 
-            return $this->receiveItems($poSent->id, $receivePayload);
-        });
+            throw $exception;
+        }
+    }
+
+    private function replayQuickReceive(PurchaseOrder $purchaseOrder, string $requestHash): PurchaseOrder
+    {
+        if (! $purchaseOrder->request_hash || ! hash_equals($purchaseOrder->request_hash, $requestHash)) {
+            throw new IdempotencyConflictException('La clave de idempotencia ya fue utilizada con datos diferentes.');
+        }
+
+        return $purchaseOrder->fresh(['supplier', 'warehouse', 'items.product', 'items.variant']);
+    }
+
+    private function quickReceiveRequestHash(array $data): string
+    {
+        unset($data['idempotency_key']);
+        $data['user_id'] = Auth::id();
+
+        return hash('sha256', json_encode($this->sortForHash($data), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
+    }
+
+    private function sortForHash(array $value): array
+    {
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        foreach ($value as $key => $item) {
+            if (is_array($item)) {
+                $value[$key] = $this->sortForHash($item);
+            }
+        }
+
+        return $value;
     }
 
     /**

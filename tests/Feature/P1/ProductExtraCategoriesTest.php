@@ -16,7 +16,7 @@ beforeEach(function () {
     ]);
 
     $user = User::factory()->create([
-        'role' => 'seller',
+        'role' => 'buyer',
         'current_warehouse_id' => $warehouse->id,
         'is_active' => true,
     ]);
