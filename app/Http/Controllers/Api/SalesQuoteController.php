@@ -923,7 +923,8 @@ class SalesQuoteController extends Controller
      */
     public function ticket(Request $request, int $id)
     {
-        $type = $request->query('mode', 'standard'); // standard or blind (sin SKU)
+        $validated = $request->validate(['mode' => 'nullable|in:standard,blind']);
+        $type = $validated['mode'] ?? 'standard';
 
         $quote = SalesQuote::with([
             'items.product',
@@ -975,7 +976,8 @@ class SalesQuoteController extends Controller
      */
     public function proforma(Request $request, int $id)
     {
-        $type = $request->query('mode', 'standard');
+        $validated = $request->validate(['mode' => 'nullable|in:standard,blind']);
+        $type = $validated['mode'] ?? 'standard';
 
         $quote = SalesQuote::with([
             'items.product.category',

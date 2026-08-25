@@ -27,6 +27,7 @@ class SalesReturn extends Model
         'money_refund_amount',
         'store_credit_amount',
         'refund_method',
+        'financial_account_id',
         'refund_notes',
         'approved_by',
         'approved_at',
@@ -36,6 +37,12 @@ class SalesReturn extends Model
         'settled_at',
         'settlement_method',
         'settlement_reference',
+        'idempotency_key',
+        'request_hash',
+    ];
+
+    protected $hidden = [
+        'request_hash',
     ];
 
     protected $casts = [
@@ -63,6 +70,11 @@ class SalesReturn extends Model
     public function customer(): BelongsTo
     {
         return $this->belongsTo(Customer::class);
+    }
+
+    public function financialAccount(): BelongsTo
+    {
+        return $this->belongsTo(FinancialAccount::class);
     }
 
     public function user(): BelongsTo

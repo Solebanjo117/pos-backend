@@ -10,6 +10,7 @@ use App\Http\Requests\OpenPosSessionRequest;
 use App\Models\PosSession;
 use App\Services\PosSessionOperationalDetailService;
 use App\Services\PosSessionReconciliationService;
+use App\Support\RegionalDateRange;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Auth;
@@ -368,11 +369,13 @@ class PosSessionController extends Controller
     private function applySessionDateRange(Builder $query, string $column, IndexPosSessionRequest $request): void
     {
         if ($request->filled('date_from')) {
-            $query->whereDate($column, '>=', $request->date_from);
+            [$from] = RegionalDateRange::utcBounds($request->date_from, $request->date_from);
+            $query->where($column, '>=', $from);
         }
 
         if ($request->filled('date_to')) {
-            $query->whereDate($column, '<=', $request->date_to);
+            [, $to] = RegionalDateRange::utcBounds($request->date_to, $request->date_to);
+            $query->where($column, '<=', $to);
         }
     }
 

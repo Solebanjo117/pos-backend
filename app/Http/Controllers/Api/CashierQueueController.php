@@ -113,6 +113,8 @@ class CashierQueueController extends Controller
                 'party' => $source->customer?->name ?? 'Cliente general',
                 'amount' => (float) $source->money_refund_amount,
                 'refund_method' => $source->refund_method,
+                'financial_account_id' => $source->financial_account_id,
+                'financial_account' => $source->financialAccount?->only(['id', 'name', 'masked_number']),
                 'money_refund_amount' => (float) $source->money_refund_amount,
                 'receivable_applied_amount' => (float) $source->receivable_applied_amount,
                 'store_credit_amount' => (float) $source->store_credit_amount,

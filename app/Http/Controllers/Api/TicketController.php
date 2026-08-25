@@ -18,7 +18,8 @@ class TicketController extends Controller
      */
     public function ticket(Request $request, int $id)
     {
-        $type = $request->query('type', 'internal'); // 'internal' or 'client'
+        $validated = $request->validate(['type' => 'nullable|in:internal,client']);
+        $type = $validated['type'] ?? 'internal';
 
         $order = SalesOrder::with([
             'items.product',
@@ -115,7 +116,8 @@ class TicketController extends Controller
      */
     public function proforma(Request $request, int $id)
     {
-        $type = $request->query('type', 'internal'); // 'internal' or 'client'
+        $validated = $request->validate(['type' => 'nullable|in:internal,client']);
+        $type = $validated['type'] ?? 'internal';
 
         $order = SalesOrder::with([
             'items.product.category',

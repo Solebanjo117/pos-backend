@@ -818,6 +818,45 @@ it('filters open sessions by opened date and closed sessions by closed date', fu
     expect(collect($closedResponse->json('data.data'))->pluck('id')->all())->toBe([$closedSession->id]);
 });
 
+it('filters session history using the configured regional calendar day', function () {
+    $warehouse = Warehouse::create([
+        'code' => 'W-SESSION-TIMEZONE',
+        'name' => 'Warehouse Session Timezone',
+    ]);
+
+    $manager = User::factory()->create([
+        'role' => 'manager',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $manager->warehouses()->attach($warehouse->id);
+
+    $insidePanamaDay = PosSession::create([
+        'user_id' => $manager->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-08-25 03:30:00',
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    PosSession::create([
+        'user_id' => User::factory()->create(['role' => 'cashier'])->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => '2026-08-25 05:30:00',
+        'opening_amount' => 100,
+        'expected_amount' => 100,
+        'status' => 'open',
+    ]);
+
+    $response = $this->actingAs($manager)
+        ->getJson('/api/v1/pos-sessions?status=open&date_from=2026-08-24&date_to=2026-08-24');
+
+    $response->assertOk();
+    expect(collect($response->json('data.data'))->pluck('id')->all())
+        ->toBe([$insidePanamaDay->id]);
+});
+
 it('validates pos session index filters before querying', function () {
     $warehouse = Warehouse::create([
         'code' => 'W-SESSION-FILTER-VALIDATION',

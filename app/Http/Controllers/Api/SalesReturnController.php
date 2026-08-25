@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreSalesReturnRequest;
 use App\Models\PaymentMethod;
@@ -12,9 +13,11 @@ use App\Services\SalesReturnOperationalDetailService;
 use App\Services\SalesReturnService;
 use App\Services\TransactionTraceService;
 use Carbon\Carbon;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class SalesReturnController extends Controller
@@ -181,19 +184,49 @@ class SalesReturnController extends Controller
         $order = SalesOrder::with('items.product')->findOrFail($orderId);
 
         try {
-            $return = $this->salesReturnService->createForOrder($order, $request->validated(), $request->user());
+            $validated = $request->validated();
+            $return = DB::transaction(function () use ($order, $validated, $request): SalesReturn {
+                $return = $this->salesReturnService->createForOrder($order, $validated, $request->user());
+
+                if (($validated['approve_immediately'] ?? false) && $return->status === 'pending') {
+                    $return = $this->salesReturnService->approve($return, $request->user());
+                }
+
+                return $return;
+            });
 
             return response()->json([
-                'message' => 'Devolución creada exitosamente.',
+                'message' => ($validated['approve_immediately'] ?? false)
+                    ? 'Devolución creada y aprobada exitosamente.'
+                    : 'Devolución creada exitosamente.',
                 'data' => $return,
             ], 201);
+        } catch (IdempotencyConflictException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 409);
+        } catch (QueryException $exception) {
+            if (in_array((string) $exception->getCode(), ['23000', '23505'], true)) {
+                try {
+                    $existing = $this->salesReturnService->replayForRequest($order, $request->validated(), $request->user());
+                    if ($existing) {
+                        return response()->json([
+                            'message' => 'La devolución ya había sido procesada.',
+                            'data' => $existing,
+                        ]);
+                    }
+                } catch (IdempotencyConflictException $conflict) {
+                    return response()->json(['message' => $conflict->getMessage()], 409);
+                }
+            }
+
+            Log::error('Error de base de datos al crear devolución', ['exception' => $exception]);
+
+            return response()->json(['message' => 'Error al crear la devolución.'], 500);
         } catch (ValidationException $exception) {
             return $this->validationError($exception);
         } catch (\Exception $exception) {
-            return response()->json([
-                'message' => 'Error al crear la devolución.',
-                'error' => $exception->getMessage().' en la línea '.$exception->getLine().' de '.basename($exception->getFile()),
-            ], 500);
+            Log::error('Error al crear devolución', ['exception' => $exception]);
+
+            return response()->json(['message' => 'Error al crear la devolución.'], 500);
         }
     }
 
@@ -211,10 +244,9 @@ class SalesReturnController extends Controller
         } catch (ValidationException $exception) {
             return $this->validationError($exception);
         } catch (\Exception $exception) {
-            return response()->json([
-                'message' => 'Error al aprobar la devolución.',
-                'error' => $exception->getMessage(),
-            ], 500);
+            Log::error('Error al aprobar devolución', ['exception' => $exception]);
+
+            return response()->json(['message' => 'Error al aprobar la devolución.'], 500);
         }
     }
 

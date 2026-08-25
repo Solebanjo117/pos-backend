@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AccountLedgerEntry;
+use App\Models\AccountPaymentBatch;
 use App\Models\CashierQueueEntry;
 use App\Models\CashMovement;
 use App\Models\Customer;
@@ -54,6 +55,7 @@ class TransactionTraceRegistry
         'cash_movement' => ['model' => CashMovement::class, 'roles' => ['admin', 'manager', 'cashier']],
         'customer_transaction' => ['model' => CustomerTransaction::class, 'roles' => ['admin', 'manager', 'seller', 'cashier']],
         'account_ledger_entry' => ['model' => AccountLedgerEntry::class, 'roles' => ['admin', 'manager', 'buyer', 'seller', 'cashier']],
+        'account_payment_batch' => ['model' => AccountPaymentBatch::class, 'roles' => ['admin', 'manager', 'buyer', 'seller', 'cashier']],
         'customer' => ['model' => Customer::class, 'roles' => ['admin', 'manager', 'seller', 'cashier']],
         'supplier' => ['model' => Supplier::class, 'roles' => ['admin', 'manager', 'buyer']],
         'user' => ['model' => User::class, 'roles' => ['admin']],

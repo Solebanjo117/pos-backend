@@ -502,6 +502,7 @@ class SalesOrderController extends Controller
             $validated = $request->validate([
                 'reason' => ['required', 'string', 'min:3', 'max:1000'],
                 'refund_method' => ['nullable', 'string', 'max:80'],
+                'financial_account_id' => ['nullable', 'integer', 'exists:financial_accounts,id'],
                 'notes' => ['nullable', 'string', 'max:2000'],
             ]);
 
