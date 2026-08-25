@@ -49,7 +49,12 @@ beforeEach(function (): void {
         'name' => 'Vendedor Uno',
         'is_active' => true,
     ]);
-    $this->customer = Customer::create(['code' => 'CLI-QF', 'name' => 'Cliente Cola', 'status' => 'active']);
+    $this->customer = Customer::create([
+        'code' => 'CLI-QF',
+        'name' => 'Cliente Cola',
+        'status' => 'active',
+        'credit_limit' => 500,
+    ]);
     $this->product = Product::create(['name' => 'Producto Cola', 'type' => 'simple', 'status' => 'active', 'sku_base' => 'COLA-1']);
     $brand = Brand::create(['name' => 'Marca Cola', 'status' => 'active']);
     $this->variant = ProductVariant::create([

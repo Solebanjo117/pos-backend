@@ -38,7 +38,9 @@ it('prevents opening a second cash session for the same user and warehouse', fun
     $payload = ['warehouse_id' => $warehouse->id, 'opening_amount' => 100];
 
     $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/open', $payload)->assertCreated();
-    $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/open', $payload)->assertStatus(400);
+    $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/open', $payload)
+        ->assertConflict()
+        ->assertJsonPath('message', 'Ya existe una sesion abierta para este usuario en esta sucursal.');
 
     expect(PosSession::query()->where('user_id', $cashier->id)->where('status', 'open')->count())->toBe(1);
 });

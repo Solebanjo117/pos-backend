@@ -18,6 +18,7 @@ class SalesOrder extends Model
     protected $fillable = [
         'order_number',
         'idempotency_key',
+        'request_hash',
         'customer_id',
         'customer_vehicle_id',
         'referred_by_customer_id',
@@ -58,6 +59,8 @@ class SalesOrder extends Model
         'business_datetime' => 'datetime',
         'cancelled_at' => 'datetime',
     ];
+
+    protected $hidden = ['request_hash'];
 
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'total_returned'];
 
@@ -409,7 +412,7 @@ class SalesOrder extends Model
      * Register a payment (cash, card, transfer, or credit).
      * Updates payment_status and, for credit payments, adjusts customer balance.
      */
-    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false, ?string $referenceNumber = null, ?int $financialAccountId = null): SalesOrderPayment
+    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false, ?string $referenceNumber = null, ?int $financialAccountId = null, ?string $idempotencyKey = null, ?string $requestHash = null): SalesOrderPayment
     {
         $payment = $this->payments()->create([
             'amount' => $amount,
@@ -419,11 +422,13 @@ class SalesOrder extends Model
             'paid_at' => $paidAt ?? now(),
             'created_by' => Auth::id(),
             'financial_account_id' => $financialAccountId,
+            'idempotency_key' => $idempotencyKey,
+            'request_hash' => $requestHash,
         ]);
 
         // Recalculate payment_status
         $paid = (float) $this->payments()
-            ->whereNotIn('method', PaymentMethod::DEFERRED_CODES)
+            ->whereNotIn('method', ['credit', 'supplier_credit'])
             ->sum('amount');
         if ($paid <= 0) {
             $this->payment_status = 'pending';

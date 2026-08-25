@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreAccountReceiptRequest;
 use App\Models\Customer;
@@ -58,6 +59,8 @@ class AccountsReceivableController extends Controller
             }
 
             return response()->json(['message' => $exception->getMessage()], 422);
+        } catch (IdempotencyConflictException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 409);
         }
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
 use App\Models\OperationalExpense;
 use App\Models\PaymentMethod;
@@ -85,7 +86,17 @@ class PosSessionReconciliationService
     {
         $query = SalesOrderPayment::query()
             ->where('created_by', $session->user_id)
-            ->where('paid_at', '>=', $session->opened_at);
+            ->where('paid_at', '>=', $session->opened_at)
+            ->where(function ($query) use ($session): void {
+                $query->whereHas('salesOrder', fn ($query) => $query->where('pos_session_id', $session->id))
+                    ->orWhereHas('salesReturn', fn ($query) => $query->where('warehouse_id', $session->warehouse_id));
+            })
+            ->where(function ($query): void {
+                $query->whereNull('reference_number')
+                    ->orWhereNotIn('reference_number', AccountPaymentBatch::query()
+                        ->whereNotNull('batch_number')
+                        ->select('batch_number'));
+            });
 
         if ($until) {
             $query->where('paid_at', '<=', $until);
@@ -102,6 +113,23 @@ class PosSessionReconciliationService
                 ],
             ])
             ->all();
+
+        $accountReceipts = AccountPaymentBatch::query()
+            ->where('pos_session_id', $session->id)
+            ->where('direction', 'incoming')
+            ->where('paid_at', '>=', $session->opened_at)
+            ->when($until, fn ($query, Carbon $until) => $query->where('paid_at', '<=', $until))
+            ->selectRaw('method, SUM(amount) as payments')
+            ->groupBy('method')
+            ->get();
+
+        foreach ($accountReceipts as $receipt) {
+            $method = $receipt->method;
+            $salesPayments[$method] ??= ['payments' => 0.0, 'withdrawals' => 0.0];
+            $salesPayments[$method]['payments'] = $this->money(
+                (float) $salesPayments[$method]['payments'] + (float) $receipt->payments
+            );
+        }
 
         $purchaseWithdrawals = PurchaseOrderPayment::query()
             ->where('pos_session_id', $session->id)

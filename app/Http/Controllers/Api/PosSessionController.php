@@ -106,7 +106,7 @@ class PosSessionController extends Controller
             return response()->json([
                 'message' => 'Ya existe una sesion abierta para este usuario en esta sucursal.',
                 'data' => $result['session'],
-            ], 400);
+            ], 409);
         }
 
         return response()->json([
@@ -167,8 +167,8 @@ class PosSessionController extends Controller
 
         if ($result['status'] === 'not_found') {
             return response()->json([
-                'message' => 'No hay una sesion abierta activa para esta sucursal.',
-            ], 404);
+                'message' => 'La caja ya fue cerrada o no existe una sesion abierta para esta sucursal.',
+            ], 409);
         }
 
         if ($result['status'] === 'validation_error') {

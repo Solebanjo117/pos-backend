@@ -3,6 +3,7 @@
 use App\Models\Brand;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\PosSession;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\ProductPricing;
@@ -33,6 +34,15 @@ function setupCustomerBalanceTest(): array
         'is_active' => true,
     ]);
     $user->warehouses()->attach($warehouse->id);
+
+    PosSession::create([
+        'user_id' => $user->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now(),
+        'opening_amount' => 0,
+        'expected_amount' => 0,
+        'status' => 'open',
+    ]);
 
     $customer = Customer::create([
         'code' => 'CUST-'.uniqid(),

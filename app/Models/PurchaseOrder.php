@@ -30,6 +30,8 @@ class PurchaseOrder extends Model
         'total',
         'notes',
         'business_datetime',
+        'idempotency_key',
+        'request_hash',
     ];
 
     protected $casts = [
@@ -43,6 +45,8 @@ class PurchaseOrder extends Model
         'total' => 'decimal:2',
         'business_datetime' => 'datetime',
     ];
+
+    protected $hidden = ['request_hash'];
 
     protected $appends = ['formatted_total', 'status_label', 'amount_paid', 'amount_due', 'payment_status_label', 'display_name'];
 

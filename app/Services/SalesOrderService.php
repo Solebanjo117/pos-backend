@@ -2,13 +2,16 @@
 
 namespace App\Services;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Helpers\TaxRateHelper;
+use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesQuote;
+use Illuminate\Database\QueryException;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -85,197 +88,304 @@ class SalesOrderService
      */
     public function create(array $data): SalesOrder
     {
-        return DB::transaction(function () use ($data) {
-            // Idempotency: replay the already-created order for this key (double submit / retry / concurrency).
-            $idempotencyKey = $data['idempotency_key'] ?? null;
-            if ($idempotencyKey) {
-                $replay = SalesOrder::query()->where('idempotency_key', $idempotencyKey)->first();
-                if ($replay) {
-                    return $replay;
-                }
-            }
+        $idempotencyKey = $data['idempotency_key'] ?? null;
+        $requestHash = $idempotencyKey ? $this->checkoutRequestHash($data) : null;
 
-            $isCashier = Auth::user()?->role === 'cashier';
-            $sourceQuote = null;
-
-            if ($isCashier) {
-                [$data, $sourceQuote, $existingOrder] = $this->prepareCashierCheckout($data);
-                if ($existingOrder) {
-                    $this->cashierQueueService->completeForSource(
-                        SalesQuote::class,
-                        $sourceQuote->id,
-                        Auth::user(),
-                        (float) $existingOrder->total,
-                    );
-
-                    return $existingOrder;
-                }
-            }
-
-            $userId = $isCashier ? Auth::id() : ($data['user_id'] ?? Auth::id());
-
-            if (! $userId) {
-                throw new \Exception('No se pudo determinar el usuario. Por favor, inicie sesión nuevamente.');
-            }
-
-            // Determine warehouse context for the order
-            $warehouseId = $data['warehouse_id'] ?? null;
-            if (! $warehouseId && isset($data['items']) && count($data['items']) > 0) {
-                $warehouseId = $data['items'][0]['warehouse_id'] ?? null;
-            }
-
-            // Check for active pos session for this user and warehouse
-            $sessionQuery = PosSession::where('user_id', $userId)
-                ->where('status', 'open');
-
-            if ($warehouseId) {
-                $sessionQuery->where('warehouse_id', $warehouseId);
-            }
-
-            $activeSession = $sessionQuery->first();
-
-            // Determine requested status to apply after adding items
-            $requestedStatus = $data['status'] ?? 'draft';
-
-            // Create order
-            $order = SalesOrder::create([
-                'idempotency_key' => $idempotencyKey,
-                'customer_id' => $data['customer_id'] ?? null,
-                'customer_vehicle_id' => $data['customer_vehicle_id'] ?? null,
-                'referred_by_customer_id' => $data['referred_by_customer_id'] ?? null,
-                'user_id' => $userId,
-                'pos_session_id' => $activeSession ? $activeSession->id : null,
-                'date' => $data['date'] ?? now(),
-                'status' => 'draft', // Force draft initially so items can be added
-                'payment_status' => $data['payment_status'] ?? 'pending',
-                'payment_method' => $data['payment_method'] ?? null,
-                'discount_amount' => $data['discount_amount'] ?? 0,
-                'shipping_cost' => $data['shipping_cost'] ?? 0,
-                'notes' => $data['notes'] ?? null,
-                'audit_logs' => $data['audit_logs'] ?? null,
-            ]);
-
-            // Add items if provided
-            if (isset($data['items']) && is_array($data['items'])) {
-                foreach ($data['items'] as $itemData) {
-                    $this->addItem($order->id, $itemData);
-                }
-            }
-
-            $order->refresh();
-
-            // ── Reserve stock for draft/pending orders (only what is available) ──
-            if (in_array($requestedStatus, ['draft', 'pending'])) {
-                foreach ($order->items as $item) {
-                    if ($item->is_custom_line) {
-                        continue;
-                    }
-
-                    $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
-                    if ($item->variant_id) {
-                        $query->where('variant_id', $item->variant_id);
-                    } else {
-                        $query->where('product_id', $item->product_id)->whereNull('variant_id');
-                    }
-                    $inventory = $query->first();
-
-                    $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
-                    $requested = (int) $item->quantity;
-                    $reserveAmount = min($requested, $available);
-
-                    if ($requested > $available) {
-                        $productName = $item->product->name ?? 'producto';
-                        $order->stockWarnings[] = [
-                            'type' => 'stock_shortage',
-                            'product_id' => $item->product_id,
-                            'variant_id' => $item->variant_id,
-                            'warehouse_id' => $item->warehouse_id,
-                            'product_name' => $productName,
-                            'requested_quantity' => $requested,
-                            'available_quantity' => $available,
-                            'missing_quantity' => $requested - $available,
-                            'message' => "{$productName}: solicitado {$requested}, disponible {$available}, faltante ".($requested - $available),
-                        ];
-                    }
-
-                    if ($inventory && $reserveAmount > 0) {
-                        $inventory->quantity_available -= $reserveAmount;
-                        $inventory->quantity_reserved += $reserveAmount;
-                        $inventory->save();
+        try {
+            return DB::transaction(function () use ($data, $idempotencyKey, $requestHash) {
+                // Idempotency: replay the already-created order for this key (double submit / retry / concurrency).
+                if ($idempotencyKey) {
+                    $replay = SalesOrder::query()->where('idempotency_key', $idempotencyKey)->first();
+                    if ($replay) {
+                        return $this->assertIdempotentReplay($replay, $requestHash);
                     }
                 }
-            }
 
-            // Handle payments from POS (multiple or single)
-            if (isset($data['payments']) && is_array($data['payments'])) {
-                foreach ($data['payments'] as $payment) {
-                    if (isset($payment['amount']) && (float) $payment['amount'] > 0) {
+                $isCashier = Auth::user()?->role === 'cashier';
+                $sourceQuote = null;
+
+                if ($isCashier) {
+                    [$data, $sourceQuote, $existingOrder] = $this->prepareCashierCheckout($data);
+                    if ($existingOrder) {
+                        $this->cashierQueueService->completeForSource(
+                            SalesQuote::class,
+                            $sourceQuote->id,
+                            Auth::user(),
+                            (float) $existingOrder->total,
+                        );
+
+                        return $existingOrder;
+                    }
+                }
+
+                $userId = $isCashier ? Auth::id() : ($data['user_id'] ?? Auth::id());
+
+                if (! $userId) {
+                    throw new \Exception('No se pudo determinar el usuario. Por favor, inicie sesión nuevamente.');
+                }
+
+                // Determine warehouse context for the order
+                $warehouseId = $data['warehouse_id'] ?? null;
+                if (! $warehouseId && isset($data['items']) && count($data['items']) > 0) {
+                    $warehouseId = $data['items'][0]['warehouse_id'] ?? null;
+                }
+
+                // Check for active pos session for this user and warehouse
+                $sessionQuery = PosSession::where('user_id', $userId)
+                    ->where('status', 'open');
+
+                if ($warehouseId) {
+                    $sessionQuery->where('warehouse_id', $warehouseId);
+                }
+
+                $activeSession = $sessionQuery->lockForUpdate()->first();
+
+                // Determine requested status to apply after adding items
+                $requestedStatus = $data['status'] ?? 'draft';
+
+                // Create order
+                $order = SalesOrder::create([
+                    'idempotency_key' => $idempotencyKey,
+                    'request_hash' => $requestHash,
+                    'customer_id' => $data['customer_id'] ?? null,
+                    'customer_vehicle_id' => $data['customer_vehicle_id'] ?? null,
+                    'referred_by_customer_id' => $data['referred_by_customer_id'] ?? null,
+                    'user_id' => $userId,
+                    'pos_session_id' => $activeSession ? $activeSession->id : null,
+                    'date' => $data['date'] ?? now(),
+                    'status' => 'draft', // Force draft initially so items can be added
+                    'payment_status' => $data['payment_status'] ?? 'pending',
+                    'payment_method' => $data['payment_method'] ?? null,
+                    'discount_amount' => $data['discount_amount'] ?? 0,
+                    'shipping_cost' => $data['shipping_cost'] ?? 0,
+                    'notes' => $data['notes'] ?? null,
+                    'audit_logs' => $data['audit_logs'] ?? null,
+                ]);
+
+                // Add items if provided
+                if (isset($data['items']) && is_array($data['items'])) {
+                    foreach ($data['items'] as $itemData) {
+                        $this->addItem($order->id, $itemData);
+                    }
+                }
+
+                $order->refresh();
+
+                $customer = ! empty($data['customer_id'])
+                    ? \App\Models\Customer::query()->lockForUpdate()->find($data['customer_id'])
+                    : null;
+                $data['payments'] = $this->validateCheckoutPayments($order, $data, $customer, $activeSession);
+
+                // ── Reserve stock for draft/pending orders (only what is available) ──
+                if (in_array($requestedStatus, ['draft', 'pending'])) {
+                    foreach ($order->items as $item) {
+                        if ($item->is_custom_line) {
+                            continue;
+                        }
+
+                        $query = ProductInventory::where('warehouse_id', $item->warehouse_id);
+                        if ($item->variant_id) {
+                            $query->where('variant_id', $item->variant_id);
+                        } else {
+                            $query->where('product_id', $item->product_id)->whereNull('variant_id');
+                        }
+                        $inventory = $query->first();
+
+                        $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
+                        $requested = (int) $item->quantity;
+                        $reserveAmount = min($requested, $available);
+
+                        if ($requested > $available) {
+                            $productName = $item->product->name ?? 'producto';
+                            $order->stockWarnings[] = [
+                                'type' => 'stock_shortage',
+                                'product_id' => $item->product_id,
+                                'variant_id' => $item->variant_id,
+                                'warehouse_id' => $item->warehouse_id,
+                                'product_name' => $productName,
+                                'requested_quantity' => $requested,
+                                'available_quantity' => $available,
+                                'missing_quantity' => $requested - $available,
+                                'message' => "{$productName}: solicitado {$requested}, disponible {$available}, faltante ".($requested - $available),
+                            ];
+                        }
+
+                        if ($inventory && $reserveAmount > 0) {
+                            $inventory->quantity_available -= $reserveAmount;
+                            $inventory->quantity_reserved += $reserveAmount;
+                            $inventory->save();
+                        }
+                    }
+                }
+
+                // Handle payments from POS (multiple or single)
+                if (isset($data['payments']) && is_array($data['payments'])) {
+                    foreach ($data['payments'] as $payment) {
+                        if (isset($payment['amount']) && (float) $payment['amount'] > 0) {
+                            $order->addPayment(
+                                amount: (float) $payment['amount'],
+                                method: $payment['method'] ?? 'cash',
+                                notes: $payment['notes'] ?? 'Pago POS',
+                                isCheckout: true,
+                                referenceNumber: $payment['reference_number'] ?? null,
+                                financialAccountId: $payment['financial_account_id'] ?? null,
+                            );
+                        }
+                    }
+                } elseif (isset($data['initial_payment']) && isset($data['payment_method'])) {
+                    // Legacy support for single payment
+                    if ((float) $data['initial_payment'] > 0) {
                         $order->addPayment(
-                            amount: (float) $payment['amount'],
-                            method: $payment['method'] ?? 'cash',
-                            notes: $payment['notes'] ?? 'Pago POS',
-                            isCheckout: true,
-                            referenceNumber: $payment['reference_number'] ?? null,
+                            amount: (float) $data['initial_payment'],
+                            method: $data['payment_method'],
+                            notes: 'Pago inicial POS',
+                            isCheckout: true
+                        );
+                    }
+                } else {
+                    // Legacy support if no initial payment was passed but payment_status is 'paid'
+                    if (($data['payment_status'] ?? null) === 'paid') {
+                        $order->addPayment(
+                            amount: $order->total,
+                            method: $data['payment_method'] ?? 'cash',
+                            notes: 'Pago completo POS',
+                            isCheckout: true
                         );
                     }
                 }
-            } elseif (isset($data['initial_payment']) && isset($data['payment_method'])) {
-                // Legacy support for single payment
-                if ((float) $data['initial_payment'] > 0) {
-                    $order->addPayment(
-                        amount: (float) $data['initial_payment'],
-                        method: $data['payment_method'],
-                        notes: 'Pago inicial POS',
-                        isCheckout: true
-                    );
+
+                // Auto-confirm if status is not draft
+                if (in_array($requestedStatus, ['confirmed', 'processing', 'completed'])) {
+                    $order->confirm();
+                } else {
+                    $order->update(['status' => $requestedStatus]);
                 }
-            } else {
-                // Legacy support if no initial payment was passed but payment_status is 'paid'
-                if (($data['payment_status'] ?? null) === 'paid') {
-                    $order->addPayment(
-                        amount: $order->total,
-                        method: $data['payment_method'] ?? 'cash',
-                        notes: 'Pago completo POS',
-                        isCheckout: true
-                    );
+
+                // ── Convert Sales Quote if applicable ──
+                if (! empty($data['source_quote_id'])) {
+                    $quote = $sourceQuote ?? SalesQuote::query()->lockForUpdate()->find($data['source_quote_id']);
+                    if ($quote) {
+                        $quote->update([
+                            'status' => 'collected',
+                            'converted_order_id' => $order->id,
+                        ]);
+
+                        activity()
+                            ->performedOn($quote)
+                            ->causedBy(Auth::user())
+                            ->withProperties(['sales_order_id' => $order->id])
+                            ->log('cashier_collected');
+
+                        $this->cashierQueueService->completeForSource(
+                            SalesQuote::class,
+                            $quote->id,
+                            Auth::user(),
+                            (float) $order->total,
+                        );
+                    }
                 }
-            }
 
-            // Auto-confirm if status is not draft
-            if (in_array($requestedStatus, ['confirmed', 'processing', 'completed'])) {
-                $order->confirm();
-            } else {
-                $order->update(['status' => $requestedStatus]);
-            }
+                $order->refresh();
 
-            // ── Convert Sales Quote if applicable ──
-            if (! empty($data['source_quote_id'])) {
-                $quote = $sourceQuote ?? SalesQuote::query()->lockForUpdate()->find($data['source_quote_id']);
-                if ($quote) {
-                    $quote->update([
-                        'status' => 'collected',
-                        'converted_order_id' => $order->id,
-                    ]);
-
-                    activity()
-                        ->performedOn($quote)
-                        ->causedBy(Auth::user())
-                        ->withProperties(['sales_order_id' => $order->id])
-                        ->log('cashier_collected');
-
-                    $this->cashierQueueService->completeForSource(
-                        SalesQuote::class,
-                        $quote->id,
-                        Auth::user(),
-                        (float) $order->total,
-                    );
+                return $order;
+            });
+        } catch (QueryException $exception) {
+            if ($idempotencyKey && ($exception->errorInfo[0] ?? null) === '23505') {
+                $replay = SalesOrder::query()->where('idempotency_key', $idempotencyKey)->first();
+                if ($replay) {
+                    return $this->assertIdempotentReplay($replay, $requestHash);
                 }
             }
 
-            $order->refresh();
+            throw $exception;
+        }
+    }
 
-            return $order;
-        });
+    private function assertIdempotentReplay(SalesOrder $order, ?string $requestHash): SalesOrder
+    {
+        if ($order->request_hash && $requestHash && ! hash_equals($order->request_hash, $requestHash)) {
+            throw new IdempotencyConflictException('La clave de idempotencia ya fue utilizada con datos diferentes.');
+        }
+
+        return $order->loadMissing(['customer', 'items.product', 'payments']);
+    }
+
+    private function checkoutRequestHash(array $data): string
+    {
+        unset($data['idempotency_key'], $data['audit_logs']);
+        $normalize = function (array $value) use (&$normalize): array {
+            if (! array_is_list($value)) {
+                ksort($value);
+            }
+            foreach ($value as $key => $item) {
+                if (is_array($item)) {
+                    $value[$key] = $normalize($item);
+                }
+            }
+
+            return $value;
+        };
+
+        return hash('sha256', json_encode($normalize($data), JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_UNICODE));
+    }
+
+    private function validateCheckoutPayments(SalesOrder $order, array $data, ?\App\Models\Customer $customer, ?PosSession $session): array
+    {
+        $payments = collect($data['payments'] ?? []);
+        if ($payments->isEmpty() && isset($data['initial_payment'], $data['payment_method'])) {
+            $payments = collect([[
+                'method' => $data['payment_method'],
+                'amount' => (float) $data['initial_payment'],
+                'financial_account_id' => $data['financial_account_id'] ?? null,
+            ]]);
+        }
+
+        if ($payments->isEmpty()) {
+            return [];
+        }
+
+        $tendered = round((float) $payments->sum(fn (array $payment): float => (float) ($payment['amount'] ?? 0)), 2);
+        if ($tendered > (float) $order->total + 0.01) {
+            $excess = round($tendered - (float) $order->total, 2);
+            $cashIndex = $payments->search(fn (array $payment): bool => PaymentMethod::liquidityBucket($payment['method'] ?? null) === PaymentMethod::LIQUIDITY_CASH
+                && (float) ($payment['amount'] ?? 0) >= $excess);
+            if ($cashIndex === false) {
+                throw ValidationException::withMessages(['payments' => 'Los pagos electrónicos o diferidos no pueden exceder el total de la venta.']);
+            }
+            $cashPayment = $payments->get($cashIndex);
+            $cashPayment['amount'] = round((float) $cashPayment['amount'] - $excess, 2);
+            $payments->put($cashIndex, $cashPayment);
+        }
+
+        $cashAmount = (float) $payments->sum(fn (array $payment): float => PaymentMethod::liquidityBucket($payment['method'] ?? null) === PaymentMethod::LIQUIDITY_CASH ? (float) $payment['amount'] : 0.0);
+        if ($cashAmount > 0 && ! $session) {
+            throw ValidationException::withMessages(['pos_session' => 'Debe abrir Caja en esta sucursal antes de recibir efectivo.']);
+        }
+
+        $storeCredit = (float) $payments->where('method', 'store_credit')->sum('amount');
+        if ($storeCredit > 0 && (! $customer || $storeCredit > $customer->store_credit + 0.01)) {
+            throw ValidationException::withMessages(['payments' => 'El saldo a favor aplicado excede el disponible del cliente.']);
+        }
+
+        $realMoney = (float) $payments->sum(fn (array $payment): float => PaymentMethod::isDeferredCode($payment['method'] ?? null) ? 0.0 : (float) $payment['amount']);
+        $receivable = round(max(0, (float) $order->total - $realMoney - $storeCredit), 2);
+        $declaredCredit = round((float) $payments->where('method', 'credit')->sum('amount'), 2);
+        if ($declaredCredit > 0 && abs($declaredCredit - $receivable) > 0.01) {
+            throw ValidationException::withMessages(['payments' => 'El monto indicado como crédito debe coincidir con el saldo pendiente de la venta.']);
+        }
+        if ($receivable <= 0) {
+            return $payments->values()->all();
+        }
+
+        if (! $customer) {
+            throw ValidationException::withMessages(['customer_id' => 'Selecciona un cliente para registrar el saldo en cuentas por cobrar.']);
+        }
+
+        if ($receivable > $customer->getAvailableCredit() + 0.01) {
+            throw ValidationException::withMessages(['payments' => 'El saldo a crédito excede el crédito disponible del cliente.']);
+        }
+
+        return $payments->values()->all();
     }
 
     /**

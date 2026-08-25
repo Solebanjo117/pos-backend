@@ -12,6 +12,7 @@ use App\Http\Requests\UpdateProductRequest;
 use App\Http\Resources\ProductDetailResource;
 use App\Http\Resources\ProductResource;
 use App\Models\Product;
+use App\Models\ProductPricing;
 use App\Models\ProductVehicleCompatibility;
 use App\Services\ProductCodeService;
 use App\Services\ProductProfileService;
@@ -33,6 +34,14 @@ class ProductController extends Controller
      */
     public function index(Request $request): AnonymousResourceCollection
     {
+        $request->validate([
+            'in_stock' => ['nullable', 'boolean'],
+            'has_stock' => ['nullable', 'boolean'],
+            'min_price' => ['nullable', 'numeric', 'min:0'],
+            'max_price' => ['nullable', 'numeric', 'min:0', 'gte:min_price'],
+            'sort' => ['nullable', 'in:name_asc,price_asc,price_desc,sku_asc,newest'],
+        ]);
+
         $perPage = min($request->get('per_page', 20), 50);
 
         // Archive filter: 'true' = only trashed, 'all' = withTrashed, default = active only
@@ -217,16 +226,45 @@ class ProductController extends Controller
             }
         }
 
-        if ($request->boolean('has_stock')) {
-            $query->whereHas('inventory', function ($q) {
-                $q->where('stock_available', '>', 0);
+        if ($request->boolean('has_stock') || $request->boolean('in_stock')) {
+            $query->whereHas('variants.inventory', function ($q) use ($warehouseId) {
+                $q->where('quantity_available', '>', 0)
+                    ->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId));
+            });
+        }
+
+        if ($request->filled('min_price') || $request->filled('max_price')) {
+            $query->where(function ($query) use ($request): void {
+                $applyPriceRange = function ($pricingQuery) use ($request): void {
+                    $pricingQuery
+                        ->when($request->filled('min_price'), fn ($query) => $query->where('base_price', '>=', $request->float('min_price')))
+                        ->when($request->filled('max_price'), fn ($query) => $query->where('base_price', '<=', $request->float('max_price')));
+                };
+
+                $query->whereHas('pricing', $applyPriceRange)
+                    ->orWhereHas('variants.pricing', $applyPriceRange);
             });
         }
 
         // Dynamic sorting
         $allowedSortFields = ['name', 'sku_base', 'status', 'created_at', 'updated_at'];
-        $sortField = $request->get('sortField', 'created_at');
-        $sortDirection = $request->get('sortDirection', 'desc');
+        $requestedSort = $request->get('sort');
+        [$sortField, $sortDirection] = match ($requestedSort) {
+            'name_asc' => ['name', 'asc'],
+            'sku_asc' => ['sku_base', 'asc'],
+            'newest' => ['created_at', 'desc'],
+            'price_asc' => ['pos_sort_price', 'asc'],
+            'price_desc' => ['pos_sort_price', 'desc'],
+            default => [$request->get('sortField', 'created_at'), $request->get('sortDirection', 'desc')],
+        };
+        if (in_array($requestedSort, ['price_asc', 'price_desc'], true)) {
+            $query->addSelect([
+                'pos_sort_price' => ProductPricing::query()
+                    ->selectRaw('MIN(base_price)')
+                    ->whereColumn('product_id', 'products.id'),
+            ]);
+            $allowedSortFields[] = 'pos_sort_price';
+        }
         // Map legacy 'sku' sort to 'sku_base'
         if ($sortField === 'sku') {
             $sortField = 'sku_base';

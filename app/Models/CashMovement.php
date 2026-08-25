@@ -21,6 +21,12 @@ class CashMovement extends Model
         'source_type',
         'source_id',
         'business_datetime',
+        'idempotency_key',
+        'request_hash',
+    ];
+
+    protected $hidden = [
+        'request_hash',
     ];
 
     protected $casts = [

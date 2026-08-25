@@ -23,6 +23,7 @@ class StoreAccountReceiptRequest extends FormRequest
             : PaymentMethod::CONTEXT_CUSTOMER_RECEIPTS;
 
         return [
+            'idempotency_key' => ['required', 'uuid'],
             'amount' => ['required', 'numeric', 'min:0.01'],
             'method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes($context))],
             'reference_number' => ['nullable', 'string', 'max:100'],
@@ -34,6 +35,25 @@ class StoreAccountReceiptRequest extends FormRequest
             'applications.*.document_id' => ['required_with:applications', 'integer', 'min:1'],
             'applications.*.amount' => ['required_with:applications', 'numeric', 'min:0.01'],
         ];
+    }
+
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator): void {
+            if (PaymentMethod::liquidityBucket($this->input('method')) !== PaymentMethod::LIQUIDITY_BANK) {
+                return;
+            }
+
+            $accountId = $this->input('financial_account_id');
+            $eligible = $accountId && \App\Models\FinancialAccount::query()
+                ->whereKey($accountId)
+                ->where('is_active', true)
+                ->where('is_legacy', false)
+                ->exists();
+            if (! $eligible) {
+                $validator->errors()->add('financial_account_id', 'Selecciona una cuenta financiera activa para este movimiento.');
+            }
+        });
     }
 
     /**

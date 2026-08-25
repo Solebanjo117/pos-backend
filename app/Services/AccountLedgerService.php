@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Models\AccountLedgerEntry;
 use App\Models\AccountPaymentBatch;
 use App\Models\CashMovement;
@@ -11,10 +12,12 @@ use App\Models\PosSession;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
 use App\Models\SalesOrder;
+use App\Models\SalesOrderItem;
 use App\Models\Supplier;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection as SupportCollection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -146,72 +149,110 @@ class AccountLedgerService
      */
     public function recordCustomerReceipt(Customer $customer, array $data): array
     {
-        return DB::transaction(function () use ($customer, $data): array {
-            $amount = round((float) $data['amount'], 2);
-            $applications = $this->normalizeCustomerApplications($customer, $data['applications'] ?? [], $amount);
-            $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
-            $session = ! empty($data['pos_session_id'])
-                ? PosSession::query()
-                    ->where('user_id', Auth::id())
-                    ->where('status', 'open')
-                    ->find($data['pos_session_id'])
-                : $this->openSessionForCurrentWarehouse();
+        $key = $data['idempotency_key'] ?? null;
+        $requestHash = $data['request_hash'] ?? ($key ? $this->paymentRequestHash($data) : null);
 
-            if (($data['method'] ?? null) === 'cash' && ! $session) {
-                throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar cobros.');
-            }
+        try {
+            return DB::transaction(function () use ($customer, $data, $key, $requestHash): array {
+                if ($key && ($existing = AccountPaymentBatch::query()->where('idempotency_key', $key)->first())) {
+                    return $this->replayCustomerReceipt($existing, $customer, $requestHash);
+                }
 
-            if ($appliedTotal > $amount + 0.01) {
-                throw new \InvalidArgumentException('El monto aplicado excede el monto del recibo.');
-            }
+                $customer = Customer::query()->lockForUpdate()->findOrFail($customer->id);
+                $amount = round((float) $data['amount'], 2);
+                $applications = $this->normalizeCustomerApplications($customer, $data['applications'] ?? [], $amount);
+                $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
+                $session = ($data['method'] ?? null) === 'cash'
+                    ? $this->resolveCustomerReceiptSession($applications, $data['pos_session_id'] ?? null)
+                    : null;
 
-            $batch = $this->createPaymentBatch('customer', $customer->id, 'incoming', $amount, array_merge($data, [
-                'pos_session_id' => $session?->id,
-            ]));
+                if (($data['method'] ?? null) === 'cash' && ! $session) {
+                    throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar cobros.');
+                }
 
-            foreach ($applications as $application) {
-                $order = SalesOrder::with(['payments', 'customer'])->findOrFail($application['document_id']);
-                $order->addPayment(
-                    amount: (float) $application['amount'],
-                    method: $data['method'],
-                    notes: $data['notes'] ?? "Recibo {$batch->batch_number}",
-                    paidAt: $data['paid_at'] ?? now(),
-                    referenceNumber: $data['reference_number'] ?? $batch->batch_number,
-                    financialAccountId: $data['financial_account_id'] ?? null,
-                );
+                if ($appliedTotal > $amount + 0.01) {
+                    throw new \InvalidArgumentException('El monto aplicado excede el monto del recibo.');
+                }
 
-                $batch->applications()->create([
-                    'document_type' => 'sales_order',
-                    'document_id' => $order->id,
-                    'document_number' => $order->order_number,
-                    'amount' => $application['amount'],
+                $batch = $this->createPaymentBatch('customer', $customer->id, 'incoming', $amount, array_merge($data, [
+                    'pos_session_id' => $session?->id,
+                    'request_hash' => $requestHash,
+                ]));
+
+                foreach ($applications as $application) {
+                    $order = SalesOrder::with(['payments', 'customer'])->findOrFail($application['document_id']);
+                    $order->addPayment(
+                        amount: (float) $application['amount'],
+                        method: $data['method'],
+                        notes: $data['notes'] ?? "Recibo {$batch->batch_number}",
+                        paidAt: $data['paid_at'] ?? now(),
+                        referenceNumber: $data['reference_number'] ?? $batch->batch_number,
+                        financialAccountId: $data['financial_account_id'] ?? null,
+                    );
+
+                    $batch->applications()->create([
+                        'document_type' => 'sales_order',
+                        'document_id' => $order->id,
+                        'document_number' => $order->order_number,
+                        'amount' => $application['amount'],
+                    ]);
+                }
+
+                $customer->refresh();
+                $entry = $this->createLedgerEntry([
+                    'account_type' => 'customer',
+                    'account_id' => $customer->id,
+                    'movement_type' => 'receipt',
+                    'payment_batch_id' => $batch->id,
+                    'credit' => $amount,
+                    'balance_after' => (float) $customer->current_balance,
+                    'occurred_at' => $data['paid_at'] ?? now(),
+                    'reference_number' => $data['reference_number'] ?? $batch->batch_number,
+                    'notes' => $data['notes'] ?? null,
                 ]);
+
+                activity()
+                    ->performedOn($customer)
+                    ->withProperties(['batch_id' => $batch->id, 'ledger_entry_id' => $entry->id])
+                    ->log('Cobro de cuenta por cobrar registrado');
+
+                return [
+                    'batch' => $batch->load('applications'),
+                    'ledger_entry' => $entry,
+                    'statement' => $this->customerStatement($customer->fresh()),
+                ];
+            });
+        } catch (QueryException $exception) {
+            if ($key && ($exception->errorInfo[0] ?? null) === '23505') {
+                $existing = AccountPaymentBatch::query()->where('idempotency_key', $key)->first();
+                if ($existing) {
+                    return $this->replayCustomerReceipt($existing, $customer, $requestHash);
+                }
             }
 
-            $customer->refresh();
-            $entry = $this->createLedgerEntry([
-                'account_type' => 'customer',
-                'account_id' => $customer->id,
-                'movement_type' => 'receipt',
-                'payment_batch_id' => $batch->id,
-                'credit' => $amount,
-                'balance_after' => (float) $customer->current_balance,
-                'occurred_at' => $data['paid_at'] ?? now(),
-                'reference_number' => $data['reference_number'] ?? $batch->batch_number,
-                'notes' => $data['notes'] ?? null,
-            ]);
+            throw $exception;
+        }
+    }
 
-            activity()
-                ->performedOn($customer)
-                ->withProperties(['batch_id' => $batch->id, 'ledger_entry_id' => $entry->id])
-                ->log('Cobro de cuenta por cobrar registrado');
+    private function replayCustomerReceipt(AccountPaymentBatch $batch, Customer $customer, ?string $requestHash): array
+    {
+        if (! $batch->request_hash || ! $requestHash || ! hash_equals($batch->request_hash, $requestHash)) {
+            throw new IdempotencyConflictException('La clave de idempotencia ya fue utilizada con datos diferentes.');
+        }
 
-            return [
-                'batch' => $batch->load('applications'),
-                'ledger_entry' => $entry,
-                'statement' => $this->customerStatement($customer->fresh()),
-            ];
-        });
+        return [
+            'batch' => $batch->load('applications'),
+            'ledger_entry' => $batch->ledgerEntries()->first(),
+            'statement' => $this->customerStatement($customer->fresh()),
+        ];
+    }
+
+    private function paymentRequestHash(array $data): string
+    {
+        unset($data['idempotency_key']);
+        ksort($data);
+
+        return hash('sha256', json_encode($data, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_UNICODE));
     }
 
     /**
@@ -481,6 +522,8 @@ class AccountLedgerService
             'pos_session_id' => $data['pos_session_id'] ?? null,
             'cash_movement_id' => $data['cash_movement_id'] ?? null,
             'financial_account_id' => $data['financial_account_id'] ?? null,
+            'idempotency_key' => $data['idempotency_key'] ?? null,
+            'request_hash' => $data['request_hash'] ?? null,
             'direction' => $direction,
             'batch_number' => $this->nextBatchNumber($accountType),
             'amount' => $amount,
@@ -505,6 +548,7 @@ class AccountLedgerService
             ->where('warehouse_id', $warehouseId)
             ->where('status', 'open')
             ->latest()
+            ->lockForUpdate()
             ->first();
     }
 
@@ -588,16 +632,84 @@ class AccountLedgerService
     private function normalizeCustomerApplications(Customer $customer, array $applications, float $amount): array
     {
         if (! empty($applications)) {
-            return collect($applications)
-                ->map(fn (array $application): array => [
-                    'document_id' => (int) $application['document_id'],
-                    'amount' => round((float) $application['amount'], 2),
+            $normalized = collect($applications)
+                ->groupBy(fn (array $application): int => (int) $application['document_id'])
+                ->map(fn ($documentApplications, int $documentId): array => [
+                    'document_id' => $documentId,
+                    'amount' => round((float) $documentApplications->sum('amount'), 2),
                 ])
+                ->sortBy('document_id')
+                ->values();
+            $orders = SalesOrder::query()
+                ->with(['payments', 'returns'])
+                ->where('customer_id', $customer->id)
+                ->whereIn('id', $normalized->pluck('document_id'))
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get()
+                ->keyBy('id');
+
+            if ($orders->count() !== $normalized->count()) {
+                throw new \InvalidArgumentException('Uno o más documentos no pertenecen al cliente.');
+            }
+
+            return $normalized
+                ->map(function (array $application) use ($orders): array {
+                    $order = $orders->get($application['document_id']);
+                    if ($application['amount'] <= 0 || $application['amount'] > (float) $order->amount_due + 0.01) {
+                        throw new \InvalidArgumentException("El monto aplicado excede el saldo pendiente de {$order->order_number}.");
+                    }
+
+                    return [
+                        'document_id' => (int) $application['document_id'],
+                        'amount' => round((float) $application['amount'], 2),
+                    ];
+                })
                 ->values()
                 ->all();
         }
 
-        return $this->autoApplyDocuments($this->openSalesOrders($customer), $amount);
+        $documents = $customer->salesOrders()
+            ->with(['payments', 'returns'])
+            ->whereIn('payment_status', ['pending', 'partial'])
+            ->orderBy('date')
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->filter(fn (SalesOrder $order): bool => (float) $order->amount_due > 0)
+            ->values();
+
+        return $this->autoApplyDocuments($documents, $amount);
+    }
+
+    /**
+     * @param  array<int, array{document_id: int, amount: float}>  $applications
+     */
+    private function resolveCustomerReceiptSession(array $applications, mixed $posSessionId = null): ?PosSession
+    {
+        $warehouseIds = SalesOrderItem::query()
+            ->whereIn('sales_order_id', collect($applications)->pluck('document_id')->all())
+            ->distinct()
+            ->pluck('warehouse_id')
+            ->filter()
+            ->values();
+
+        if ($warehouseIds->count() > 1) {
+            throw new \InvalidArgumentException('Los cobros en efectivo deben corresponder a una sola sucursal.');
+        }
+
+        $warehouseId = $warehouseIds->first() ?? Auth::user()?->current_warehouse_id;
+        if (! $warehouseId) {
+            throw new \InvalidArgumentException('No se pudo determinar la sucursal del cobro en efectivo.');
+        }
+
+        return PosSession::query()
+            ->where('user_id', Auth::id())
+            ->where('warehouse_id', $warehouseId)
+            ->where('status', 'open')
+            ->lockForUpdate()
+            ->when($posSessionId, fn ($query) => $query->whereKey($posSessionId))
+            ->first();
     }
 
     /**
