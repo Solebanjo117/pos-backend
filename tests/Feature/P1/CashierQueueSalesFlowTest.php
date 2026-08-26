@@ -15,6 +15,7 @@ use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\CashierQueueService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -111,6 +112,11 @@ it('exposes sale entries as cotizacion por atender with the quote seller', funct
         ->assertJsonPath('data.0.source.description', 'Cotizacion por atender')
         ->assertJsonPath('data.0.source.seller_name', 'Vendedor Uno')
         ->assertJsonPath('data.0.source.party', 'Cliente Cola')
+        ->assertJsonPath('data.0.source.preparation_status', 'pending')
+        ->assertJsonPath('data.0.source.items.0.id', $this->quoteItem->id)
+        ->assertJsonPath('data.0.source.items.0.product_name', 'Producto Cola')
+        ->assertJsonPath('data.0.source.items.0.product_sku', 'COLA-V1')
+        ->assertJsonPath('data.0.source.items.0.quantity', 1)
         ->assertJsonPath('data.0.source.document_number', $this->quote->fresh()->quote_number);
 });
 
@@ -187,6 +193,7 @@ it('checkout from pos creates a single sale linked to the quote and completes th
     openQueueSession($this->cashier, $this->warehouse);
 
     $response = $this->postJson('/api/v1/sales-orders', [
+        'idempotency_key' => (string) Str::uuid(),
         'source_quote_id' => $this->quote->id,
         'status' => 'confirmed',
         'payments' => [['method' => 'cash', 'amount' => 96.30]],
@@ -219,6 +226,7 @@ it('creates receivable only at checkout for the unpaid remainder', function (): 
     openQueueSession($this->cashier, $this->warehouse);
 
     $response = $this->postJson('/api/v1/sales-orders', [
+        'idempotency_key' => (string) Str::uuid(),
         'source_quote_id' => $this->quote->id,
         'status' => 'confirmed',
         'payments' => [['method' => 'cash', 'amount' => 50]],
@@ -249,6 +257,7 @@ it('prevents two cashiers from creating two sales with the same quote', function
     openQueueSession($this->secondCashier, $this->warehouse);
 
     $payload = [
+        'idempotency_key' => (string) Str::uuid(),
         'source_quote_id' => $this->quote->id,
         'status' => 'confirmed',
         'payments' => [['method' => 'cash', 'amount' => 96.30]],

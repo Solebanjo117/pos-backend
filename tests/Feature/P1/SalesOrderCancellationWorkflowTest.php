@@ -5,7 +5,10 @@ use App\Models\CashierQueueEntry;
 use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\FinancialAccount;
+use App\Models\FinancialAccountMovement;
 use App\Models\InventoryMovement;
+use App\Models\LedgerAccount;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\Product;
@@ -214,8 +217,30 @@ it('settles a paid cancellation with a configured bank method without touching c
     SalesOrderPayment::create([
         'sales_order_id' => $order->id,
         'amount' => $order->total,
-        'method' => 'yappy',
+        'method' => 'cash',
         'paid_at' => now(),
+        'created_by' => $context['admin']->id,
+    ]);
+    $ledger = LedgerAccount::query()->firstOrCreate(
+        ['code' => '1110'],
+        [
+            'name' => 'Bancos',
+            'type' => 'asset',
+            'report_group' => 'bank',
+            'normal_balance' => 'debit',
+            'is_active' => true,
+        ],
+    );
+    $account = FinancialAccount::create([
+        'name' => 'Banco cancelación',
+        'type' => 'bank',
+        'currency' => 'USD',
+        'opening_balance' => 100,
+        'current_balance' => 100,
+        'allow_negative_balance' => false,
+        'is_active' => true,
+        'is_legacy' => false,
+        'ledger_account_id' => $ledger->id,
         'created_by' => $context['admin']->id,
     ]);
 
@@ -223,6 +248,7 @@ it('settles a paid cancellation with a configured bank method without touching c
         ->postJson("/api/v1/sales-orders/{$order->id}/cancel", [
             'reason' => 'Reembolso bancario de prueba',
             'refund_method' => 'yappy',
+            'financial_account_id' => $account->id,
         ])
         ->assertOk();
     $return = SalesReturn::findOrFail($response->json('data.cancellation_return_id'));
@@ -244,5 +270,6 @@ it('settles a paid cancellation with a configured bank method without touching c
             ->where('method', 'yappy')
             ->where('amount', '<', 0)
             ->count())->toBe(1)
+        ->and(FinancialAccountMovement::query()->where('financial_account_id', $account->id)->count())->toBe(1)
         ->and($return->fresh()->settlement_reference)->toBe('YAPPY-DEV-1');
 });

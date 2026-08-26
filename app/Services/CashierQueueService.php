@@ -46,7 +46,13 @@ class CashierQueueService
             ->with([
                 'source' => function (MorphTo $morphTo): void {
                     $morphTo->morphWith([
-                        SalesQuote::class => ['customer', 'user'],
+                        SalesQuote::class => [
+                            'customer',
+                            'user',
+                            'items.product',
+                            'items.variant',
+                            'convertedOrder:id,order_number,prepared_at,status',
+                        ],
                         OperationalExpense::class => ['supplier', 'customer', 'beneficiary', 'categoryRecord'],
                         SalesReturn::class => ['customer', 'creditNote'],
                     ]);

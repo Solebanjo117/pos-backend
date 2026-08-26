@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AccountLedgerEntry;
+use App\Models\AccountPaymentBatch;
 use App\Models\CashierQueueEntry;
 use App\Models\CashMovement;
 use App\Models\Customer;
@@ -175,26 +176,52 @@ class TransactionTraceService
                 || $user->hasWarehouseAccess((int) $model->to_warehouse_id);
         }
 
-        $warehouseId = $this->warehouseId($type, $model);
+        if ($type === 'account_payment_batch') {
+            /** @var AccountPaymentBatch $model */
+            $allowedRoles = $model->account_type === 'supplier'
+                ? ['admin', 'manager', 'buyer']
+                : ['admin', 'manager', 'seller', 'cashier'];
 
-        return $warehouseId === null || $user->hasWarehouseAccess($warehouseId);
+            if (! in_array($user->role, $allowedRoles, true)) {
+                return false;
+            }
+        }
+
+        $warehouseIds = $this->warehouseIds($type, $model);
+
+        return $warehouseIds->isEmpty()
+            || $warehouseIds->every(fn (int $warehouseId): bool => $user->hasWarehouseAccess($warehouseId));
     }
 
-    private function warehouseId(string $type, Model $model): ?int
+    /** @return Collection<int, int> */
+    private function warehouseIds(string $type, Model $model): Collection
     {
         $direct = $model->getAttribute('warehouse_id');
         if ($direct !== null) {
-            return (int) $direct;
+            return collect([(int) $direct]);
         }
 
-        return match ($type) {
-            'warehouse' => (int) $model->id,
-            'sales_order' => $model->items()->value('warehouse_id') ?? $model->posSession?->warehouse_id,
-            'sales_order_payment' => $model->salesOrder?->items()->value('warehouse_id') ?? $model->salesOrder?->posSession?->warehouse_id,
-            'purchase_order_payment' => $model->purchaseOrder?->warehouse_id,
-            'cash_movement' => $model->posSession?->warehouse_id,
-            default => null,
+        $warehouseIds = match ($type) {
+            'warehouse' => [(int) $model->id],
+            'sales_order' => $model->items()
+                ->whereNotNull('warehouse_id')
+                ->pluck('warehouse_id')
+                ->push($model->posSession?->warehouse_id)
+                ->all(),
+            'sales_order_payment' => $model->salesOrder
+                ? $this->warehouseIds('sales_order', $model->salesOrder)->all()
+                : [],
+            'purchase_order_payment' => [$model->purchaseOrder?->warehouse_id],
+            'cash_movement' => [$model->posSession?->warehouse_id],
+            'account_payment_batch' => [$model->posSession?->warehouse_id],
+            default => [],
         };
+
+        return collect($warehouseIds)
+            ->filter(fn ($warehouseId): bool => $warehouseId !== null)
+            ->map(fn ($warehouseId): int => (int) $warehouseId)
+            ->unique()
+            ->values();
     }
 
     /** @return Collection<int, array<string, mixed>> */
@@ -297,6 +324,25 @@ class TransactionTraceService
             $model->salesOrders()->limit(100)->get()->each(fn (SalesOrder $order) => $add($order, 'sales_order', 'sale'));
             $model->cashMovements()->limit(100)->get()->each(fn (CashMovement $movement) => $add($movement, 'cash_movement', 'cash_movement'));
             $model->purchaseOrderPayments()->limit(100)->get()->each(fn (PurchaseOrderPayment $payment) => $add($payment, 'purchase_order_payment', 'supplier_payment'));
+            $model->accountPaymentBatches()->limit(100)->get()->each(fn (AccountPaymentBatch $payment) => $add($payment, 'account_payment_batch', 'account_payment'));
+            OperationalExpense::query()->where('pos_session_id', $model->id)->limit(100)->get()
+                ->each(fn (OperationalExpense $expense) => $add($expense, 'operational_expense', 'expense'));
+        } elseif ($type === 'account_payment_batch') {
+            /** @var AccountPaymentBatch $model */
+            $model->loadMissing(['posSession', 'cashMovement', 'ledgerEntries', 'applications']);
+            $account = $model->account_type === 'supplier'
+                ? Supplier::query()->find($model->account_id)
+                : Customer::query()->find($model->account_id);
+            $add($account, $model->account_type === 'supplier' ? 'supplier' : 'customer', 'account');
+            $add($model->posSession, 'pos_session', 'cash_session');
+            $add($model->cashMovement, 'cash_movement', 'cash_movement');
+            $model->ledgerEntries->each(fn (AccountLedgerEntry $entry) => $add($entry, 'account_ledger_entry', 'account_ledger'));
+            $model->applications->each(function ($application) use ($add): void {
+                $related = $this->resolveReference($application->document_type, $application->document_id);
+                if ($related) {
+                    $add($related['model'], $related['type'], 'applied_document');
+                }
+            });
         } elseif ($type === 'sales_order_payment') {
             /** @var SalesOrderPayment $model */
             $model->loadMissing(['salesOrder.posSession', 'salesReturn']);
@@ -543,7 +589,7 @@ class TransactionTraceService
     {
         return match (true) {
             in_array($type, ['inventory_movement'], true) => 'inventory',
-            in_array($type, ['sales_order_payment', 'purchase_order_payment', 'cash_movement', 'customer_transaction', 'account_ledger_entry'], true) => 'financial',
+            in_array($type, ['sales_order_payment', 'purchase_order_payment', 'account_payment_batch', 'cash_movement', 'customer_transaction', 'account_ledger_entry'], true) => 'financial',
             in_array($relation, ['return', 'credit_note'], true) => 'reversal',
             in_array($type, ['cashier_queue_entry'], true) => 'status',
             default => 'business',
@@ -645,6 +691,7 @@ class TransactionTraceService
             'cash_movement' => 'Movimiento de caja',
             'customer_transaction' => 'Movimiento CxC',
             'account_ledger_entry' => 'Movimiento de cuenta',
+            'account_payment_batch' => 'Pago de cuenta',
             'customer' => 'Cliente',
             'supplier' => 'Proveedor',
             default => Str::headline($type),
@@ -659,6 +706,9 @@ class TransactionTraceService
             'inventory_lot' => 'Lote '.($model->batch_number ?: '#'.$model->id),
             'operational_expense' => (string) ($model->description ?: $model->category_label),
             'inventory_movement' => $this->typeLabel($type).' #'.$model->id,
+            'account_payment_batch' => $model->account_type === 'supplier'
+                ? 'Pago CxP '.($model->batch_number ?: '#'.$model->id)
+                : 'Cobro CxC '.($model->batch_number ?: '#'.$model->id),
             default => $this->typeLabel($type).' '.($this->number($type, $model) ?? '#'.$model->id),
         };
     }
@@ -674,6 +724,7 @@ class TransactionTraceService
             'operational_expense' => 'reference_number',
             'cash_movement' => 'reference_number',
             'account_ledger_entry' => 'document_number',
+            'account_payment_batch' => 'batch_number',
             'inventory_transfer' => 'reference',
             'product' => 'system_id',
             'product_variant' => 'system_id',
@@ -710,7 +761,8 @@ class TransactionTraceService
             'user' => '/users/'.$model->id.'/edit',
             'cash_movement' => $model->pos_session_id ? '/pos-sessions?session_id='.$model->pos_session_id : null,
             'customer_transaction' => $model->customer_id ? '/ar?customer_id='.$model->customer_id : null,
-            'account_ledger_entry' => $model->account_type === 'customer' ? '/ar?customer_id='.$model->account_id : '/accounts-payable?account_id='.$model->account_id,
+            'account_ledger_entry' => $model->account_type === 'customer' ? '/ar?customer_id='.$model->account_id : '/accounts-payable?supplier_id='.$model->account_id,
+            'account_payment_batch' => $model->account_type === 'customer' ? '/ar?customer_id='.$model->account_id : '/accounts-payable?supplier_id='.$model->account_id,
             'customer' => '/customers/'.$model->id,
             'supplier' => '/suppliers/'.$model->id,
             default => null,
@@ -720,7 +772,7 @@ class TransactionTraceService
     private function occurredAt(string $type, Model $model): ?string
     {
         $value = match ($type) {
-            'sales_order_payment', 'purchase_order_payment' => $model->paid_at,
+            'sales_order_payment', 'purchase_order_payment', 'account_payment_batch' => $model->paid_at,
             'sales_credit_note' => $model->issued_at,
             'customer_transaction' => $model->transaction_date,
             'account_ledger_entry' => $model->occurred_at,
@@ -738,7 +790,7 @@ class TransactionTraceService
             'sales_order', 'purchase_order' => $model->total,
             'sales_quote' => $model->total,
             'sales_return', 'sales_credit_note' => $model->total_amount,
-            'operational_expense', 'sales_order_payment', 'purchase_order_payment', 'cash_movement', 'customer_transaction' => $model->amount,
+            'operational_expense', 'sales_order_payment', 'purchase_order_payment', 'account_payment_batch', 'cash_movement', 'customer_transaction' => $model->amount,
             'cashier_queue_entry' => $model->final_amount ?? $model->estimated_amount,
             'account_ledger_entry' => max((float) $model->debit, (float) $model->credit),
             'inventory_lot' => (float) $model->landed_unit_cost * (int) $model->quantity_available,

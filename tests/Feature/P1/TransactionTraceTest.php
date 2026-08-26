@@ -1,13 +1,17 @@
 <?php
 
+use App\Models\AccountPaymentApplication;
+use App\Models\AccountPaymentBatch;
 use App\Models\Brand;
 use App\Models\CashierQueueEntry;
+use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\InventoryLot;
 use App\Models\InventoryMovement;
 use App\Models\OperationalExpense;
 use App\Models\OperationalExpenseBeneficiary;
 use App\Models\OperationalExpenseCategory;
+use App\Models\PosSession;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\SalesCreditNote;
@@ -343,4 +347,133 @@ it('keeps user activity restricted to administrators', function (): void {
         ->getJson('/api/v1/transaction-traces/user/'.$fixture['user']->id)
         ->assertOk()
         ->assertJsonPath('data.root.type', 'user');
+});
+
+it('traces exact account payments and expenses belonging to a cash session', function (): void {
+    $fixture = transactionTraceFixture();
+    $session = PosSession::create([
+        'user_id' => $fixture['user']->id,
+        'warehouse_id' => $fixture['warehouse']->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 100,
+        'expected_amount' => 110,
+        'status' => 'open',
+    ]);
+    $fixture['order']->update(['pos_session_id' => $session->id]);
+
+    $movement = CashMovement::create([
+        'pos_session_id' => $session->id,
+        'user_id' => $fixture['user']->id,
+        'type' => 'in',
+        'amount' => 10,
+        'reason' => 'Cobro trazable',
+    ]);
+    $batch = AccountPaymentBatch::create([
+        'account_type' => 'customer',
+        'account_id' => $fixture['customer']->id,
+        'pos_session_id' => $session->id,
+        'cash_movement_id' => $movement->id,
+        'direction' => 'incoming',
+        'batch_number' => 'AR-TRACE-001',
+        'amount' => 10,
+        'method' => 'cash',
+        'paid_at' => now(),
+        'created_by' => $fixture['user']->id,
+    ]);
+    AccountPaymentApplication::create([
+        'payment_batch_id' => $batch->id,
+        'document_type' => 'sales_order',
+        'document_id' => $fixture['order']->id,
+        'document_number' => $fixture['order']->order_number,
+        'amount' => 10,
+    ]);
+    $expense = OperationalExpense::create([
+        'warehouse_id' => $fixture['warehouse']->id,
+        'created_by' => $fixture['user']->id,
+        'pos_session_id' => $session->id,
+        'expense_date' => now()->toDateString(),
+        'category' => 'other',
+        'description' => 'Gasto de la sesión',
+        'amount' => 3,
+        'payment_method' => 'cash',
+        'status' => 'paid',
+    ]);
+    $otherSession = PosSession::create([
+        'user_id' => $fixture['user']->id,
+        'warehouse_id' => $fixture['warehouse']->id,
+        'opened_at' => now(),
+        'opening_amount' => 50,
+        'expected_amount' => 50,
+        'status' => 'closed',
+    ]);
+    $unrelatedExpense = OperationalExpense::create([
+        'warehouse_id' => $fixture['warehouse']->id,
+        'created_by' => $fixture['user']->id,
+        'pos_session_id' => $otherSession->id,
+        'expense_date' => now()->toDateString(),
+        'category' => 'other',
+        'description' => 'Gasto de otra sesión',
+        'amount' => 99,
+        'payment_method' => 'cash',
+        'status' => 'paid',
+    ]);
+
+    $sessionTrace = $this->actingAs($fixture['user'])
+        ->getJson('/api/v1/transaction-traces/pos_session/'.$session->id)
+        ->assertOk()
+        ->assertJsonFragment([
+            'type' => 'account_payment_batch',
+            'id' => $batch->id,
+            'relation' => 'account_payment',
+        ])
+        ->assertJsonFragment([
+            'type' => 'operational_expense',
+            'id' => $expense->id,
+            'relation' => 'expense',
+        ]);
+
+    $relationships = collect($sessionTrace->json('data.relationships'));
+    expect($relationships->where('type', 'account_payment_batch'))->toHaveCount(1)
+        ->and($relationships->where('type', 'operational_expense')->pluck('id'))->not->toContain($unrelatedExpense->id);
+
+    $this->actingAs($fixture['user'])
+        ->getJson('/api/v1/transaction-traces/account_payment_batch/'.$batch->id)
+        ->assertOk()
+        ->assertJsonPath('data.root.number', 'AR-TRACE-001')
+        ->assertJsonPath('data.root.href', '/ar?customer_id='.$fixture['customer']->id)
+        ->assertJsonFragment(['type' => 'pos_session', 'id' => $session->id, 'relation' => 'cash_session'])
+        ->assertJsonFragment(['type' => 'cash_movement', 'id' => $movement->id, 'relation' => 'cash_movement'])
+        ->assertJsonFragment(['type' => 'sales_order', 'id' => $fixture['order']->id, 'relation' => 'applied_document']);
+});
+
+it('does not expose a mixed warehouse sale trace to a user with partial access', function (): void {
+    $fixture = transactionTraceFixture('manager');
+    $otherWarehouse = Warehouse::create([
+        'code' => 'WH-TRACE-MIXED-'.uniqid(),
+        'name' => 'Almacén no autorizado',
+    ]);
+    SalesOrderItem::create([
+        'sales_order_id' => $fixture['order']->id,
+        'product_id' => $fixture['product']->id,
+        'warehouse_id' => $otherWarehouse->id,
+        'seller_id' => $fixture['user']->id,
+        'quantity' => 1,
+        'unit_price' => 5,
+        'unit_cost' => 2,
+        'discount_percent' => 0,
+        'discount_amount' => 0,
+        'tax_percent' => 0,
+        'tax_amount' => 0,
+        'subtotal' => 5,
+        'total' => 5,
+    ]);
+
+    $this->actingAs($fixture['user'])
+        ->getJson('/api/v1/transaction-traces/sales_order/'.$fixture['order']->id)
+        ->assertForbidden();
+
+    $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+    $this->actingAs($admin)
+        ->getJson('/api/v1/transaction-traces/sales_order/'.$fixture['order']->id)
+        ->assertOk();
 });

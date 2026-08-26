@@ -5,10 +5,13 @@ namespace App\Http\Controllers\Api;
 use App\Exceptions\IdempotencyConflictException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CancelPurchaseOrderRequest;
+use App\Http\Requests\ReceivePurchaseOrderRequest;
 use App\Models\PurchaseOrder;
 use App\Services\PurchaseOrderService;
 use App\Services\SmartReorderService;
 use App\Services\TransactionTraceService;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -229,24 +232,35 @@ class PurchaseOrderController extends Controller
      * POST /api/v1/purchase-orders/{id}/receive
      * Receive items
      */
-    public function receive(Request $request, int $id): JsonResponse
+    public function receive(ReceivePurchaseOrderRequest $request, int $id): JsonResponse
     {
-        $validated = $request->validate([
-            'items' => 'required|array|min:1',
-            'items.*.item_id' => 'required|exists:purchase_order_items,id',
-            'items.*.quantity_received' => 'required|integer|min:1',
-            'items.*.batch_number' => 'nullable|string|max:100',
-            'items.*.expiry_date' => 'nullable|date',
-            'items.*.sale_price' => 'nullable|numeric|min:0',
-        ]);
+        $validated = $request->validated();
 
         try {
-            $order = $this->purchaseOrderService->receiveItems($id, $validated['items']);
+            $order = $this->purchaseOrderService->receiveItems(
+                $id,
+                $validated['items'],
+                $validated['idempotency_key']
+            );
 
             return response()->json([
                 'message' => 'Mercancía recibida exitosamente',
                 'data' => $order,
             ]);
+        } catch (IdempotencyConflictException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 409);
+        } catch (ModelNotFoundException) {
+            return response()->json([
+                'message' => 'La orden de compra no existe.',
+            ], 404);
+        } catch (QueryException $e) {
+            report($e);
+
+            return response()->json([
+                'message' => 'No se pudo completar la recepción por un error interno.',
+            ], 500);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => $e->getMessage(),

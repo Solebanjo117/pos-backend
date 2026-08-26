@@ -13,7 +13,7 @@ class SalesOrderCancellationService
 {
     public function __construct(private readonly SalesReturnService $returns) {}
 
-    /** @param array{reason: string, refund_method?: string|null, notes?: string|null} $data */
+    /** @param array{reason: string, refund_method?: string|null, financial_account_id?: int|null, notes?: string|null} $data */
     public function cancel(SalesOrder $salesOrder, array $data, User $user): SalesOrder
     {
         return DB::transaction(function () use ($salesOrder, $data, $user): SalesOrder {
@@ -44,6 +44,7 @@ class SalesOrderCancellationService
                     $return = $this->returns->createForOrder($order, [
                         'reason' => 'Anulacion: '.$reason,
                         'refund_method' => $refundMethod,
+                        'financial_account_id' => $data['financial_account_id'] ?? null,
                         'refund_notes' => $data['notes'] ?? null,
                         'items' => $items,
                     ], $user);

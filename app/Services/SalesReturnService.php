@@ -2,10 +2,12 @@
 
 namespace App\Services;
 
+use App\Exceptions\IdempotencyConflictException;
 use App\Models\CashierQueueEntry;
 use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\CustomerTransaction;
+use App\Models\FinancialAccount;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
 use App\Models\SalesCreditNote;
@@ -34,6 +36,10 @@ class SalesReturnService
                 ->lockForUpdate()
                 ->firstOrFail();
 
+            if ($existing = $this->replayForRequest($lockedOrder, $data, $user)) {
+                return $existing;
+            }
+
             if (! in_array($lockedOrder->status, ['confirmed', 'processing', 'completed'], true)) {
                 throw ValidationException::withMessages([
                     'order' => 'Solo se pueden devolver ordenes confirmadas o completadas.',
@@ -43,7 +49,11 @@ class SalesReturnService
             $lockedOrder->loadMissing('items.product');
 
             $returnItems = $this->normalizeReturnItems($data['items'] ?? []);
-            $this->validateRefundMethodForOrder($lockedOrder, (string) $data['refund_method']);
+            $this->validateRefundMethodForOrder(
+                $lockedOrder,
+                (string) $data['refund_method'],
+                isset($data['financial_account_id']) ? (int) $data['financial_account_id'] : null,
+            );
             $this->validateReturnItems($lockedOrder, $returnItems);
 
             $firstItem = $lockedOrder->items->firstWhere('id', $returnItems[0]['sales_order_item_id'] ?? null)
@@ -56,8 +66,13 @@ class SalesReturnService
                 'user_id' => $user->id,
                 'reason' => $data['reason'] ?? null,
                 'refund_method' => $data['refund_method'],
+                'financial_account_id' => $data['financial_account_id'] ?? null,
                 'refund_notes' => $data['refund_notes'] ?? null,
                 'status' => 'pending',
+                'idempotency_key' => $data['idempotency_key'] ?? null,
+                'request_hash' => isset($data['idempotency_key'])
+                    ? $this->requestHash($lockedOrder, $data, $user)
+                    : null,
             ]);
 
             $totalAmount = 0.0;
@@ -94,6 +109,10 @@ class SalesReturnService
                 ->whereKey($salesReturn->id)
                 ->lockForUpdate()
                 ->firstOrFail();
+
+            if ($lockedReturn->status === 'approved') {
+                return $lockedReturn->load('items.product', 'items.variant', 'creditNote');
+            }
 
             if ($lockedReturn->status !== 'pending') {
                 throw ValidationException::withMessages([
@@ -164,11 +183,16 @@ class SalesReturnService
                 }
 
                 if ($this->paymentBucket($method) === PaymentMethod::LIQUIDITY_CASH) {
-                    $session = $this->openSession($user, $return->warehouse_id);
+                    $session = $this->openSession($user, $return->warehouse_id, true);
                     if (! $session) {
                         throw new \InvalidArgumentException('Debe existir una sesion abierta en esta sucursal para reembolsar efectivo.');
                     }
                     $balanceBefore = $this->sessionCashBalance($session);
+                    if ($moneyRefund > $balanceBefore) {
+                        throw ValidationException::withMessages([
+                            'cash_balance' => 'El efectivo disponible en la sesión no alcanza para completar este reembolso.',
+                        ]);
+                    }
                     CashMovement::create([
                         'pos_session_id' => $session->id,
                         'user_id' => $user->id,
@@ -186,7 +210,32 @@ class SalesReturnService
                     ]);
                 }
 
-                $this->createRefundPayment($return, $moneyRefund, $user, $method, $reference);
+                if ($this->paymentBucket($method) === PaymentMethod::LIQUIDITY_BANK) {
+                    $account = FinancialAccount::query()
+                        ->whereKey($return->financial_account_id)
+                        ->where('type', 'bank')
+                        ->where('is_active', true)
+                        ->where('is_legacy', false)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if (! $account) {
+                        throw ValidationException::withMessages([
+                            'financial_account_id' => 'Selecciona una cuenta bancaria activa para este reembolso.',
+                        ]);
+                    }
+                }
+
+                $this->createRefundPayment(
+                    $return,
+                    $moneyRefund,
+                    $user,
+                    $method,
+                    $reference,
+                    $this->paymentBucket($method) === PaymentMethod::LIQUIDITY_BANK
+                        ? $return->financial_account_id
+                        : null,
+                );
             }
 
             $creditAmount = $this->money((float) $return->receivable_applied_amount + (float) $return->store_credit_amount);
@@ -219,6 +268,10 @@ class SalesReturnService
                 ->whereKey($salesReturn->id)
                 ->lockForUpdate()
                 ->firstOrFail();
+
+            if ($lockedReturn->status === 'rejected') {
+                return $lockedReturn;
+            }
 
             if (! $lockedReturn->reject($user)) {
                 throw ValidationException::withMessages([
@@ -333,7 +386,7 @@ class SalesReturnService
         }
     }
 
-    private function validateRefundMethodForOrder(SalesOrder $order, string $method): void
+    private function validateRefundMethodForOrder(SalesOrder $order, string $method, ?int $financialAccountId = null): void
     {
         $allowed = array_values(array_unique(array_merge(
             PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS),
@@ -350,6 +403,25 @@ class SalesReturnService
             throw ValidationException::withMessages([
                 'refund_method' => 'Esta devolucion requiere un cliente para ajustar CxC o saldo a favor.',
             ]);
+        }
+
+        if (
+            ! in_array($method, ['balance', 'store_credit', self::METHOD_RECEIVABLE, self::METHOD_VOID], true)
+            && $this->paymentBucket($method) === PaymentMethod::LIQUIDITY_BANK
+        ) {
+            $eligible = $financialAccountId
+                && FinancialAccount::query()
+                    ->whereKey($financialAccountId)
+                    ->where('type', 'bank')
+                    ->where('is_active', true)
+                    ->where('is_legacy', false)
+                    ->exists();
+
+            if (! $eligible) {
+                throw ValidationException::withMessages([
+                    'financial_account_id' => 'Selecciona una cuenta bancaria activa para este reembolso.',
+                ]);
+            }
         }
     }
 
@@ -604,6 +676,7 @@ class SalesReturnService
         User $user,
         ?string $method = null,
         ?string $reference = null,
+        ?int $financialAccountId = null,
     ): void {
         $amount = $this->money($amount);
         if ($amount <= 0) {
@@ -616,6 +689,7 @@ class SalesReturnService
             'amount' => -1 * abs($amount),
             'method' => $method ?? $salesReturn->refund_method,
             'reference_number' => $reference,
+            'financial_account_id' => $financialAccountId,
             'notes' => "Reembolso por devolucion {$salesReturn->return_number}".($salesReturn->refund_notes ? " - {$salesReturn->refund_notes}" : ''),
             'paid_at' => now(),
             'created_by' => $user->id,
@@ -655,13 +729,55 @@ class SalesReturnService
         return PaymentMethod::liquidityBucket($method);
     }
 
-    private function openSession(User $user, ?int $warehouseId): ?PosSession
+    /** @param array<string, mixed> $data */
+    public function replayForRequest(SalesOrder $order, array $data, User $user): ?SalesReturn
+    {
+        $key = $data['idempotency_key'] ?? null;
+        if (! $key) {
+            return null;
+        }
+
+        $existing = SalesReturn::query()->where('idempotency_key', $key)->first();
+        if (! $existing) {
+            return null;
+        }
+
+        $hash = $this->requestHash($order, $data, $user);
+        if ((int) $existing->sales_order_id !== (int) $order->id || ! hash_equals((string) $existing->request_hash, $hash)) {
+            throw new IdempotencyConflictException('Esta identificación ya fue usada para una devolución diferente.');
+        }
+
+        return $existing->load('items.product', 'items.variant', 'creditNote');
+    }
+
+    /** @param array<string, mixed> $data */
+    public function requestHash(SalesOrder $order, array $data, User $user): string
+    {
+        $items = $this->normalizeReturnItems($data['items'] ?? []);
+        usort($items, fn (array $left, array $right): int => $left['sales_order_item_id'] <=> $right['sales_order_item_id']);
+
+        return hash('sha256', json_encode([
+            'sales_order_id' => (int) $order->id,
+            'user_id' => (int) $user->id,
+            'reason' => trim((string) ($data['reason'] ?? '')),
+            'refund_method' => (string) ($data['refund_method'] ?? ''),
+            'financial_account_id' => isset($data['financial_account_id'])
+                ? (int) $data['financial_account_id']
+                : null,
+            'refund_notes' => trim((string) ($data['refund_notes'] ?? '')),
+            'approve_immediately' => (bool) ($data['approve_immediately'] ?? false),
+            'items' => $items,
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    private function openSession(User $user, ?int $warehouseId, bool $lock = false): ?PosSession
     {
         return PosSession::query()
             ->where('user_id', $user->id)
             ->when($warehouseId, fn ($query) => $query->where('warehouse_id', $warehouseId))
             ->where('status', 'open')
             ->latest()
+            ->when($lock, fn ($query) => $query->lockForUpdate())
             ->first();
     }
 

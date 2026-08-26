@@ -103,18 +103,27 @@ class SalesOrderService
 
                 $isCashier = Auth::user()?->role === 'cashier';
                 $sourceQuote = null;
+                $cashierSession = null;
 
                 if ($isCashier) {
-                    [$data, $sourceQuote, $existingOrder] = $this->prepareCashierCheckout($data);
+                    [$data, $sourceQuote, $existingOrder, $cashierSession] = $this->prepareCashierCheckout(
+                        $data,
+                        $idempotencyKey,
+                        $requestHash,
+                    );
                     if ($existingOrder) {
-                        $this->cashierQueueService->completeForSource(
-                            SalesQuote::class,
-                            $sourceQuote->id,
-                            Auth::user(),
-                            (float) $existingOrder->total,
-                        );
+                        if ($existingOrder->idempotency_key === $idempotencyKey && $idempotencyKey !== null) {
+                            return $this->assertIdempotentReplay($existingOrder, $requestHash);
+                        }
 
-                        return $existingOrder;
+                        return $this->checkoutLinkedWarehouseOrder(
+                            $existingOrder,
+                            $sourceQuote,
+                            $cashierSession,
+                            $data,
+                            $idempotencyKey,
+                            $requestHash,
+                        );
                     }
                 }
 
@@ -138,7 +147,7 @@ class SalesOrderService
                     $sessionQuery->where('warehouse_id', $warehouseId);
                 }
 
-                $activeSession = $sessionQuery->lockForUpdate()->first();
+                $activeSession = $cashierSession ?? $sessionQuery->lockForUpdate()->first();
 
                 // Determine requested status to apply after adding items
                 $requestedStatus = $data['status'] ?? 'draft';
@@ -313,6 +322,20 @@ class SalesOrderService
     private function checkoutRequestHash(array $data): string
     {
         unset($data['idempotency_key'], $data['audit_logs']);
+        if (! empty($data['source_quote_id'])) {
+            $data = [
+                'source_quote_id' => (int) $data['source_quote_id'],
+                'payments' => $data['payments'] ?? [],
+                'items' => collect($data['items'] ?? [])
+                    ->map(fn (array $item): array => [
+                        'source_quote_item_id' => (int) ($item['source_quote_item_id'] ?? 0),
+                        'tax_percent' => isset($item['tax_percent']) ? (int) round((float) $item['tax_percent']) : null,
+                    ])
+                    ->sortBy('source_quote_item_id')
+                    ->values()
+                    ->all(),
+            ];
+        }
         $normalize = function (array $value) use (&$normalize): array {
             if (! array_is_list($value)) {
                 ksort($value);
@@ -393,10 +416,13 @@ class SalesOrderService
      * is rebuilt from the locked quote so direct API calls cannot alter a sale.
      *
      * @param  array<string, mixed>  $data
-     * @return array{0: array<string, mixed>, 1: SalesQuote, 2: SalesOrder|null}
+     * @return array{0: array<string, mixed>, 1: SalesQuote, 2: SalesOrder|null, 3: PosSession}
      */
-    private function prepareCashierCheckout(array $data): array
-    {
+    private function prepareCashierCheckout(
+        array $data,
+        ?string $idempotencyKey,
+        ?string $requestHash,
+    ): array {
         $quoteId = (int) ($data['source_quote_id'] ?? 0);
         $quote = SalesQuote::query()
             ->with(['items'])
@@ -407,23 +433,29 @@ class SalesOrderService
             throw ValidationException::withMessages(['source_quote_id' => 'La venta de la cola ya no esta disponible.']);
         }
 
-        if ($quote->converted_order_id) {
-            return [$data, $quote, SalesOrder::with(['customer', 'items.product', 'payments'])->findOrFail($quote->converted_order_id)];
+        $existingOrder = $quote->converted_order_id
+            ? SalesOrder::query()
+                ->with(['customer', 'items.product', 'payments'])
+                ->lockForUpdate()
+                ->findOrFail($quote->converted_order_id)
+            : null;
+
+        if ($existingOrder?->idempotency_key === $idempotencyKey && $idempotencyKey !== null) {
+            return [$data, $quote, $this->assertIdempotentReplay($existingOrder, $requestHash), $this->cashierSessionForQuote($quote)];
         }
 
         if ($quote->status !== 'sent_to_cashier') {
             throw ValidationException::withMessages(['source_quote_id' => 'La cotizacion no esta disponible en la cola de Caja.']);
         }
 
-        $session = PosSession::query()
-            ->where('user_id', Auth::id())
-            ->where('warehouse_id', $quote->warehouse_id)
-            ->where('status', 'open')
-            ->latest()
-            ->first();
+        $session = $this->cashierSessionForQuote($quote);
 
-        if (! $session) {
-            throw ValidationException::withMessages(['source_quote_id' => 'Debe abrir Caja en la sucursal de la cotizacion antes de cobrar.']);
+        if ($existingOrder) {
+            if ($existingOrder->status !== 'pending' || $existingOrder->payments->isNotEmpty()) {
+                throw ValidationException::withMessages(['source_quote_id' => 'La orden asociada ya no está disponible para cobro.']);
+            }
+
+            $this->assertLinkedOrderMatchesQuote($quote, $existingOrder);
         }
 
         $submitted = collect($data['items'] ?? [])->keyBy(fn (array $item): int => (int) ($item['source_quote_item_id'] ?? 0));
@@ -462,7 +494,125 @@ class SalesOrderService
             ];
         })->all();
 
-        return [$data, $quote, null];
+        return [$data, $quote, $existingOrder, $session];
+    }
+
+    private function assertLinkedOrderMatchesQuote(SalesQuote $quote, SalesOrder $order): void
+    {
+        $signature = static fn ($items): array => $items
+            ->map(fn ($item): array => [
+                'product_id' => $item->product_id !== null ? (int) $item->product_id : null,
+                'variant_id' => $item->variant_id !== null ? (int) $item->variant_id : null,
+                'warehouse_id' => (int) $item->warehouse_id,
+                'quantity' => (int) $item->quantity,
+                'unit_price' => round((float) $item->unit_price, 2),
+                'discount_percent' => round((float) $item->discount_percent, 2),
+                'tax_percent' => round((float) $item->tax_percent, 2),
+                'is_custom_line' => (bool) $item->is_custom_line,
+                'custom_description' => trim((string) ($item->custom_description ?? '')),
+            ])
+            ->sortBy(fn (array $item): string => json_encode($item, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_UNICODE))
+            ->values()
+            ->all();
+
+        if ($signature($quote->items) !== $signature($order->items)) {
+            throw ValidationException::withMessages([
+                'source_quote_id' => 'La orden vinculada ya no coincide con la cotizacion enviada a Caja.',
+            ]);
+        }
+    }
+
+    private function cashierSessionForQuote(SalesQuote $quote): PosSession
+    {
+        $session = PosSession::query()
+            ->where('user_id', Auth::id())
+            ->where('warehouse_id', $quote->warehouse_id)
+            ->where('status', 'open')
+            ->latest()
+            ->lockForUpdate()
+            ->first();
+
+        if (! $session) {
+            throw ValidationException::withMessages(['source_quote_id' => 'Debe abrir Caja en la sucursal de la cotizacion antes de cobrar.']);
+        }
+
+        return $session;
+    }
+
+    private function checkoutLinkedWarehouseOrder(
+        SalesOrder $order,
+        SalesQuote $quote,
+        PosSession $session,
+        array $data,
+        ?string $idempotencyKey,
+        ?string $requestHash,
+    ): SalesOrder {
+        if (! $idempotencyKey || ! $requestHash) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'La clave de idempotencia es obligatoria para cobrar desde Caja.',
+            ]);
+        }
+
+        $customer = $order->customer_id
+            ? \App\Models\Customer::query()->lockForUpdate()->find($order->customer_id)
+            : null;
+        $payments = $this->validateCheckoutPayments($order, $data, $customer, $session);
+
+        $order->forceFill([
+            'idempotency_key' => $idempotencyKey,
+            'request_hash' => $requestHash,
+            'pos_session_id' => $session->id,
+            'payment_method' => $data['payment_method'] ?? 'multiple',
+            'business_datetime' => now(),
+        ])->save();
+
+        foreach ($payments as $payment) {
+            if ((float) ($payment['amount'] ?? 0) <= 0) {
+                continue;
+            }
+
+            $order->addPayment(
+                amount: (float) $payment['amount'],
+                method: $payment['method'] ?? 'cash',
+                notes: $payment['notes'] ?? 'Pago POS',
+                isCheckout: true,
+                referenceNumber: $payment['reference_number'] ?? null,
+                financialAccountId: $payment['financial_account_id'] ?? null,
+            );
+        }
+
+        $order->refresh()->load(['items.product', 'payments']);
+        if (! $order->confirm(consumeReserved: false)) {
+            throw ValidationException::withMessages([
+                'source_quote_id' => 'La orden asociada ya no puede confirmarse.',
+            ]);
+        }
+
+        $stockWarnings = $order->stockWarnings;
+
+        $quote->update(['status' => 'collected']);
+
+        activity()
+            ->performedOn($quote)
+            ->causedBy(Auth::user())
+            ->withProperties([
+                'sales_order_id' => $order->id,
+                'prepared_at_checkout' => $order->prepared_at?->toISOString(),
+                'stock_warnings' => $stockWarnings,
+            ])
+            ->log('cashier_collected');
+
+        $this->cashierQueueService->completeForSource(
+            SalesQuote::class,
+            $quote->id,
+            Auth::user(),
+            (float) $order->total,
+        );
+
+        $fresh = $order->fresh(['customer', 'items.product', 'payments']);
+        $fresh->stockWarnings = $stockWarnings;
+
+        return $fresh;
     }
 
     /**

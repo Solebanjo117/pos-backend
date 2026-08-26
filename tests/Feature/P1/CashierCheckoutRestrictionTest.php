@@ -10,6 +10,7 @@ use App\Models\SalesQuote;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -95,6 +96,7 @@ it('opens and checks out a queued quote without trusting commercial fields', fun
     ]);
 
     $payload = [
+        'idempotency_key' => (string) Str::uuid(),
         'source_quote_id' => $this->quote->id,
         'status' => 'confirmed',
         'payments' => [['method' => 'cash', 'amount' => 96.30]],

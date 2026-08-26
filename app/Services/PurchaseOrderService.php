@@ -10,6 +10,7 @@ use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
+use App\Models\PurchaseOrderReceipt;
 use App\Models\Supplier;
 use App\Models\SupplyListItem;
 use Illuminate\Database\QueryException;
@@ -522,131 +523,250 @@ class PurchaseOrderService
      * Receive items for a PO
      * $receivedItems format: [{ item_id: int, quantity_received: int, batch_number?: string, expiry_date?: string }]
      */
-    public function receiveItems(int $id, array $receivedItems): PurchaseOrder
+    public function receiveItems(int $id, array $receivedItems, ?string $idempotencyKey = null): PurchaseOrder
     {
-        return DB::transaction(function () use ($id, $receivedItems) {
-            $po = PurchaseOrder::with('items.product', 'items.variant')->findOrFail($id);
+        $requestHash = $idempotencyKey !== null
+            ? $this->purchaseReceiptRequestHash($id, $receivedItems)
+            : null;
 
-            if (! $po->canReceiveItems()) {
-                throw new \Exception('Esta orden no puede recibir mercancía');
+        if ($idempotencyKey !== null) {
+            $existingReceipt = PurchaseOrderReceipt::query()
+                ->where('idempotency_key', $idempotencyKey)
+                ->first();
+
+            if ($existingReceipt) {
+                return $this->replayPurchaseReceipt($existingReceipt, $id, $requestHash);
             }
+        }
 
-            foreach ($receivedItems as $received) {
-                $item = PurchaseOrderItem::findOrFail($received['item_id']);
+        try {
+            return DB::transaction(function () use ($id, $receivedItems, $idempotencyKey, $requestHash) {
+                $po = PurchaseOrder::query()
+                    ->with('items.product', 'items.variant')
+                    ->lockForUpdate()
+                    ->findOrFail($id);
 
-                if ((int) $item->purchase_order_id !== (int) $po->id) {
-                    throw new \Exception('El artículo recibido no pertenece a esta orden de compra');
+                if ($idempotencyKey !== null) {
+                    $existingReceipt = PurchaseOrderReceipt::query()
+                        ->where('idempotency_key', $idempotencyKey)
+                        ->first();
+
+                    if ($existingReceipt) {
+                        return $this->replayPurchaseReceipt($existingReceipt, $id, $requestHash);
+                    }
                 }
 
-                // Validate not receiving more than ordered
-                $preAppliedQty = max(0, (int) ($item->pre_stock_applied_qty ?? 0));
-                $maxReceivable = max(0, ((int) $item->quantity_ordered - $preAppliedQty) - (int) $item->quantity_received);
-                $qtyToReceive = min($received['quantity_received'], $maxReceivable);
-
-                if ($qtyToReceive <= 0) {
-                    continue;
+                if (! $po->canReceiveItems()) {
+                    throw new \Exception('Esta orden no puede recibir mercancía');
                 }
 
-                // Update received quantity
-                $item->quantity_received += $qtyToReceive;
-                $item->save();
+                $receivedItemIds = collect($receivedItems)
+                    ->pluck('item_id')
+                    ->map(fn ($itemId): int => (int) $itemId)
+                    ->values();
 
-                // Determine if using variant or product (backwards compatibility)
-                $useVariant = ! empty($item->variant_id);
-                $productId = $item->product_id;
-                $variantId = $item->variant_id;
+                if ($receivedItemIds->duplicates()->isNotEmpty()) {
+                    throw new \Exception('Una línea de compra no puede recibirse dos veces en la misma solicitud');
+                }
 
-                // Calculate actual units received (packages × units per package)
-                $actualUnits = $qtyToReceive * ($item->units_per_package ?? 1);
+                $lockedItems = PurchaseOrderItem::query()
+                    ->with(['product.category', 'variant.pricing', 'product.pricing'])
+                    ->where('purchase_order_id', $po->id)
+                    ->whereIn('id', $receivedItemIds)
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
 
-                $lineUnits = max(1, (int) $item->quantity_ordered * (int) ($item->units_per_package ?? 1));
-                $receivedRatio = $actualUnits / $lineUnits;
-                $newSalePrice = $this->receivedSalePriceForItem($item, $received);
+                if ($lockedItems->count() !== $receivedItemIds->count()) {
+                    throw new \Exception('Una o más líneas no pertenecen a esta orden de compra');
+                }
 
-                app(InventoryFifoService::class)->receiveStock([
-                    'product_id' => $productId,
-                    'variant_id' => $variantId,
-                    'warehouse_id' => $po->warehouse_id,
-                    'quantity' => $actualUnits,
-                    'unit_cost_base' => (float) $item->unit_cost,
-                    'tax_amount' => round((float) $item->tax_amount * $receivedRatio, 4),
-                    'misc_cost' => round((float) ($item->misc_cost ?? 0) * $receivedRatio, 4),
-                    'reference_type' => 'purchase_order',
-                    'reference_id' => $po->id,
-                    'source_type' => 'purchase_order',
-                    'source_id' => $item->id,
-                    'notes' => "RecepciÃ³n PO {$po->po_number}",
-                    'user_id' => Auth::id(),
-                    'supplier_id' => $item->supplier_id ?? $po->supplier_id,
-                    'batch_number' => $received['batch_number'] ?? null,
-                    'sale_price' => $newSalePrice,
-                ]);
+                foreach ($receivedItems as $received) {
+                    /** @var PurchaseOrderItem $item */
+                    $item = $lockedItems->get((int) $received['item_id']);
 
-                // Handle batch tracking if enabled
-                if ($item->product && $item->product->batch_tracking && ! empty($received['batch_number'])) {
-                    $batchData = [
+                    if ((int) $item->purchase_order_id !== (int) $po->id) {
+                        throw new \Exception('El artículo recibido no pertenece a esta orden de compra');
+                    }
+
+                    // Validate not receiving more than ordered
+                    $preAppliedQty = max(0, (int) ($item->pre_stock_applied_qty ?? 0));
+                    $maxReceivable = max(0, ((int) $item->quantity_ordered - $preAppliedQty) - (int) $item->quantity_received);
+                    $qtyToReceive = min($received['quantity_received'], $maxReceivable);
+
+                    if ($qtyToReceive <= 0) {
+                        continue;
+                    }
+
+                    // Update received quantity
+                    $item->quantity_received += $qtyToReceive;
+                    $item->save();
+
+                    // Determine if using variant or product (backwards compatibility)
+                    $useVariant = ! empty($item->variant_id);
+                    $productId = $item->product_id;
+                    $variantId = $item->variant_id;
+
+                    // Calculate actual units received (packages × units per package)
+                    $actualUnits = $qtyToReceive * ($item->units_per_package ?? 1);
+
+                    $lineUnits = max(1, (int) $item->quantity_ordered * (int) ($item->units_per_package ?? 1));
+                    $receivedRatio = $actualUnits / $lineUnits;
+                    $newSalePrice = $this->receivedSalePriceForItem($item, $received);
+
+                    app(InventoryFifoService::class)->receiveStock([
                         'product_id' => $productId,
-                        'batch_number' => $received['batch_number'],
+                        'variant_id' => $variantId,
+                        'warehouse_id' => $po->warehouse_id,
                         'quantity' => $actualUnits,
-                        'expiry_date' => $received['expiry_date'] ?? null,
-                        'cost' => $item->unit_cost,
-                    ];
+                        'unit_cost_base' => (float) $item->unit_cost,
+                        'tax_amount' => round((float) $item->tax_amount * $receivedRatio, 4),
+                        'misc_cost' => round((float) ($item->misc_cost ?? 0) * $receivedRatio, 4),
+                        'reference_type' => 'purchase_order',
+                        'reference_id' => $po->id,
+                        'source_type' => 'purchase_order',
+                        'source_id' => $item->id,
+                        'notes' => "RecepciÃ³n PO {$po->po_number}",
+                        'user_id' => Auth::id(),
+                        'supplier_id' => $item->supplier_id ?? $po->supplier_id,
+                        'batch_number' => $received['batch_number'] ?? null,
+                        'sale_price' => $newSalePrice,
+                    ]);
 
-                    if ($useVariant) {
-                        $batchData['variant_id'] = $variantId;
+                    // Handle batch tracking if enabled
+                    if ($item->product && $item->product->batch_tracking && ! empty($received['batch_number'])) {
+                        $batchData = [
+                            'product_id' => $productId,
+                            'batch_number' => $received['batch_number'],
+                            'quantity' => $actualUnits,
+                            'expiry_date' => $received['expiry_date'] ?? null,
+                            'cost' => $item->unit_cost,
+                        ];
+
+                        if ($useVariant) {
+                            $batchData['variant_id'] = $variantId;
+                        }
+
+                        ProductBatch::create($batchData);
                     }
 
-                    ProductBatch::create($batchData);
-                }
-
-                // R30 — Update sale price if provided and different (LL-012)
-                if ($newSalePrice !== null && $newSalePrice > 0) {
-                    if ($useVariant && $item->variant) {
-                        $pricing = $item->variant->pricing;
-                        if ($pricing && (float) $pricing->base_price !== $newSalePrice) {
-                            $pricing->update(['base_price' => $newSalePrice]);
+                    // R30 — Update sale price if provided and different (LL-012)
+                    if ($newSalePrice !== null && $newSalePrice > 0) {
+                        if ($useVariant && $item->variant) {
+                            $pricing = $item->variant->pricing;
+                            if ($pricing && (float) $pricing->base_price !== $newSalePrice) {
+                                $pricing->update(['base_price' => $newSalePrice]);
+                            }
+                        } elseif ($item->product) {
+                            $pricing = $item->product->pricing;
+                            if ($pricing && (float) $pricing->base_price !== $newSalePrice) {
+                                $pricing->update(['base_price' => $newSalePrice]);
+                            }
                         }
-                    } elseif ($item->product) {
-                        $pricing = $item->product->pricing;
-                        if ($pricing && (float) $pricing->base_price !== $newSalePrice) {
-                            $pricing->update(['base_price' => $newSalePrice]);
-                        }
-                    }
-                } else {
-                    // R23 — No explicit sale_price: try category pricing formula as fallback
-                    $category = $item->product?->category;
-                    if ($category?->pricing_formula && $item->unit_cost > 0) {
-                        $formulaService = app(PricingFormulaService::class);
-                        $calculated = $formulaService->calculate(
-                            $category->pricing_formula,
-                            (float) $item->unit_cost,
-                            (bool) $category->applies_itbm
-                        );
-                        if ($calculated !== null) {
-                            $pricing = $useVariant
-                                ? $item->variant?->pricing
-                                : $item->product?->pricing;
-                            if ($pricing && (float) $pricing->base_price !== $calculated) {
-                                $pricing->update(['base_price' => $calculated]);
+                    } else {
+                        // R23 — No explicit sale_price: try category pricing formula as fallback
+                        $category = $item->product?->category;
+                        if ($category?->pricing_formula && $item->unit_cost > 0) {
+                            $formulaService = app(PricingFormulaService::class);
+                            $calculated = $formulaService->calculate(
+                                $category->pricing_formula,
+                                (float) $item->unit_cost,
+                                (bool) $category->applies_itbm
+                            );
+                            if ($calculated !== null) {
+                                $pricing = $useVariant
+                                    ? $item->variant?->pricing
+                                    : $item->product?->pricing;
+                                if ($pricing && (float) $pricing->base_price !== $calculated) {
+                                    $pricing->update(['base_price' => $calculated]);
+                                }
                             }
                         }
                     }
+
                 }
 
+                // Update PO status based on reception
+                $po->refresh()->load('items');
+                if ($po->isFullyReceived()) {
+                    $po->status = 'received';
+                    $po->received_date = now();
+                } else {
+                    $po->status = 'partial';
+                }
+                $po->save();
+
+                if ($idempotencyKey !== null) {
+                    PurchaseOrderReceipt::query()->create([
+                        'purchase_order_id' => $po->id,
+                        'user_id' => Auth::id(),
+                        'idempotency_key' => $idempotencyKey,
+                        'request_hash' => $requestHash,
+                        'payload' => $this->canonicalPurchaseReceiptPayload($id, $receivedItems),
+                    ]);
+                }
+
+                return $po->fresh(['supplier', 'warehouse', 'items.product', 'items.variant']);
+            });
+        } catch (QueryException $exception) {
+            if ($idempotencyKey !== null) {
+                $existingReceipt = PurchaseOrderReceipt::query()
+                    ->where('idempotency_key', $idempotencyKey)
+                    ->first();
+
+                if ($existingReceipt) {
+                    return $this->replayPurchaseReceipt($existingReceipt, $id, $requestHash);
+                }
             }
 
-            // Update PO status based on reception
-            $po->refresh()->load('items');
-            if ($po->isFullyReceived()) {
-                $po->status = 'received';
-                $po->received_date = now();
-            } else {
-                $po->status = 'partial';
-            }
-            $po->save();
+            throw $exception;
+        }
+    }
 
-            return $po->fresh(['supplier', 'warehouse', 'items.product', 'items.variant']);
-        });
+    private function replayPurchaseReceipt(
+        PurchaseOrderReceipt $receipt,
+        int $purchaseOrderId,
+        string $requestHash
+    ): PurchaseOrder {
+        if (
+            (int) $receipt->purchase_order_id !== $purchaseOrderId
+            || ! hash_equals($receipt->request_hash, $requestHash)
+        ) {
+            throw new IdempotencyConflictException('La clave de idempotencia ya fue utilizada con datos diferentes.');
+        }
+
+        return PurchaseOrder::query()
+            ->with(['supplier', 'warehouse', 'items.product', 'items.variant'])
+            ->findOrFail($purchaseOrderId);
+    }
+
+    private function purchaseReceiptRequestHash(int $purchaseOrderId, array $receivedItems): string
+    {
+        return hash('sha256', json_encode(
+            $this->canonicalPurchaseReceiptPayload($purchaseOrderId, $receivedItems),
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE
+        ));
+    }
+
+    private function canonicalPurchaseReceiptPayload(int $purchaseOrderId, array $receivedItems): array
+    {
+        $items = collect($receivedItems)
+            ->map(fn (array $item): array => [
+                'item_id' => (int) $item['item_id'],
+                'quantity_received' => (int) $item['quantity_received'],
+                'batch_number' => isset($item['batch_number']) ? trim((string) $item['batch_number']) : null,
+                'expiry_date' => $item['expiry_date'] ?? null,
+                'sale_price' => isset($item['sale_price']) ? round((float) $item['sale_price'], 4) : null,
+            ])
+            ->sortBy('item_id')
+            ->values()
+            ->all();
+
+        return [
+            'purchase_order_id' => $purchaseOrderId,
+            'user_id' => Auth::id(),
+            'items' => $items,
+        ];
     }
 
     /**

@@ -9,6 +9,7 @@ use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -480,6 +481,7 @@ it('shows received inventory impact from purchase order detail', function () {
     $item = $order->items->first();
 
     $this->actingAs($buyer)->postJson('/api/v1/purchase-orders/'.$order->id.'/receive', [
+        'idempotency_key' => (string) Str::uuid(),
         'items' => [
             [
                 'item_id' => $item->id,
