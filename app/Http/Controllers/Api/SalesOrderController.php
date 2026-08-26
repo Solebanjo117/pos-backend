@@ -123,7 +123,11 @@ class SalesOrderController extends Controller
             }
 
             $validated = $request->validate([
-                'idempotency_key' => 'nullable|uuid',
+                'idempotency_key' => [
+                    Rule::requiredIf(fn (): bool => $request->user()?->role === 'cashier' && $request->filled('source_quote_id')),
+                    'nullable',
+                    'uuid',
+                ],
                 'user_id' => 'nullable|integer|min:1',
                 'customer_id' => 'nullable|exists:customers,id',
                 'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',
@@ -190,7 +194,9 @@ class SalesOrderController extends Controller
 
             // ── Defensive stock check — collect warnings only, do NOT block ──
             $stockWarnings = [];
-            if (! empty($validated['items'])) {
+            $isCashierQuoteCheckout = $request->user()?->role === 'cashier'
+                && ! empty($validated['source_quote_id']);
+            if (! $isCashierQuoteCheckout && ! empty($validated['items'])) {
                 foreach ($validated['items'] as $item) {
                     if (! empty($item['is_custom_line'])) {
                         continue;
@@ -263,7 +269,14 @@ class SalesOrderController extends Controller
                 $hasCredit = true;
             }
 
-            if ($hasCredit && empty($validated['customer_id'])) {
+            $checkoutCustomerId = $validated['customer_id'] ?? null;
+            if (! $checkoutCustomerId && ! empty($validated['source_quote_id'])) {
+                $checkoutCustomerId = \App\Models\SalesQuote::query()
+                    ->whereKey($validated['source_quote_id'])
+                    ->value('customer_id');
+            }
+
+            if ($hasCredit && ! $checkoutCustomerId) {
                 return response()->json([
                     'message' => 'Selecciona un cliente para vender a credito.',
                 ], 422);
@@ -271,9 +284,9 @@ class SalesOrderController extends Controller
 
             if (
                 $hasCredit
-                && ! empty($validated['customer_id'])
+                && $checkoutCustomerId
             ) {
-                $customer = \App\Models\Customer::find($validated['customer_id']);
+                $customer = \App\Models\Customer::find($checkoutCustomerId);
 
                 if ($customer) {
                     $creditAvailable = max(

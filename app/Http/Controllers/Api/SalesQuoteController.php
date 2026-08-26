@@ -577,11 +577,21 @@ class SalesQuoteController extends Controller
     public function openAtCashier(Request $request, int $id): JsonResponse
     {
         $quote = SalesQuote::query()
-            ->with(['customer', 'user', 'warehouse', 'items.product', 'items.variant.brand'])
+            ->with(['customer', 'user', 'warehouse', 'items.product', 'items.variant.brand', 'convertedOrder.payments'])
             ->findOrFail($id);
 
-        if ($quote->status !== 'sent_to_cashier' || $quote->converted_order_id !== null) {
+        if ($quote->status !== 'sent_to_cashier') {
             return response()->json(['message' => 'Esta cotizacion ya no esta disponible en la cola.'], 422);
+        }
+
+        if ($quote->converted_order_id !== null) {
+            $order = $quote->convertedOrder;
+            if (! $order) {
+                return response()->json(['message' => 'La orden asociada a la cotizacion ya no existe.'], 422);
+            }
+            if ($order->status !== 'pending' || $order->payments->isNotEmpty()) {
+                return response()->json(['message' => 'La orden asociada ya no está disponible para cobro.'], 422);
+            }
         }
 
         $warehouseId = $request->header('X-Warehouse-Id') ?? $request->user()?->current_warehouse_id;

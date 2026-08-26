@@ -82,6 +82,11 @@ class PosCheckoutRequest extends FormRequest
         ]);
 
         return [
+            'idempotency_key' => [
+                Rule::requiredIf(fn (): bool => $this->user()?->role === 'cashier' && $this->filled('source_quote_id')),
+                'nullable',
+                'uuid',
+            ],
             'user_id' => 'nullable|integer|min:1',
             'customer_id' => 'nullable|exists:customers,id',
             'customer_vehicle_id' => 'nullable|exists:customer_vehicles,id',

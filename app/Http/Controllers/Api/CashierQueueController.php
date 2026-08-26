@@ -96,6 +96,17 @@ class CashierQueueController extends Controller
                 'seller_name' => $source->user?->name,
                 'notes' => $source->notes,
                 'created_at' => $source->created_at?->toISOString(),
+                'order_number' => $source->convertedOrder?->order_number,
+                'prepared_at' => $source->convertedOrder?->prepared_at?->toISOString(),
+                'preparation_status' => $source->convertedOrder?->prepared_at ? 'prepared' : 'pending',
+                'items' => $source->items->map(fn ($item): array => [
+                    'id' => $item->id,
+                    'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
+                    'product_name' => $item->product_name,
+                    'product_sku' => $item->variant?->sku ?? $item->product_sku,
+                    'quantity' => (int) $item->quantity,
+                ])->values(),
             ],
             $source instanceof \App\Models\OperationalExpense => [
                 'id' => $source->id,

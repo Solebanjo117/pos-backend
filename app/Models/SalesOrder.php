@@ -264,7 +264,7 @@ class SalesOrder extends Model
     /**
      * Confirm order and deduct inventory
      */
-    public function confirm(): bool
+    public function confirm(bool $consumeReserved = true): bool
     {
         if (! $this->canBeConfirmed()) {
             return false;
@@ -287,7 +287,9 @@ class SalesOrder extends Model
             $inventory = $query->first();
 
             $available = $inventory ? max(0, (int) $inventory->quantity_available) : 0;
-            $reserved = $inventory ? max(0, (int) $inventory->quantity_reserved) : 0;
+            $reserved = $consumeReserved && $inventory
+                ? max(0, (int) $inventory->quantity_reserved)
+                : 0;
             $requested = (int) $item->quantity;
             $quantityToDeduct = min($requested, max(0, $available + $reserved));
 
@@ -320,7 +322,7 @@ class SalesOrder extends Model
                 'sales_order_item_id' => $item->id,
                 'notes' => "Venta - Orden {$this->order_number}",
                 'user_id' => Auth::id(),
-                'consume_reserved' => true,
+                'consume_reserved' => $consumeReserved,
             ]);
 
             if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
