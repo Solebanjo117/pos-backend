@@ -19,6 +19,18 @@ class DocumentSequenceService
         return str_pad((string) $this->next(self::COMMERCIAL), 10, '0', STR_PAD_LEFT);
     }
 
+    public function nextQuoteFolio(CarbonInterface $regionalDatetime): string
+    {
+        $date = $regionalDatetime->format('Ymd');
+        $sequence = $this->next('sales_quote:'.$date);
+
+        if ($sequence > 9999) {
+            throw new \RuntimeException("Se agotaron los folios de cotización para {$date}.");
+        }
+
+        return $date.str_pad((string) $sequence, 4, '0', STR_PAD_LEFT);
+    }
+
     public function nextPurchaseOrderFolio(): string
     {
         return 'PO-'.str_pad((string) $this->next(self::PURCHASE_ORDER), 10, '0', STR_PAD_LEFT);

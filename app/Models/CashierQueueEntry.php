@@ -14,6 +14,12 @@ class CashierQueueEntry extends Model
 
     public const TYPE_RETURN = 'sales_return_refund';
 
+    public const TYPE_CASH_IN = 'cash_in_request';
+
+    public const TYPE_CASH_OUT = 'cash_out_request';
+
+    public const TYPE_FUNDING = 'funding_request';
+
     public const STATUS_PENDING = 'pending';
 
     public const STATUS_OPENED = 'opened';

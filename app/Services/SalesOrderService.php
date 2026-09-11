@@ -709,7 +709,7 @@ class SalesOrderService
                 $unitCost = $supplierPivot->supplier_cost ?? 0;
             }
 
-            $item = SalesOrderItem::create([
+            $itemAttributes = [
                 'sales_order_id' => $orderId,
                 'product_id' => $isCustomLine ? null : ($itemData['product_id'] ?? null),
                 'variant_id' => $variantId,
@@ -719,12 +719,17 @@ class SalesOrderService
                 'unit_price' => $itemData['unit_price'],
                 'unit_cost' => $unitCost,
                 'discount_percent' => $itemData['discount_percent'] ?? 0,
-                'discount_amount' => $itemData['discount_amount'] ?? 0,
                 'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                 'is_custom_line' => $isCustomLine,
                 'custom_description' => $customDescription,
                 'added_after_sale' => $isConfirmed,
-            ]);
+            ];
+
+            if (array_key_exists('discount_amount', $itemData) && $itemData['discount_amount'] !== null) {
+                $itemAttributes['discount_amount'] = $itemData['discount_amount'];
+            }
+
+            $item = SalesOrderItem::create($itemAttributes);
 
             if ($isConfirmed) {
                 if (! $isCustomLine) {
@@ -1083,13 +1088,31 @@ class SalesOrderService
             });
         }
 
+        $financialOrders = (clone $query)
+            ->with(['payments', 'returns', 'financialAdjustments'])
+            ->get();
+
         return [
             'total_orders' => (clone $query)->count(),
             'total_sales' => (clone $query)->sum('total'),
+            'draft_orders' => (clone $query)->byStatus('draft')->count(),
             'pending_orders' => (clone $query)->byStatus('pending')->count(),
             'confirmed_orders' => (clone $query)->byStatus('confirmed')->count(),
             'completed_orders' => (clone $query)->byStatus('completed')->count(),
             'cancelled_orders' => (clone $query)->byStatus('cancelled')->count(),
+            'collected_sales' => round(
+                (float) $financialOrders->sum(
+                    fn (SalesOrder $order): float => (float) $order->amount_paid,
+                ),
+                2,
+            ),
+            'credit_receivable' => round(
+                (float) $financialOrders
+                    ->whereIn('payment_status', ['pending', 'partial'])
+                    ->whereNotIn('status', ['draft', 'cancelled'])
+                    ->sum(fn (SalesOrder $order): float => (float) $order->amount_due),
+                2,
+            ),
             'average_order_value' => (clone $query)->avg('total') ?? 0,
         ];
     }

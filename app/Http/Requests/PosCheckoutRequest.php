@@ -124,6 +124,29 @@ class PosCheckoutRequest extends FormRequest
     public function withValidator($validator): void
     {
         $validator->after(function ($validator): void {
+            foreach ($this->input('items', []) as $index => $item) {
+                if (
+                    ! is_array($item)
+                    || ! array_key_exists('discount_amount', $item)
+                    || $item['discount_amount'] === null
+                    || ! is_numeric($item['discount_amount'])
+                    || ! is_numeric($item['quantity'] ?? null)
+                    || ! is_numeric($item['unit_price'] ?? null)
+                ) {
+                    continue;
+                }
+
+                $grossSubtotal = round((float) $item['quantity'] * (float) $item['unit_price'], 2);
+                $discountAmount = round((float) $item['discount_amount'], 2);
+
+                if ($discountAmount > $grossSubtotal) {
+                    $validator->errors()->add(
+                        "items.{$index}.discount_amount",
+                        'El descuento no puede superar el importe bruto de la línea.',
+                    );
+                }
+            }
+
             foreach ($this->input('payments', []) as $index => $payment) {
                 if (! is_array($payment) || empty($payment['method'])) {
                     continue;

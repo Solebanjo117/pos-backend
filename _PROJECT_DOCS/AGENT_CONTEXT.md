@@ -1,12 +1,56 @@
 ## Documentación relacionada
 - Patrones del proyecto: _PROJECT_DOCS/PATTERNS.md
 - Bugs resueltos y reglas derivadas: _PROJECT_DOCS/LESSONS_LEARNED.md
+
+## Actualización de contexto — 2026-09-06
+
+### Alcance y estado Git auditado
+
+- Se revisaron los cambios incorporados después de los merges del 21-ago-2026 hasta los `master` remotos actuales: backend `9e2691aa` (PR #22) y frontend `dcd90afc` (PR #25). `git ls-remote` confirmó ambos SHA en GitHub.
+- El rango sustantivo auditado fue backend `e57cad86`, `d0b7034e`, `480abfee`, `d2de0b52` y `74c46135`; frontend `16e8abe4`, `d0ea89f1`, `3d80ddaa`, `7865161b` y `c2b92574`.
+- Ambos repositorios estaban limpios antes de la auditoría y las verificaciones no generaron cambios funcionales. Los únicos cambios resultantes son esta actualización de contexto y la corrección equivalente de `pos-frontend/AGENTS.md`; no se ejecutaron migraciones.
+- Los mensajes genéricos `Primer commit` de varios commits sustantivos no cumplen la convención de Conventional Commits y dificultan la trazabilidad del historial.
+
+### Backend: capacidades incorporadas
+
+- Se reforzó la idempotencia de aperturas/cierres y movimientos de Caja, cotizaciones, ventas, pagos CxC, compras rápidas, devoluciones y recepciones de órdenes de compra. Las claves se persisten con índices únicos; los flujos más recientes también guardan hashes para distinguir reintentos válidos de reutilizaciones incompatibles.
+- La base local tiene aplicadas en batch 4 las nueve migraciones del rango: sesión abierta única, idempotencia de capital/caja/cotizaciones/ventas/pagos/OC/devoluciones, cuenta financiera de devolución y `purchase_order_receipts`.
+- El cobro de una cotización preparada reutiliza la orden vinculada, valida que sus líneas sigan coincidiendo con la cotización, exige una sesión de Caja de la sucursal y evita crear una segunda venta.
+- Las devoluciones ahora preservan una clave idempotente, validan cantidades nuevamente al aprobar, restauran FIFO, generan nota de crédito y separan reducción de CxC, saldo a favor y reembolso monetario. Los reembolsos bancarios conservan una cuenta financiera específica.
+- La recepción de OC bloquea la orden y sus líneas, registra el intento en `purchase_order_receipts` y permite recuperar un reintento idéntico sin duplicar inventario.
+- La trazabilidad y los detalles operativos se ampliaron para sesiones POS, tickets, ventas, devoluciones y cola de Caja.
+
+### Frontend: capacidades incorporadas
+
+- Existe una suite Vitest real para componentes, composables, páginas y utilidades; el contexto anterior que indicaba “backend only” quedó obsoleto.
+- `createIdempotencyKey()` y firmas estables de payload conservan la misma clave en reintentos equivalentes y generan otra cuando cambia la operación. Este patrón se usa en POS, movimientos/cierres de Caja, pagos, devoluciones y recepción de OC.
+- La Cola de Caja presenta las ventas en un flujo operativo propio, abre la cotización como pestaña POS, distingue pedido preparado/pendiente, muestra resumen de líneas y conserva gastos y devoluciones como liquidaciones separadas.
+- Se añadieron salvaguardas y pruebas de estructura/payload para modales financieros, clientes rápidos, variantes, sesión, tickets, devoluciones, trazabilidad y recepción de OC.
+- `package.json` declara actualmente Vite `^8.0.16`, `laravel-vite-plugin` `^3.1.0`, Vitest `^3.2.4`, Vue Test Utils `^2.4.6` y jsdom `^26.1.0`. No asumir que el `node_modules` local coincide con esas versiones.
+
+### Hallazgos abiertos de la auditoría
+
+1. **P1 — colisión de idempotencia en cotizaciones.** `SalesQuoteController::replayQuoteForKey()` busca solo por UUID y devuelve la cotización existente con HTTP 201 sin comparar el payload. Reutilizar la misma clave con cliente, líneas o importes distintos recupera silenciosamente la primera cotización. Las pruebas actuales cubren repetición idéntica, pero no el conflicto de contenido. Se necesita `request_hash`, respuesta 409 y cobertura para `store` y `storeFromPos`.
+2. **P1 — recepción de OC sin aislamiento por sucursal.** `ReceivePurchaseOrderRequest` confirma existencia por ID y `PurchaseOrderService::receiveItems()` vuelve a cargar por ID, pero ninguno compara `purchase_orders.warehouse_id` con el `warehouse_id` efectivo que inyecta `warehouse_context`. Un usuario autorizado en una sucursal puede intentar recibir una OC de otra si conoce su ID. La refactorización idempotente conserva este hueco y no hay prueba cross-warehouse para recepción.
+3. **P1 de despliegue — índice de sesión abierta.** `2026_08_22_000001_enforce_single_open_pos_session` crea directamente un índice único parcial. La base local lo aplicó correctamente, pero otro entorno con sesiones abiertas duplicadas por usuario/sucursal fallará al migrar. Antes de desplegar se debe ejecutar una consulta de preflight y resolver duplicados de forma auditable; no aplicar `migrate` a ciegas.
+4. **P2 — contrato de referencias de pago solo en UI.** La Cola de Caja exige visualmente referencia cuando el método la requiere, pero `CashierQueueController` y `SalesReturnService` aceptan `reference_number` nulo. Un cliente API directo puede liquidar un reembolso configurado con `requires_reference=true` sin referencia. La validación debe ser del servidor y reutilizable por gastos/devoluciones.
+5. **P2 — arquitectura todavía inconsistente.** Aunque los nuevos flujos usan servicios y algunas Form Requests, controladores grandes (`SalesQuoteController`, `SalesOrderController`, `CashierQueueController` y partes de `PurchaseOrderController`) mantienen validación inline, transacciones y lógica de negocio. No considerar completada la convención Form Request → Controller → Service.
+6. **P2 — instalación frontend desalineada.** El build local pasó con Vite 7.3.3, pero ese paquete y `laravel-vite-plugin` 2.1.0 están fuera de los rangos declarados; faltan Vitest, Vue Test Utils y jsdom. Por eso `npm run test:unit` no inicia y `vue-tsc --noEmit` falla por módulos de prueba ausentes. Ejecutar una instalación reproducible desde `package-lock.json` antes de interpretar esos fallos como defectos fuente.
+
+### Evidencia de verificación y límites
+
+- Backend focal: 108 pruebas aprobadas, 772 aserciones, sobre idempotencia, Caja, cotizaciones preparadas, pagos, devoluciones, trazabilidad y recepción de OC.
+- Backend local: `artisan migrate:status` confirmó todas las migraciones recientes como `Ran`; no se ejecutó `migrate`, seed, rollback ni escritura manual de datos.
+- Frontend: `npm run build` completó 4,451 módulos y produjo el bundle. `git diff --check` quedó limpio en ambos repositorios.
+- Frontend unit/type-check: no son evidencia válida en esta estación hasta reparar `node_modules`; Vitest no está instalado y los errores de TypeScript observados son consecuencia de módulos/tipos de prueba ausentes.
+- Pendiente: pruebas de concurrencia reales en PostgreSQL, instalación limpia de dependencias frontend, suite Vitest, `vue-tsc`, validación visual en navegador y recorridos físicos de Caja/impresión. El backend focal usa SQLite `:memory:` y no prueba semántica de bloqueo PostgreSQL.
+
 ### 1. Stack técnico confirmado
 
 - Backend (composer.json): PHP ^8.2, laravel/framework ^12.0, laravel/tinker ^2.10.1, barryvdh/laravel-dompdf, maatwebsite/excel, picqer/php-barcode-generator, spatie/laravel-activitylog.
 - Backend dev (composer.json): fakerphp/faker ^1.23, laravel/boost ^1.0, laravel/dusk, laravel/pail ^1.2.2, laravel/pint ^1.24, laravel/sail ^1.41, mockery/mockery ^1.6, nunomaduro/collision ^8.6, pestphp/pest ^4.3, pestphp/pest-plugin-laravel ^4.0.
-- Frontend/runtime (package.json): Vue ^3.5.13, @inertiajs/vue3 ^2.3.7, axios ^1.13.5, @vueuse/core ^12.8.2, chart.js ^4.5.1, vue-chartjs ^5.3.3, class-variance-authority ^0.7.1, clsx ^2.1.1, date-fns ^4.1.0, jsbarcode ^3.12.3, laravel-vite-plugin ^2.0.0, lucide-vue-next ^0.468.0, reka-ui ^2.8.2, tailwind-merge ^3.2.0, tailwindcss ^4.1.1, tw-animate-css ^1.2.5, vue-input-otp ^0.3.2, vuedraggable ^4.1.0.
-- Frontend/dev (package.json): TypeScript ^5.2.2, vite ^7.0.4, vue-tsc ^2.2.4, @vitejs/plugin-vue ^6.0.0, @tailwindcss/vite ^4.1.11, @eslint/js ^9.19.0, @vue/eslint-config-typescript ^14.3.0, eslint ^9.17.0, eslint-config-prettier ^10.0.1, eslint-import-resolver-typescript ^4.4.4, eslint-plugin-import ^2.32.0, eslint-plugin-vue ^9.32.0, prettier ^3.4.2, prettier-plugin-tailwindcss ^0.6.11, concurrently ^9.0.1, @laravel/vite-plugin-wayfinder ^0.1.3, @types/node ^22.13.5.
+- Frontend/runtime (package.json): Vue ^3.5.13, @inertiajs/vue3 ^2.3.7, axios ^1.13.5, @vueuse/core ^12.8.2, chart.js ^4.5.1, vue-chartjs ^5.3.3, class-variance-authority ^0.7.1, clsx ^2.1.1, date-fns ^4.1.0, jsbarcode ^3.12.3, laravel-vite-plugin ^3.1.0, lucide-vue-next ^0.468.0, reka-ui 2.8.2, tailwind-merge ^3.2.0, tailwindcss ^4.1.1, tw-animate-css ^1.2.5, vue-input-otp ^0.3.2, vuedraggable ^4.1.0.
+- Frontend/dev (package.json): TypeScript ^5.2.2, vite ^8.0.16, Vitest ^3.2.4, Vue Test Utils ^2.4.6, jsdom ^26.1.0, vue-tsc ^2.2.4, @vitejs/plugin-vue ^6.0.0, @tailwindcss/vite ^4.1.11, @eslint/js ^9.19.0, @vue/eslint-config-typescript ^14.3.0, eslint ^9.17.0, eslint-config-prettier ^10.0.1, eslint-import-resolver-typescript ^4.4.4, eslint-plugin-import ^2.32.0, eslint-plugin-vue ^9.32.0, prettier ^3.4.2, prettier-plugin-tailwindcss ^0.6.11, concurrently ^9.0.1, @laravel/vite-plugin-wayfinder ^0.1.3, @types/node ^22.13.5.
 
 ### 2. Mapa de archivos críticos
 

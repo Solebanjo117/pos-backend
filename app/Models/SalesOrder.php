@@ -111,6 +111,12 @@ class SalesOrder extends Model
         return $this->hasMany(\App\Models\SalesReturn::class, 'sales_order_id');
     }
 
+    public function financialAdjustments(): HasMany
+    {
+        return $this->hasMany(FinancialAdjustment::class)
+            ->where('is_legacy', false);
+    }
+
     public function canceller(): BelongsTo
     {
         return $this->belongsTo(User::class, 'cancelled_by');
@@ -135,7 +141,9 @@ class SalesOrder extends Model
 
     public function scopeByDateRange($query, $from, $to)
     {
-        return $query->whereBetween('date', [$from, $to]);
+        return $query
+            ->whereDate('date', '>=', $from)
+            ->whereDate('date', '<=', $to);
     }
 
     public function scopePending($query)
@@ -185,11 +193,14 @@ class SalesOrder extends Model
             : (float) $this->payments()->where('method', 'store_credit')->sum('amount');
 
         // Amount still owed
-        $adjustments = (float) FinancialAdjustment::query()
-            ->where('sales_order_id', $this->id)
-            ->where('is_legacy', false)
-            ->get(['amount', 'direction'])
-            ->sum(fn (FinancialAdjustment $adjustment): float => $adjustment->signedAmount());
+        $adjustments = $this->relationLoaded('financialAdjustments')
+            ? (float) $this->financialAdjustments
+                ->sum(fn (FinancialAdjustment $adjustment): float => $adjustment->signedAmount())
+            : (float) FinancialAdjustment::query()
+                ->where('sales_order_id', $this->id)
+                ->where('is_legacy', false)
+                ->get(['amount', 'direction'])
+                ->sum(fn (FinancialAdjustment $adjustment): float => $adjustment->signedAmount());
 
         return max(0, $effectiveTotal - $this->amount_paid - $storeCreditApplied + $adjustments);
     }

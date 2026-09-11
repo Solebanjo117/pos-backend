@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\CashierQueueEntry;
+use App\Models\CashOperationRequest;
 use App\Models\OperationalExpense;
 use App\Models\OperationalExpenseEvent;
 use App\Models\SalesQuote;
@@ -55,6 +56,7 @@ class CashierQueueService
                         ],
                         OperationalExpense::class => ['supplier', 'customer', 'beneficiary', 'categoryRecord'],
                         SalesReturn::class => ['customer', 'creditNote'],
+                        CashOperationRequest::class => ['requester', 'fundingCategory'],
                     ]);
                 },
                 'warehouse',
@@ -163,10 +165,41 @@ class CashierQueueService
         );
     }
 
-    public function open(CashierQueueEntry $entry, User $user): CashierQueueEntry
+    public function enqueueCashOperation(CashOperationRequest $request): CashierQueueEntry
     {
-        return DB::transaction(function () use ($entry, $user): CashierQueueEntry {
+        $entryType = match ($request->operation_type) {
+            CashOperationRequest::TYPE_CASH_IN => CashierQueueEntry::TYPE_CASH_IN,
+            CashOperationRequest::TYPE_CASH_OUT => CashierQueueEntry::TYPE_CASH_OUT,
+            CashOperationRequest::TYPE_FUNDING => CashierQueueEntry::TYPE_FUNDING,
+            default => throw new \InvalidArgumentException('El tipo de solicitud no se puede enviar a Caja.'),
+        };
+
+        return $this->firstOrCreateEntry(
+            [
+                'source_type' => CashOperationRequest::class,
+                'source_id' => $request->id,
+                'entry_type' => $entryType,
+            ],
+            [
+                'warehouse_id' => $request->warehouse_id,
+                'status' => CashierQueueEntry::STATUS_PENDING,
+                'estimated_amount' => $request->amount,
+                'scheduled_for' => $request->requested_at,
+                'metadata' => [
+                    'requested_by' => $request->requester?->only(['id', 'name']),
+                    'fixed_cash_amount' => true,
+                ],
+            ],
+        );
+    }
+
+    public function open(CashierQueueEntry $entry, User $user, int $warehouseId): CashierQueueEntry
+    {
+        return DB::transaction(function () use ($entry, $user, $warehouseId): CashierQueueEntry {
             $entry = CashierQueueEntry::query()->lockForUpdate()->findOrFail($entry->id);
+            if ($entry->warehouse_id !== $warehouseId) {
+                throw new \InvalidArgumentException('La solicitud no pertenece a la sucursal activa.');
+            }
             if ($entry->status === CashierQueueEntry::STATUS_COMPLETED) {
                 return $entry->load(['source', 'warehouse', 'opener']);
             }
@@ -188,10 +221,13 @@ class CashierQueueService
     }
 
     /** @param array<string, mixed> $data */
-    public function complete(CashierQueueEntry $entry, array $data, User $user): CashierQueueEntry
+    public function complete(CashierQueueEntry $entry, array $data, User $user, int $warehouseId): CashierQueueEntry
     {
-        return DB::transaction(function () use ($entry, $data, $user): CashierQueueEntry {
+        return DB::transaction(function () use ($entry, $data, $user, $warehouseId): CashierQueueEntry {
             $entry = CashierQueueEntry::query()->lockForUpdate()->findOrFail($entry->id);
+            if ($entry->warehouse_id !== $warehouseId) {
+                throw new \InvalidArgumentException('La solicitud no pertenece a la sucursal activa.');
+            }
             if ($entry->status === CashierQueueEntry::STATUS_COMPLETED) {
                 return $entry->load(['source', 'warehouse', 'completer']);
             }
@@ -211,6 +247,12 @@ class CashierQueueService
             }
 
             if ($entry->entry_type === CashierQueueEntry::TYPE_EXPENSE && $entry->source instanceof OperationalExpense) {
+                if ((bool) data_get($entry->metadata, 'fixed_cash_amount', false)) {
+                    $data = [
+                        'final_amount' => (float) $entry->estimated_amount,
+                        'payment_method' => 'cash',
+                    ];
+                }
                 $expense = $this->expenseService->settleFromQueue($entry->source, $entry, $data, $user);
                 $entry->update([
                     'status' => CashierQueueEntry::STATUS_COMPLETED,
@@ -221,6 +263,23 @@ class CashierQueueService
                         'payment_method' => $expense->payment_method,
                         'reference_number' => $expense->reference_number,
                     ]),
+                ]);
+
+                app(CashOperationRequestService::class)->markExpenseCompleted($entry, $user);
+
+                return $entry->fresh(['source', 'warehouse', 'completer']);
+            }
+
+            if (
+                in_array($entry->entry_type, [CashierQueueEntry::TYPE_CASH_IN, CashierQueueEntry::TYPE_CASH_OUT, CashierQueueEntry::TYPE_FUNDING], true)
+                && $entry->source instanceof CashOperationRequest
+            ) {
+                $request = app(CashOperationRequestService::class)->complete($entry->source, $entry, $user);
+                $entry->update([
+                    'status' => CashierQueueEntry::STATUS_COMPLETED,
+                    'final_amount' => $request->amount,
+                    'completed_by' => $user->id,
+                    'completed_at' => now(),
                 ]);
 
                 return $entry->fresh(['source', 'warehouse', 'completer']);

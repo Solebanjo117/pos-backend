@@ -88,14 +88,26 @@ class SalesQuoteItem extends Model
 
     public function calculateSubtotal(): float
     {
-        $subtotal = $this->quantity * $this->unit_price;
-        $this->discount_amount = 0.0;
+        $grossSubtotal = round((float) $this->quantity * (float) $this->unit_price, 2);
+        $hasExplicitDiscountAmount = (! $this->exists && array_key_exists('discount_amount', $this->attributes))
+            || ($this->exists && $this->isDirty('discount_amount'));
 
-        if ($this->discount_percent > 0) {
-            $this->discount_amount = $subtotal * ($this->discount_percent / 100);
+        if ($hasExplicitDiscountAmount) {
+            $this->discount_amount = min(
+                $grossSubtotal,
+                max(0, round((float) $this->discount_amount, 2)),
+            );
+            $this->discount_percent = $grossSubtotal > 0
+                ? round(((float) $this->discount_amount / $grossSubtotal) * 100, 2)
+                : 0;
+        } else {
+            $this->discount_amount = round(
+                $grossSubtotal * (max(0, (float) $this->discount_percent) / 100),
+                2,
+            );
         }
 
-        $this->subtotal = $subtotal - $this->discount_amount;
+        $this->subtotal = round($grossSubtotal - (float) $this->discount_amount, 2);
 
         return (float) $this->subtotal;
     }
@@ -104,7 +116,7 @@ class SalesQuoteItem extends Model
     {
         $this->tax_amount = 0.0;
         if ($this->tax_percent > 0) {
-            $this->tax_amount = $this->subtotal * ($this->tax_percent / 100);
+            $this->tax_amount = round((float) $this->subtotal * ($this->tax_percent / 100), 2);
         }
 
         return (float) $this->tax_amount;
@@ -114,7 +126,7 @@ class SalesQuoteItem extends Model
     {
         $this->calculateSubtotal();
         $this->calculateTax();
-        $this->total = $this->subtotal + $this->tax_amount;
+        $this->total = round((float) $this->subtotal + (float) $this->tax_amount, 2);
 
         return (float) $this->total;
     }

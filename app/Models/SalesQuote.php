@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\RegionalDateRange;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -18,6 +19,7 @@ class SalesQuote extends Model
         'quote_number',
         'idempotency_key',
         'customer_id',
+        'customer_vehicle_id',
         'user_id',
         'warehouse_id',
         'pos_session_id',
@@ -163,7 +165,9 @@ class SalesQuote extends Model
 
     public static function generateQuoteNumber(): string
     {
-        return app(\App\Services\DocumentSequenceService::class)->nextCommercialFolio();
+        return app(\App\Services\DocumentSequenceService::class)->nextQuoteFolio(
+            now(RegionalDateRange::timezone()),
+        );
     }
 
     public function calculateTotals(): void

@@ -8,7 +8,6 @@ use App\Models\CustomerVehicle;
 use App\Models\Product;
 use App\Models\ProductInventory;
 use App\Models\SalesOrder;
-use App\Models\SalesOrderItem;
 use App\Models\SalesQuote;
 use App\Models\Setting;
 use App\Services\CashierQueueService;
@@ -141,6 +140,7 @@ class SalesQuoteController extends Controller
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
+            'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
@@ -175,6 +175,8 @@ class SalesQuoteController extends Controller
             unset($item);
         }
 
+        $this->validateDiscountAmounts($validated['items']);
+
         $stockWarnings = $this->validateStockForQuoteItems($validated['items'], $validated['warehouse_id'] ?? null);
 
         try {
@@ -200,6 +202,7 @@ class SalesQuoteController extends Controller
                         'quantity' => $itemData['quantity'],
                         'unit_price' => $itemData['unit_price'],
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
+                        ...$this->discountAmountAttributes($itemData),
                         'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                         'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                         'custom_description' => $itemData['custom_description'] ?? null,
@@ -260,6 +263,7 @@ class SalesQuoteController extends Controller
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
+            'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
@@ -288,6 +292,10 @@ class SalesQuoteController extends Controller
             unset($item);
         }
 
+        if (! empty($validated['items'])) {
+            $this->validateDiscountAmounts($validated['items']);
+        }
+
         $stockWarnings = [];
         if (! empty($validated['items'])) {
             $stockWarnings = $this->validateStockForQuoteItems(
@@ -311,6 +319,7 @@ class SalesQuoteController extends Controller
                             'quantity' => $itemData['quantity'],
                             'unit_price' => $itemData['unit_price'],
                             'discount_percent' => $itemData['discount_percent'] ?? 0,
+                            ...$this->discountAmountAttributes($itemData),
                             'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                             'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                             'custom_description' => $itemData['custom_description'] ?? null,
@@ -353,6 +362,7 @@ class SalesQuoteController extends Controller
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
+            'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
@@ -387,6 +397,8 @@ class SalesQuoteController extends Controller
             unset($item);
         }
 
+        $this->validateDiscountAmounts($validated['items']);
+
         $stockWarnings = $this->validateStockForQuoteItems($validated['items'], $validated['warehouse_id'] ?? null);
 
         try {
@@ -412,6 +424,7 @@ class SalesQuoteController extends Controller
                         'quantity' => $itemData['quantity'],
                         'unit_price' => $itemData['unit_price'],
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
+                        ...$this->discountAmountAttributes($itemData),
                         'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
                         'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                         'custom_description' => $itemData['custom_description'] ?? null,
@@ -710,25 +723,7 @@ class SalesQuoteController extends Controller
                     'notes' => "Convertida de cotización {$quote->quote_number}",
                 ]);
 
-                // Copy items
-                foreach ($quote->items as $qi) {
-                    SalesOrderItem::create([
-                        'sales_order_id' => $order->id,
-                        'product_id' => $qi->product_id,
-                        'variant_id' => $qi->is_custom_line ? null : $qi->variant_id,
-                        'warehouse_id' => $qi->warehouse_id,
-                        'quantity' => $qi->quantity,
-                        'unit_price' => $qi->unit_price,
-                        'discount_percent' => $qi->discount_percent,
-                        'discount_amount' => $qi->discount_amount,
-                        'tax_percent' => $qi->tax_percent,
-                        'tax_amount' => $qi->tax_amount,
-                        'subtotal' => $qi->subtotal,
-                        'total' => $qi->total,
-                        'is_custom_line' => (bool) $qi->is_custom_line,
-                        'custom_description' => $qi->custom_description,
-                    ]);
-                }
+                $this->salesQuoteService->copyItemsToOrder($quote, $order);
 
                 $order->calculateTotals();
 
@@ -856,6 +851,46 @@ class SalesQuoteController extends Controller
         }
 
         $request->merge(['items' => $items]);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $items
+     *
+     * @throws ValidationException
+     */
+    private function validateDiscountAmounts(array $items): void
+    {
+        $errors = [];
+
+        foreach ($items as $index => $item) {
+            if (! array_key_exists('discount_amount', $item) || $item['discount_amount'] === null) {
+                continue;
+            }
+
+            $grossSubtotal = round((float) $item['quantity'] * (float) $item['unit_price'], 2);
+            $discountAmount = round((float) $item['discount_amount'], 2);
+
+            if ($discountAmount > $grossSubtotal) {
+                $errors["items.{$index}.discount_amount"] = 'El descuento no puede superar el importe bruto de la línea.';
+            }
+        }
+
+        if (! empty($errors)) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @return array<string, float>
+     */
+    private function discountAmountAttributes(array $item): array
+    {
+        if (! array_key_exists('discount_amount', $item) || $item['discount_amount'] === null) {
+            return [];
+        }
+
+        return ['discount_amount' => round((float) $item['discount_amount'], 2)];
     }
 
     /**

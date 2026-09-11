@@ -587,6 +587,76 @@ it('validates the denomination payload used by the closing modal', function () {
     expect($session->fresh()->status)->toBe('open');
 });
 
+it('accepts negative declared totals for non-cash payment methods', function () {
+    $warehouse = Warehouse::create([
+        'code' => 'W-NEGATIVE-CLOSE',
+        'name' => 'Warehouse Negative Close',
+    ]);
+
+    $cashier = User::factory()->create([
+        'role' => 'cashier',
+        'current_warehouse_id' => $warehouse->id,
+        'is_active' => true,
+    ]);
+    $cashier->warehouses()->attach($warehouse->id);
+
+    createPaymentMethodForPosTest('cash', 'Efectivo', true, true, 1);
+    createPaymentMethodForPosTest('transfer', 'Transferencia', true, true, 2);
+
+    $session = PosSession::create([
+        'user_id' => $cashier->id,
+        'warehouse_id' => $warehouse->id,
+        'opened_at' => now()->subHour(),
+        'opening_amount' => 0,
+        'expected_amount' => 0,
+        'status' => 'open',
+    ]);
+
+    $order = SalesOrder::create([
+        'order_number' => 'SO-NEGATIVE-CLOSE',
+        'user_id' => $cashier->id,
+        'pos_session_id' => $session->id,
+        'date' => now()->toDateString(),
+        'status' => 'completed',
+        'subtotal' => 0,
+        'tax_amount' => 0,
+        'discount_amount' => 0,
+        'shipping_cost' => 0,
+        'total' => 0,
+        'payment_status' => 'paid',
+        'payment_method' => 'transfer',
+    ]);
+
+    SalesOrderPayment::create([
+        'sales_order_id' => $order->id,
+        'amount' => -50,
+        'method' => 'transfer',
+        'paid_at' => now(),
+        'created_by' => $cashier->id,
+    ]);
+
+    $response = $this->actingAs($cashier)->postJson('/api/v1/pos-sessions/close', [
+        'closing_amount' => 0,
+        'closing_details' => [
+            'payment_method_counts' => [
+                'transfer' => -50,
+            ],
+        ],
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('data.closing_details.summary.expected_total', -50.0)
+        ->assertJsonPath('data.closing_details.summary.declared_total', -50.0)
+        ->assertJsonPath('data.closing_details.summary.total_difference', 0.0);
+
+    $rows = collect($response->json('data.closing_details.reconciliation_rows'))->keyBy('code');
+
+    expect($rows['transfer']['expected_total'])->toBe(-50.0)
+        ->and($rows['transfer']['declared_total'])->toBe(-50.0)
+        ->and($rows['transfer']['difference'])->toBe(0.0)
+        ->and($session->fresh()->status)->toBe('closed');
+});
+
 it('shows normalized documents and an ordered timeline for a pos session', function () {
     $warehouse = Warehouse::create([
         'code' => 'W-SESSION-DETAIL',

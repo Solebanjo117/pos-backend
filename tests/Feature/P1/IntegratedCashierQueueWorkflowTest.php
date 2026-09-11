@@ -9,6 +9,7 @@ use App\Models\OperationalExpenseEvent;
 use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\DocumentSequenceService;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -154,4 +155,17 @@ it('generates shared numeric commercial folios and prefixed purchase order folio
         ->and($sequences->nextCommercialFolio())->toBe('0000000002')
         ->and($sequences->nextPurchaseOrderFolio())->toBe('PO-0000000001')
         ->and($sequences->nextPurchaseOrderFolio())->toBe('PO-0000000002');
+});
+
+it('generates date scoped quote folios without consuming the commercial sequence', function (): void {
+    $sequences = app(DocumentSequenceService::class);
+
+    expect($sequences->nextQuoteFolio(CarbonImmutable::parse('2026-09-07 08:00:00', 'America/Panama')))
+        ->toBe('202609070001')
+        ->and($sequences->nextQuoteFolio(CarbonImmutable::parse('2026-09-07 18:00:00', 'America/Panama')))
+        ->toBe('202609070002')
+        ->and($sequences->nextQuoteFolio(CarbonImmutable::parse('2026-09-08 08:00:00', 'America/Panama')))
+        ->toBe('202609080001')
+        ->and($sequences->nextCommercialFolio())
+        ->toBe('0000000001');
 });

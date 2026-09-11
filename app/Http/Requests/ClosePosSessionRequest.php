@@ -27,7 +27,7 @@ class ClosePosSessionRequest extends FormRequest
             'closing_details.denominations.*' => ['nullable', 'numeric', 'min:0'],
             'closing_details.cash_extra' => ['nullable', 'numeric', 'min:0'],
             'closing_details.payment_method_counts' => ['nullable', 'array'],
-            'closing_details.payment_method_counts.*' => ['nullable', 'numeric', 'min:0'],
+            'closing_details.payment_method_counts.*' => ['nullable', 'numeric'],
             'notes' => ['nullable', 'string', 'max:1000'],
         ];
     }

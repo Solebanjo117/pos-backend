@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\CashierQueueEntry;
 use App\Models\Customer;
 use App\Models\CustomerVehicle;
 use App\Models\Product;
@@ -178,4 +179,118 @@ it('validates the quote customer vehicle and copies it to the resulting sale', f
 
     expect(SalesQuote::query()->findOrFail($quoteId)->convertedOrder?->customer_vehicle_id)
         ->toBe($vehicle->id);
+});
+
+it('keeps a fixed monetary discount exact when sending a quote to deposit', function () {
+    $payload = [
+        'warehouse_id' => $this->warehouse->id,
+        'items' => [[
+            'product_id' => $this->product->id,
+            'variant_id' => $this->variant->id,
+            'warehouse_id' => $this->warehouse->id,
+            'quantity' => 2,
+            'unit_price' => 50,
+            'discount_percent' => 0,
+            'discount_amount' => 12.34,
+            'tax_percent' => 7,
+            'is_custom_line' => false,
+        ]],
+    ];
+
+    $quoteId = $this->postJson('/api/v1/sales-quotes/from-pos', $payload)
+        ->assertCreated()
+        ->assertJsonPath('data.items.0.discount_amount', '12.34')
+        ->assertJsonPath('data.items.0.subtotal', '87.66')
+        ->assertJsonPath('data.items.0.tax_amount', '6.14')
+        ->assertJsonPath('data.items.0.total', '93.80')
+        ->json('data.id');
+
+    $response = $this->postJson("/api/v1/sales-quotes/{$quoteId}/send-to-deposit")
+        ->assertCreated();
+
+    $order = SalesOrder::query()->with('items')->findOrFail($response->json('data.id'));
+
+    expect((float) $order->items->first()->discount_amount)->toBe(12.34)
+        ->and((float) $order->items->first()->subtotal)->toBe(87.66)
+        ->and((float) $order->items->first()->tax_amount)->toBe(6.14)
+        ->and((float) $order->items->first()->total)->toBe(93.80)
+        ->and((float) $order->total)->toBe(93.80);
+});
+
+it('updates a fixed discount without converting it back to a percentage', function () {
+    $quote = SalesQuote::create([
+        'user_id' => $this->seller->id,
+        'warehouse_id' => $this->warehouse->id,
+        'status' => 'draft',
+    ]);
+
+    $payload = [
+        'warehouse_id' => $this->warehouse->id,
+        'items' => [[
+            'product_id' => $this->product->id,
+            'variant_id' => $this->variant->id,
+            'warehouse_id' => $this->warehouse->id,
+            'quantity' => 3,
+            'unit_price' => 50,
+            'discount_amount' => 12.34,
+            'tax_percent' => 7,
+            'is_custom_line' => false,
+        ]],
+    ];
+
+    $this->putJson("/api/v1/sales-quotes/{$quote->id}", $payload)
+        ->assertOk()
+        ->assertJsonPath('data.items.0.discount_amount', '12.34')
+        ->assertJsonPath('data.items.0.subtotal', '137.66')
+        ->assertJsonPath('data.items.0.tax_amount', '9.64')
+        ->assertJsonPath('data.items.0.total', '147.30');
+});
+
+it('rejects a fixed discount greater than the gross line amount', function () {
+    $this->postJson('/api/v1/sales-quotes/from-pos', [
+        'warehouse_id' => $this->warehouse->id,
+        'items' => [[
+            'product_id' => null,
+            'variant_id' => null,
+            'warehouse_id' => $this->warehouse->id,
+            'quantity' => 1,
+            'unit_price' => 10,
+            'discount_amount' => 10.01,
+            'tax_percent' => 7,
+            'is_custom_line' => true,
+            'custom_description' => 'Servicio inválido',
+        ]],
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors('items.0.discount_amount');
+});
+
+it('queues the exact discounted quote total at cashier with its daily folio', function () {
+    $quoteId = $this->postJson('/api/v1/sales-quotes/from-pos', [
+        'warehouse_id' => $this->warehouse->id,
+        'items' => [[
+            'product_id' => $this->product->id,
+            'variant_id' => $this->variant->id,
+            'warehouse_id' => $this->warehouse->id,
+            'quantity' => 1,
+            'unit_price' => 40,
+            'discount_amount' => 5,
+            'tax_percent' => 7,
+        ]],
+    ])->assertCreated()
+        ->assertJsonPath('data.total', '37.45')
+        ->json('data.id');
+
+    $this->postJson("/api/v1/sales-quotes/{$quoteId}/send-to-cashier")
+        ->assertOk()
+        ->assertJsonPath('data.status', 'sent_to_cashier');
+
+    $quote = SalesQuote::query()->findOrFail($quoteId);
+    $entry = CashierQueueEntry::query()
+        ->where('source_type', SalesQuote::class)
+        ->where('source_id', $quoteId)
+        ->firstOrFail();
+
+    expect($quote->quote_number)->toMatch('/^\d{12}$/')
+        ->and((float) $entry->estimated_amount)->toBe(37.45)
+        ->and($entry->metadata['document_number'])->toBe($quote->quote_number);
 });

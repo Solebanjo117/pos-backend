@@ -113,6 +113,10 @@ class FinancialLiquiditySyncService
         }
 
         if ($source instanceof CapitalMovement) {
+            if ($source->cash_movement_id) {
+                return null;
+            }
+
             return $this->payload($source->movement_type, (float) $source->amount, $source->business_datetime ?? $source->movement_date, null, $source->notes, $source->user_id);
         }
 

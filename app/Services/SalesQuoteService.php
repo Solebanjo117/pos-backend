@@ -6,6 +6,7 @@ use App\Models\ProductInventory;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
 use App\Models\SalesQuote;
+use App\Models\SalesQuoteItem;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -42,25 +43,7 @@ class SalesQuoteService
                 'notes' => "Convertida de cotizacion {$quote->quote_number} y enviada a bodega",
             ]);
 
-            foreach ($quote->items as $quoteItem) {
-                SalesOrderItem::create([
-                    'sales_order_id' => $order->id,
-                    'product_id' => $quoteItem->product_id,
-                    'variant_id' => $quoteItem->is_custom_line ? null : $quoteItem->variant_id,
-                    'warehouse_id' => $quoteItem->warehouse_id,
-                    'quantity' => $quoteItem->quantity,
-                    'unit_price' => $quoteItem->unit_price,
-                    'discount_percent' => $quoteItem->discount_percent,
-                    'discount_amount' => $quoteItem->discount_amount,
-                    'tax_percent' => $quoteItem->tax_percent,
-                    'tax_amount' => $quoteItem->tax_amount,
-                    'subtotal' => $quoteItem->subtotal,
-                    'total' => $quoteItem->total,
-                    'is_custom_line' => (bool) $quoteItem->is_custom_line,
-                    'custom_description' => $quoteItem->custom_description,
-                    'notes' => $quoteItem->notes,
-                ]);
-            }
+            $this->copyItemsToOrder($quote, $order);
 
             $order->load('items');
             $order->calculateTotals();
@@ -75,6 +58,39 @@ class SalesQuoteService
                 'warnings' => $warnings,
             ];
         });
+    }
+
+    public function copyItemsToOrder(SalesQuote $quote, SalesOrder $order): void
+    {
+        foreach ($quote->items as $quoteItem) {
+            SalesOrderItem::withoutEvents(fn (): SalesOrderItem => SalesOrderItem::create(
+                $this->orderItemAttributes($quoteItem, $order),
+            ));
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function orderItemAttributes(SalesQuoteItem $quoteItem, SalesOrder $order): array
+    {
+        return [
+            'sales_order_id' => $order->id,
+            'product_id' => $quoteItem->product_id,
+            'variant_id' => $quoteItem->is_custom_line ? null : $quoteItem->variant_id,
+            'warehouse_id' => $quoteItem->warehouse_id,
+            'quantity' => $quoteItem->quantity,
+            'unit_price' => $quoteItem->unit_price,
+            'discount_percent' => $quoteItem->discount_percent,
+            'discount_amount' => $quoteItem->discount_amount,
+            'tax_percent' => $quoteItem->tax_percent,
+            'tax_amount' => $quoteItem->tax_amount,
+            'subtotal' => $quoteItem->subtotal,
+            'total' => $quoteItem->total,
+            'is_custom_line' => (bool) $quoteItem->is_custom_line,
+            'custom_description' => $quoteItem->custom_description,
+            'notes' => $quoteItem->notes,
+        ];
     }
 
     /**

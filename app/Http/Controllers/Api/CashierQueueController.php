@@ -3,9 +3,12 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\CancelCashierQueueEntryRequest;
+use App\Http\Requests\CompleteCashierQueueEntryRequest;
 use App\Models\CashierQueueEntry;
-use App\Models\PaymentMethod;
+use App\Models\CashOperationRequest;
 use App\Services\CashierQueueService;
+use App\Services\CashOperationRequestService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -22,6 +25,9 @@ class CashierQueueController extends Controller
                 CashierQueueEntry::TYPE_SALE,
                 CashierQueueEntry::TYPE_EXPENSE,
                 CashierQueueEntry::TYPE_RETURN,
+                CashierQueueEntry::TYPE_CASH_IN,
+                CashierQueueEntry::TYPE_CASH_OUT,
+                CashierQueueEntry::TYPE_FUNDING,
             ])],
             'per_page' => ['nullable', 'integer', 'min:10', 'max:100'],
         ]);
@@ -41,7 +47,7 @@ class CashierQueueController extends Controller
     public function open(CashierQueueEntry $cashierQueueEntry, Request $request): JsonResponse
     {
         try {
-            $entry = $this->queue->open($cashierQueueEntry, $request->user());
+            $entry = $this->queue->open($cashierQueueEntry, $request->user(), $request->integer('warehouse_id'));
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }
@@ -49,38 +55,39 @@ class CashierQueueController extends Controller
         return response()->json(['data' => $this->serialize($entry)]);
     }
 
-    public function complete(CashierQueueEntry $cashierQueueEntry, Request $request): JsonResponse
+    public function complete(CashierQueueEntry $cashierQueueEntry, CompleteCashierQueueEntryRequest $request): JsonResponse
     {
-        $data = $request->validate([
-            'final_amount' => ['nullable', 'numeric', 'min:0.01'],
-            'payment_method' => ['nullable', 'string'],
-            'reference_number' => ['nullable', 'string', 'max:120'],
-            'variance_reason' => ['nullable', 'string', 'max:500'],
-        ]);
-
-        if ($cashierQueueEntry->entry_type === CashierQueueEntry::TYPE_EXPENSE) {
-            $request->validate([
-                'final_amount' => ['required', 'numeric', 'min:0.01'],
-                'payment_method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS))],
-            ]);
-        }
-
-        if (
-            $cashierQueueEntry->entry_type === CashierQueueEntry::TYPE_RETURN
-            && (float) data_get($cashierQueueEntry->metadata, 'money_refund_amount', 0) > 0
-        ) {
-            $request->validate([
-                'payment_method' => ['required', 'string', Rule::in(PaymentMethod::realMoneyCodes(PaymentMethod::CONTEXT_RETURNS))],
-            ]);
-        }
-
         try {
-            $entry = $this->queue->complete($cashierQueueEntry, $data, $request->user());
+            $entry = $this->queue->complete(
+                $cashierQueueEntry,
+                $request->validated(),
+                $request->user(),
+                $request->integer('warehouse_id'),
+            );
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }
 
         return response()->json(['message' => 'Movimiento procesado correctamente.', 'data' => $this->serialize($entry)]);
+    }
+
+    public function cancel(
+        CashierQueueEntry $cashierQueueEntry,
+        CancelCashierQueueEntryRequest $request,
+        CashOperationRequestService $service,
+    ): JsonResponse {
+        try {
+            $entry = $service->cancel(
+                $cashierQueueEntry,
+                $request->user(),
+                $request->validated('reason'),
+                $request->integer('warehouse_id'),
+            );
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->json(['message' => 'Solicitud cancelada.', 'data' => $this->serialize($entry)]);
     }
 
     private function serialize(CashierQueueEntry $entry): array
@@ -116,6 +123,27 @@ class CashierQueueController extends Controller
                 'amount' => (float) ($source->estimated_amount ?? $source->amount),
                 'planned_payment_method' => $source->planned_payment_method,
                 'reference_number' => $source->reference_number,
+                'created_at' => $source->created_at?->toISOString(),
+                'notes' => $source->notes,
+                'requested_by' => data_get($entry->metadata, 'requested_by'),
+                'category' => $source->category_label,
+            ],
+            $source instanceof CashOperationRequest => [
+                'id' => $source->id,
+                'document_number' => 'CJ-'.$source->id,
+                'description' => match ($source->operation_type) {
+                    CashOperationRequest::TYPE_CASH_IN => 'Agregar efectivo',
+                    CashOperationRequest::TYPE_CASH_OUT => 'Retirar efectivo',
+                    CashOperationRequest::TYPE_FUNDING => 'Aportación de fondos',
+                    default => 'Operación de caja',
+                },
+                'party' => $source->requester?->name ?? 'Usuario',
+                'amount' => (float) $source->amount,
+                'created_at' => $source->requested_at?->toISOString(),
+                'notes' => $source->notes,
+                'requested_by' => $source->requester?->only(['id', 'name']),
+                'category' => $source->fundingCategory?->name,
+                'operation_type' => $source->operation_type,
             ],
             $source instanceof \App\Models\SalesReturn => [
                 'id' => $source->id,
@@ -144,7 +172,25 @@ class CashierQueueController extends Controller
             'scheduled_for' => $entry->scheduled_for?->toISOString(),
             'opened_by' => $entry->opened_by,
             'opened_at' => $entry->opened_at?->toISOString(),
+            'fixed_cash_amount' => (bool) data_get($entry->metadata, 'fixed_cash_amount', false),
+            'can_cancel' => $this->canCancel($entry, request()->user()),
             'source' => $sourceData,
         ];
+    }
+
+    private function canCancel(CashierQueueEntry $entry, ?\App\Models\User $user): bool
+    {
+        if (! $user || ! in_array($entry->status, [CashierQueueEntry::STATUS_PENDING, CashierQueueEntry::STATUS_OPENED], true)) {
+            return false;
+        }
+        if (! (bool) data_get($entry->metadata, 'fixed_cash_amount', false)) {
+            return false;
+        }
+
+        $requestedBy = (int) data_get($entry->metadata, 'requested_by.id', 0);
+
+        return $user->hasRole(['admin', 'manager'])
+            || ($entry->status === CashierQueueEntry::STATUS_PENDING && $requestedBy === $user->id)
+            || ($entry->status === CashierQueueEntry::STATUS_OPENED && $entry->opened_by === $user->id);
     }
 }

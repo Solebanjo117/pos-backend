@@ -21,6 +21,7 @@ class CapitalMovement extends Model
         'notes',
         'source_type',
         'source_id',
+        'cash_movement_id',
         'business_datetime',
         'financial_account_id',
         'idempotency_key',
@@ -43,6 +44,11 @@ class CapitalMovement extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function cashMovement(): BelongsTo
+    {
+        return $this->belongsTo(CashMovement::class);
     }
 
     public function getMovementTypeLabelAttribute(): string
