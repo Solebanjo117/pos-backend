@@ -42,6 +42,29 @@ it('applies the POS in-stock filter to the effective warehouse and real variant 
         ->assertJsonPath('data.0.total_stock', 3);
 });
 
+it('accepts textual boolean values sent by the products index stock filter', function (): void {
+    $warehouse = Warehouse::create(['code' => 'W-PRODUCT-INDEX', 'name' => 'Product Index']);
+    $admin = User::factory()->create(['role' => 'admin', 'current_warehouse_id' => $warehouse->id, 'is_active' => true]);
+    $admin->warehouses()->attach($warehouse->id);
+
+    $available = productForPosPreparation('Producto disponible', 10, $warehouse, 3);
+    $unavailable = productForPosPreparation('Producto agotado', 20, $warehouse, 0);
+
+    $withoutStockFilter = $this->actingAs($admin)->getJson(
+        '/api/v1/products?search=&warehouse_id='.$warehouse->id.'&has_stock=false&archived=false&sortField=created_at&sortDirection=desc&page=1&per_page=20'
+    );
+
+    $withoutStockFilter->assertOk();
+
+    expect(collect($withoutStockFilter->json('data'))->pluck('id')->all())
+        ->toContain($available->id, $unavailable->id);
+
+    $this->actingAs($admin)->getJson('/api/v1/products?warehouse_id='.$warehouse->id.'&has_stock=true')
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', $available->id);
+});
+
 it('applies price filters and sorting sent by the POS product picker', function (): void {
     $warehouse = Warehouse::create(['code' => 'W-POS-PRICE', 'name' => 'POS Price']);
     $admin = User::factory()->create(['role' => 'admin', 'current_warehouse_id' => $warehouse->id, 'is_active' => true]);
@@ -64,7 +87,7 @@ it('applies price filters and sorting sent by the POS product picker', function 
 it('rejects invalid POS product filter contracts', function (): void {
     $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
 
-    $this->actingAs($admin)->getJson('/api/v1/products?min_price=20&max_price=10&sort=unknown')
+    $this->actingAs($admin)->getJson('/api/v1/products?has_stock=invalid&min_price=20&max_price=10&sort=unknown')
         ->assertUnprocessable()
-        ->assertJsonValidationErrors(['max_price', 'sort']);
+        ->assertJsonValidationErrors(['has_stock', 'max_price', 'sort']);
 });

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AssignAttributesRequest;
 use App\Http\Requests\CheckProductCodeRequest;
+use App\Http\Requests\IndexProductRequest;
 use App\Http\Requests\ProductProfileRequest;
 use App\Http\Requests\RegenerateProductNameRequest;
 use App\Http\Requests\StoreProductRequest;
@@ -32,16 +33,8 @@ class ProductController extends Controller
     /**
      * Display a listing of products.
      */
-    public function index(Request $request): AnonymousResourceCollection
+    public function index(IndexProductRequest $request): AnonymousResourceCollection
     {
-        $request->validate([
-            'in_stock' => ['nullable', 'boolean'],
-            'has_stock' => ['nullable', 'boolean'],
-            'min_price' => ['nullable', 'numeric', 'min:0'],
-            'max_price' => ['nullable', 'numeric', 'min:0', 'gte:min_price'],
-            'sort' => ['nullable', 'in:name_asc,price_asc,price_desc,sku_asc,newest'],
-        ]);
-
         $perPage = min($request->get('per_page', 20), 50);
 
         // Archive filter: 'true' = only trashed, 'all' = withTrashed, default = active only
