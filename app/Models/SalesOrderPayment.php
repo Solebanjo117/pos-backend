@@ -12,6 +12,9 @@ class SalesOrderPayment extends Model
 
     protected $fillable = [
         'sales_order_id',
+        'warehouse_id',
+        'account_payment_batch_id',
+        'pos_session_id',
         'sales_return_id',
         'amount',
         'method',

@@ -57,7 +57,7 @@ class StoreSalesReturnRequest extends FormRequest
                 ->where('is_legacy', false)
                 ->exists();
 
-            if (! $eligible) {
+            if (! $eligible && ($accountId || PaymentMethod::requiresAccount($method))) {
                 $validator->errors()->add(
                     'financial_account_id',
                     'Selecciona una cuenta bancaria activa para este reembolso.'

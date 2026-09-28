@@ -39,6 +39,18 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        foreach ([\App\Models\CashMovement::class, SalesOrderPayment::class, \App\Models\AccountPaymentBatch::class] as $cashSource) {
+            $cashSource::created(fn ($source) => app(\App\Services\WarehouseCashService::class)->capture($source));
+            $cashSource::deleting(fn ($source) => app(\App\Services\WarehouseCashService::class)->capture($source, true));
+        }
+        foreach ([SalesOrderPayment::class, PurchaseOrderPayment::class, \App\Models\AccountPaymentBatch::class] as $paymentClass) {
+            $paymentClass::creating(function ($payment): void {
+                $payment->liquidity_bucket = \App\Models\PaymentMethod::liquidityBucket($payment->method);
+                if ($payment instanceof SalesOrderPayment) {
+                    $payment->warehouse_id = app(\App\Services\WarehouseCashService::class)->salesPaymentWarehouse($payment);
+                }
+            });
+        }
         foreach ([
             SalesOrderPayment::class,
             PurchaseOrderPayment::class,

@@ -648,7 +648,23 @@ it('adding items to an existing order through the controller consumes fifo and s
         'payment_method' => 'cash',
     ]);
 
+    $session = \App\Models\PosSession::create([
+        'user_id' => $context['user']->id, 'warehouse_id' => $context['warehouse']->id,
+        'status' => 'open', 'opening_amount' => 0, 'opened_at' => now(),
+    ]);
+    $originalProduct = Product::create(['sku_base' => 'FIFO-ORIGINAL', 'name' => 'Venta original', 'status' => 'active']);
+    $order->items()->create([
+        'product_id' => $originalProduct->id, 'warehouse_id' => $context['warehouse']->id,
+        'quantity' => 1, 'unit_price' => 1, 'tax_percent' => 0,
+    ]);
+    $order->update(['pos_session_id' => $session->id]);
+    $order->addPayment(1, 'cash', isCheckout: true);
+
     $this->patchJson("/api/v1/sales-orders/{$order->id}/add-items", [
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
+        'expected_total' => 1,
+        'warehouse_id' => $context['warehouse']->id,
+        'payment' => [['method' => 'cash', 'amount' => 30]],
         'items' => [[
             'product_id' => $context['product']->id,
             'variant_id' => $context['variant']->id,
@@ -659,7 +675,7 @@ it('adding items to an existing order through the controller consumes fifo and s
         ]],
     ])->assertOk();
 
-    $item = $order->items()->firstOrFail();
+    $item = $order->items()->where('product_id', $context['product']->id)->firstOrFail();
 
     expect(InventoryLotAllocation::where('sales_order_item_id', $item->id)->sum('quantity'))->toBe(3)
         ->and((float) $item->fresh()->unit_cost)->toBe(4.67);

@@ -50,7 +50,7 @@ class StoreAccountReceiptRequest extends FormRequest
                 ->where('is_active', true)
                 ->where('is_legacy', false)
                 ->exists();
-            if (! $eligible) {
+            if (! $eligible && ($accountId || PaymentMethod::requiresAccount($this->input('method')))) {
                 $validator->errors()->add('financial_account_id', 'Selecciona una cuenta financiera activa para este movimiento.');
             }
         });

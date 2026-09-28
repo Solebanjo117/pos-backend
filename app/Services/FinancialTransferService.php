@@ -27,6 +27,15 @@ class FinancialTransferService
      */
     public function create(array $data, User $user): array
     {
+        foreach (['from', 'to'] as $side) {
+            if (($data[$side.'_endpoint_type'] ?? null) === 'warehouse_cash') {
+                $warehouseId = (int) $data[$side.'_endpoint_id'];
+                abort_unless($user->isAdmin() || $user->warehouses()->whereKey($warehouseId)->exists(), 403);
+                if (! PosSession::query()->where('warehouse_id', $warehouseId)->where('user_id', $user->id)->where('status', 'open')->exists()) {
+                    throw new InvalidArgumentException('Abra una sesión de Caja en la sucursal para transferir efectivo.');
+                }
+            }
+        }
         $requestHash = $this->requestHash($data);
         $existing = FinancialTransfer::query()->where('idempotency_key', $data['idempotency_key'])->first();
 
@@ -40,8 +49,18 @@ class FinancialTransferService
 
         try {
             $transfer = DB::transaction(function () use ($data, $user, $requestHash): FinancialTransfer {
+                $warehouseIds = collect(['from', 'to'])->filter(fn ($side) => $data[$side.'_endpoint_type'] === 'warehouse_cash')->map(fn ($side) => (int) $data[$side.'_endpoint_id'])->sort()->values();
+                foreach ($warehouseIds as $warehouseId) {
+                    \App\Models\Warehouse::query()->lockForUpdate()->findOrFail($warehouseId);
+                }
                 [$from, $fromBalance] = $this->lockEndpoint($data['from_endpoint_type'], (int) $data['from_endpoint_id']);
                 [$to, $toBalance] = $this->lockEndpoint($data['to_endpoint_type'], (int) $data['to_endpoint_id']);
+                if ($from instanceof \App\Models\Warehouse || $to instanceof \App\Models\Warehouse) {
+                    $bank = $from instanceof \App\Models\Warehouse ? $to : $from;
+                    if (! $bank instanceof FinancialAccount || $bank->is_legacy || $bank->type !== 'bank') {
+                        throw new InvalidArgumentException('El efectivo de la sucursal debe transferirse desde o hacia una cuenta bancaria concreta.');
+                    }
+                }
                 $amount = round((float) $data['amount'], 2);
 
                 if ($this->endpointKey($data['from_endpoint_type'], $from->getKey()) === $this->endpointKey($data['to_endpoint_type'], $to->getKey())) {
@@ -133,6 +152,15 @@ class FinancialTransferService
      */
     private function lockEndpoint(string $type, int $id): array
     {
+        if ($type === 'warehouse_cash') {
+            $warehouse = \App\Models\Warehouse::query()->lockForUpdate()->findOrFail($id);
+            $available = app(WarehouseCashService::class)->availability($id);
+            if (! $available['initialized']) {
+                throw new InvalidArgumentException('Saldo sin inicializar. Un administrador debe conciliar el efectivo de la sucursal.');
+            }
+
+            return [$warehouse, $available['balance']];
+        }
         if ($type === FinancialTransfer::ENDPOINT_FINANCIAL_ACCOUNT) {
             $account = FinancialAccount::query()->with('ledgerAccount')->lockForUpdate()->findOrFail($id);
             if (! $account->is_active) {
@@ -165,6 +193,21 @@ class FinancialTransferService
         FinancialTransfer $transfer,
         User $user,
     ): void {
+        if ($endpoint instanceof \App\Models\Warehouse) {
+            app(CashMovementService::class)->record($user, (int) $endpoint->id, [
+                'type' => $direction,
+                'subtype' => 'financial_transfer',
+                'amount' => $amount,
+                'reason' => 'Transferencia '.$transfer->folio,
+                'reference_number' => $transfer->reference,
+                'notes' => $transfer->notes,
+                'source_type' => 'financial_transfer',
+                'source_id' => $transfer->id,
+                'business_datetime' => $transfer->business_datetime,
+            ]);
+
+            return;
+        }
         if ($endpoint instanceof FinancialAccount) {
             $this->movementService->record($endpoint, $direction, $amount, [
                 'source_type' => 'financial_transfer',

@@ -124,7 +124,7 @@ class SalesOrderController extends Controller
 
             $validated = $request->validate([
                 'idempotency_key' => [
-                    Rule::requiredIf(fn (): bool => $request->user()?->role === 'cashier' && $request->filled('source_quote_id')),
+                    Rule::requiredIf(fn (): bool => $request->filled('source_quote_id')),
                     'nullable',
                     'uuid',
                 ],
@@ -194,8 +194,7 @@ class SalesOrderController extends Controller
 
             // ── Defensive stock check — collect warnings only, do NOT block ──
             $stockWarnings = [];
-            $isCashierQuoteCheckout = $request->user()?->role === 'cashier'
-                && ! empty($validated['source_quote_id']);
+            $isCashierQuoteCheckout = ! empty($validated['source_quote_id']);
             if (! $isCashierQuoteCheckout && ! empty($validated['items'])) {
                 foreach ($validated['items'] as $item) {
                     if (! empty($item['is_custom_line'])) {
@@ -654,268 +653,21 @@ class SalesOrderController extends Controller
      * PATCH /api/sales-orders/{id}/add-items
      * Update existing order, adding missing items, updating quantities, generating payments and inventory difference.
      */
-    public function addItemsToExistingOrder(Request $request, int $id): JsonResponse
+    public function addItemsToExistingOrder(\App\Http\Requests\AmendSalesOrderRequest $request, int $id, \App\Services\SalesOrderAmendmentService $service): JsonResponse
     {
         try {
-            $this->normalizeTaxPercentPayload($request);
-
-            $validated = $request->validate([
-                'items' => 'required|array',
-                'items.*.product_id' => 'nullable|exists:products,id',
-                'items.*.variant_id' => 'nullable|exists:product_variants,id',
-                'items.*.warehouse_id' => 'required|exists:warehouses,id',
-                'items.*.qty' => 'required|integer|min:1',
-                'items.*.price' => 'required|numeric|min:0',
-                'items.*.seller_id' => 'nullable|exists:users,id',
-                'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
-                'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
-                'items.*.is_custom_line' => 'nullable|boolean',
-                'items.*.custom_description' => 'nullable|string|max:255',
-                'payment' => 'nullable|array',
-                'payment.*.method' => 'required|string',
-                'payment.*.amount' => 'required|numeric|min:0',
-                'payment.*.notes' => 'nullable|string',
-            ]);
-
-            $validated['items'] = $this->normalizeCustomLineItems($validated['items']);
-
-            $order = \App\Models\SalesOrder::findOrFail($id);
-
-            DB::transaction(function () use ($validated, $order) {
-                foreach ($validated['items'] as $item) {
-                    if (! empty($item['is_custom_line'])) {
-                        $subtotal = $item['qty'] * $item['price'];
-                        $discount = $subtotal * (($item['discount_percent'] ?? 0) / 100);
-                        $tax = ($subtotal - $discount) * (($item['tax_percent'] ?? 0) / 100);
-
-                        $order->items()->create([
-                            'product_id' => null,
-                            'variant_id' => null,
-                            'warehouse_id' => $item['warehouse_id'],
-                            'quantity' => $item['qty'],
-                            'unit_price' => $item['price'],
-                            'unit_cost' => 0,
-                            'discount_percent' => $item['discount_percent'] ?? 0,
-                            'tax_percent' => TaxRateHelper::resolve($item['tax_percent'] ?? null),
-                            'seller_id' => $item['seller_id'] ?? null,
-                            'subtotal' => $subtotal,
-                            'discount_amount' => $discount,
-                            'tax_amount' => $tax,
-                            'total' => $subtotal - $discount + $tax,
-                            'is_custom_line' => true,
-                            'custom_description' => $item['custom_description'],
-                            'added_after_sale' => true,
-                        ]);
-
-                        continue;
-                    }
-
-                    $query = $order->items()->where('product_id', $item['product_id']);
-                    if (! empty($item['variant_id'])) {
-                        $query->where('variant_id', $item['variant_id']);
-                    } else {
-                        $query->whereNull('variant_id');
-                    }
-
-                    $existing = $query->first();
-
-                    $diffQty = $item['qty'];
-
-                    if ($existing) {
-                        $diffQty = $item['qty'] - $existing->quantity;
-                        if ($diffQty > 0) {
-                            $existing->update(['quantity' => $item['qty']]);
-                            $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
-                                ->where('product_id', $item['product_id'])
-                                ->when(! empty($item['variant_id']), function ($q) use ($item) {
-                                    $q->where('variant_id', $item['variant_id']);
-                                }, function ($q) {
-                                    $q->whereNull('variant_id');
-                                })->first();
-
-                            if ($inventory) {
-                                $deduct = min($diffQty, max(0, $inventory->quantity_available));
-                                if ($deduct > 0) {
-                                    $fifoResult = app(\App\Services\InventoryFifoService::class)->consumeStock([
-                                        'product_id' => $existing->product_id,
-                                        'variant_id' => $existing->variant_id,
-                                        'warehouse_id' => $existing->warehouse_id,
-                                        'quantity' => $deduct,
-                                        'reference_type' => 'post_sale_addition',
-                                        'reference_id' => $existing->id,
-                                        'sales_order_item_id' => $existing->id,
-                                        'reason' => 'post_sale_addition',
-                                        'notes' => "Incremento post-venta item #{$existing->id} en orden {$order->order_number}",
-                                        'user_id' => auth()->id(),
-                                    ]);
-
-                                    if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
-                                        $existing->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // New item
-                        $subtotal = $item['qty'] * $item['price'];
-                        $discount = $subtotal * (($item['discount_percent'] ?? 0) / 100);
-                        $tax = ($subtotal - $discount) * (($item['tax_percent'] ?? 0) / 100);
-
-                        $pricing = \App\Models\ProductPricing::where('product_id', $item['product_id'])
-                            ->when(! empty($item['variant_id']), function ($q) use ($item) {
-                                $q->where('variant_id', $item['variant_id']);
-                            }, function ($q) {
-                                $q->whereNull('variant_id');
-                            })->first();
-
-                        $createdItem = $order->items()->create([
-                            'product_id' => $item['product_id'],
-                            'variant_id' => $item['variant_id'],
-                            'warehouse_id' => $item['warehouse_id'],
-                            'quantity' => $item['qty'],
-                            'unit_price' => $item['price'],
-                            'unit_cost' => $pricing ? $pricing->cost : 0,
-                            'discount_percent' => $item['discount_percent'] ?? 0,
-                            'tax_percent' => TaxRateHelper::resolve($item['tax_percent'] ?? null),
-                            'seller_id' => $item['seller_id'] ?? null,
-                            'subtotal' => $subtotal,
-                            'discount_amount' => $discount,
-                            'tax_amount' => $tax,
-                            'total' => $subtotal - $discount + $tax,
-                            'added_after_sale' => true,
-                        ]);
-
-                        $inventory = \App\Models\ProductInventory::where('warehouse_id', $item['warehouse_id'])
-                            ->where('product_id', $item['product_id'])
-                            ->when(! empty($item['variant_id']), function ($q) use ($item) {
-                                $q->where('variant_id', $item['variant_id']);
-                            }, function ($q) {
-                                $q->whereNull('variant_id');
-                            })->first();
-
-                        if ($inventory) {
-                            $deduct = min($item['qty'], max(0, $inventory->quantity_available));
-                            if ($deduct > 0) {
-                                $fifoResult = app(\App\Services\InventoryFifoService::class)->consumeStock([
-                                    'product_id' => $createdItem->product_id,
-                                    'variant_id' => $createdItem->variant_id,
-                                    'warehouse_id' => $createdItem->warehouse_id,
-                                    'quantity' => $deduct,
-                                    'reference_type' => 'post_sale_addition',
-                                    'reference_id' => $createdItem->id,
-                                    'sales_order_item_id' => $createdItem->id,
-                                    'reason' => 'post_sale_addition',
-                                    'notes' => "Agregado post-venta item #{$createdItem->id} a orden {$order->order_number}",
-                                    'user_id' => auth()->id(),
-                                ]);
-
-                                if (($fifoResult['weighted_unit_cost'] ?? 0) > 0) {
-                                    $createdItem->forceFill(['unit_cost' => $fifoResult['weighted_unit_cost']])->save();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Recalculate order total properly
-                $orderTotal = 0;
-                $orderTax = 0;
-                $orderDiscount = 0;
-                $orderSubtotal = 0;
-
-                foreach ($order->items()->get() as $dbItem) {
-                    $itemSubtotal = $dbItem->quantity * $dbItem->unit_price;
-                    $itemDiscount = $itemSubtotal * ($dbItem->discount_percent / 100);
-                    $itemTax = ($itemSubtotal - $itemDiscount) * ($dbItem->tax_percent / 100);
-
-                    $orderSubtotal += $itemSubtotal;
-                    $orderDiscount += $itemDiscount;
-                    $orderTax += $itemTax;
-                    $orderTotal += ($itemSubtotal - $itemDiscount + $itemTax);
-
-                    $dbItem->update([
-                        'subtotal' => $itemSubtotal,
-                        'discount_amount' => $itemDiscount,
-                        'tax_amount' => $itemTax,
-                        'total' => $itemSubtotal - $itemDiscount + $itemTax,
-                    ]);
-                }
-
-                $finalTotal = $orderTotal + $order->shipping_cost - $order->discount_amount;
-
-                /** @var \App\Models\User|null $user */
-                $user = auth()->user();
-
-                $logs = $order->audit_logs ?? [];
-                $logs[] = [
-                    'action' => 'order_modified',
-                    'metadata' => [
-                        'items_count' => count($validated['items'] ?? []),
-                        'total_diff' => $finalTotal - $order->total,
-                        'user_id' => $user?->id,
-                        'user_name' => $user?->name ?? 'Sistema',
-                    ],
-                    'timestamp' => now()->toISOString(),
-                ];
-
-                $order->update([
-                    'total' => $finalTotal,
-                    'tax_amount' => $orderTax,
-                    'subtotal' => $orderSubtotal,
-                    'audit_logs' => $logs,
-                ]);
-
-                // 2. Crear cargo en cuenta del cliente por la diferencia
-                $diffTotal = $finalTotal - $orderTotal;
-                if ($diffTotal > 0 && $order->customer_id) {
-                    $customer = \App\Models\Customer::find($order->customer_id);
-                    if ($customer) {
-                        \App\Models\CustomerTransaction::create([
-                            'customer_id' => $customer->id,
-                            'type' => 'sale',
-                            'amount' => $diffTotal,
-                            'balance_before' => $customer->current_balance,
-                            'balance_after' => $customer->current_balance + $diffTotal,
-                            'description' => 'Cargo por Modificación de Venta '.$order->order_number,
-                            'reference_type' => 'sales_order_modification',
-                            'reference_id' => $order->id,
-                            'transaction_date' => now(),
-                            'created_by' => $user?->id,
-                        ]);
-                        $customer->current_balance += $diffTotal;
-                        $customer->save();
-                    }
-                }
-
-                // 3. Register payments (with isCheckout = false to properly offset the debt charge above)
-                if (! empty($validated['payment'])) {
-                    foreach ($validated['payment'] as $payment) {
-                        $order->addPayment(
-                            amount: (float) $payment['amount'],
-                            method: $payment['method'],
-                            notes: $payment['notes'] ?? 'Cobro por diferencia (Modificación de Orden)',
-                            isCheckout: false
-                        );
-                    }
-                    $totalPaid = $order->payments()->sum('amount');
-                    if ($totalPaid >= $order->total) {
-                        $order->update(['payment_status' => 'paid']);
-                    } elseif ($totalPaid > 0) {
-                        $order->update(['payment_status' => 'partial']);
-                    }
-                }
-            });
-
-            return response()->json([
-                'message' => 'Items added and order updated successfully.',
-                'data' => clone $order,
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'message' => 'Error al agregar ítems a la orden existente.',
-                'error' => $e->getMessage(),
-            ], 422);
+            $result = $service->amend($id, $request->validated(), $request->user());
+        } catch (IdempotencyConflictException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 409);
         }
+
+        return response()->json([
+            'success' => true,
+            'message' => $result['replayed'] ? 'Ampliación recuperada.' : 'Transacción ampliada.',
+            'data' => $result['order'],
+            'difference' => $result['difference'],
+            'replayed' => $result['replayed'],
+        ]);
     }
 
     private function normalizeTaxPercentPayload(Request $request): void

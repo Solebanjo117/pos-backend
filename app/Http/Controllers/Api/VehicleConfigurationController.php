@@ -14,6 +14,18 @@ use Illuminate\Http\Request;
 
 class VehicleConfigurationController extends Controller
 {
+    /**
+     * Año mínimo admitido en la búsqueda por año, alineado con la validación
+     * de VehicleModelController (min:1900).
+     */
+    private const MIN_SEARCHABLE_YEAR = 1900;
+
+    /**
+     * Años futuros admitidos por encima del año en curso, alineado con la
+     * validación de VehicleModelController (max: año actual + 2).
+     */
+    private const MAX_FUTURE_SEARCHABLE_YEARS = 2;
+
     public function __construct(private VehicleCatalogService $catalogService) {}
 
     public function index(Request $request): JsonResponse
@@ -42,6 +54,20 @@ class VehicleConfigurationController extends Controller
             if ($token === '') {
                 continue;
             }
+
+            $year = $this->parseSearchYear($token);
+            if ($year !== null) {
+                $query->where(function ($scope) use ($year): void {
+                    $scope->where('vehicle_models.year_from', '<=', $year)
+                        ->where(function ($coverage) use ($year): void {
+                            $coverage->whereNull('vehicle_models.year_to')
+                                ->orWhere('vehicle_models.year_to', '>=', $year);
+                        });
+                });
+
+                continue;
+            }
+
             $like = "%{$token}%";
             $query->where(function ($scope) use ($like): void {
                 $scope->whereRaw('LOWER(vehicle_makes.name) LIKE ?', [$like])
@@ -49,6 +75,8 @@ class VehicleConfigurationController extends Controller
                     ->orWhereRaw('LOWER(COALESCE(vehicle_models.generation, ?)) LIKE ?', ['', $like])
                     ->orWhereRaw('LOWER(vehicle_engines.engine_code) LIKE ?', [$like])
                     ->orWhereRaw('LOWER(COALESCE(vehicle_engines.displacement, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(vehicle_engines.fuel_type, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(vehicle_engines.aspiration, ?)) LIKE ?', ['', $like])
                     ->orWhereExists(function ($vinQuery) use ($like): void {
                         $vinQuery->selectRaw('1')
                             ->from('vehicle_vins')
@@ -128,7 +156,7 @@ class VehicleConfigurationController extends Controller
                     'id' => (int) $row->model_id,
                     'name' => $row->model_name,
                     'year_from' => (int) $row->year_from,
-                    'year_to' => (int) $row->year_to,
+                    'year_to' => $row->year_to === null ? null : (int) $row->year_to,
                     'generation' => $row->generation,
                 ],
                 'engine' => [
@@ -155,6 +183,26 @@ class VehicleConfigurationController extends Controller
                 'total' => $paginator->total(),
             ],
         ]);
+    }
+
+    /**
+     * Devuelve el año cuando el token es un número de cuatro dígitos dentro del
+     * rango admitido por el catálogo; null cuando debe tratarse como texto.
+     */
+    private function parseSearchYear(string $token): ?int
+    {
+        if (preg_match('/^\d{4}$/', $token) !== 1) {
+            return null;
+        }
+
+        $year = (int) $token;
+        $maxYear = (int) date('Y') + self::MAX_FUTURE_SEARCHABLE_YEARS;
+
+        if ($year < self::MIN_SEARCHABLE_YEAR || $year > $maxYear) {
+            return null;
+        }
+
+        return $year;
     }
 
     public function store(StoreVehicleConfigurationRequest $request): JsonResponse

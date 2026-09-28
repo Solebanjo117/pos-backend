@@ -18,6 +18,9 @@ class SalesQuote extends Model
     protected $fillable = [
         'quote_number',
         'idempotency_key',
+        'draft_revision',
+        'draft_request_hash',
+        'vehicle_context',
         'customer_id',
         'customer_vehicle_id',
         'user_id',
@@ -37,6 +40,8 @@ class SalesQuote extends Model
     ];
 
     protected $casts = [
+        'draft_revision' => 'integer',
+        'vehicle_context' => 'array',
         'date' => 'date',
         'valid_until' => 'date',
         'sent_to_cashier_at' => 'datetime',

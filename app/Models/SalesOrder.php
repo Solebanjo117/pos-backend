@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\Auth;
 
@@ -94,6 +95,11 @@ class SalesOrder extends Model
     public function posSession(): BelongsTo
     {
         return $this->belongsTo(PosSession::class);
+    }
+
+    public function sourceQuote(): HasOne
+    {
+        return $this->hasOne(SalesQuote::class, 'converted_order_id')->withTrashed();
     }
 
     public function items(): HasMany
@@ -425,7 +431,7 @@ class SalesOrder extends Model
      * Register a payment (cash, card, transfer, or credit).
      * Updates payment_status and, for credit payments, adjusts customer balance.
      */
-    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false, ?string $referenceNumber = null, ?int $financialAccountId = null, ?string $idempotencyKey = null, ?string $requestHash = null): SalesOrderPayment
+    public function addPayment(float $amount, string $method, ?string $notes = null, $paidAt = null, bool $isCheckout = false, ?string $referenceNumber = null, ?int $financialAccountId = null, ?string $idempotencyKey = null, ?string $requestHash = null, ?int $accountPaymentBatchId = null): SalesOrderPayment
     {
         $payment = $this->payments()->create([
             'amount' => $amount,
@@ -437,6 +443,8 @@ class SalesOrder extends Model
             'financial_account_id' => $financialAccountId,
             'idempotency_key' => $idempotencyKey,
             'request_hash' => $requestHash,
+            'account_payment_batch_id' => $accountPaymentBatchId,
+            'pos_session_id' => $accountPaymentBatchId ? AccountPaymentBatch::query()->find($accountPaymentBatchId)?->pos_session_id : $this->pos_session_id,
         ]);
 
         // Recalculate payment_status

@@ -83,7 +83,14 @@ class FinancialAccountController extends Controller
         $type = $validated['type'] ?? null;
         $options = collect();
 
-        if ($type === null || $type === 'cash') {
+        if (($type === null || $type === 'cash') && ($validated['purpose'] ?? null) === 'transfer') {
+            $warehouses = \App\Models\Warehouse::query()->when(! $request->user()->isAdmin(), fn ($query) => $query->whereIn('id', $request->user()->warehouses()->pluck('warehouses.id')))->get();
+            foreach ($warehouses as $warehouse) {
+                $available = app(\App\Services\WarehouseCashService::class)->availability($warehouse->id);
+                $options->push(['endpoint_type' => 'warehouse_cash', 'endpoint_id' => $warehouse->id, 'account_type' => 'cash', 'name' => 'Efectivo · '.$warehouse->name, 'masked_number' => null, 'balance' => $available['balance'], 'initialized' => $available['initialized'], 'currency' => 'USD', 'allow_negative_balance' => false]);
+            }
+        }
+        if (($type === null || $type === 'cash') && ($validated['purpose'] ?? null) !== 'transfer') {
             $sessions = PosSession::query()
                 ->with(['user:id,name', 'warehouse:id,name'])
                 ->where('status', 'open')

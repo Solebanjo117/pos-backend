@@ -18,6 +18,7 @@ class StoreFinancialTransferRequest extends FormRequest
         $endpointTypes = [
             FinancialTransfer::ENDPOINT_FINANCIAL_ACCOUNT,
             FinancialTransfer::ENDPOINT_POS_SESSION,
+            'warehouse_cash',
         ];
 
         return [

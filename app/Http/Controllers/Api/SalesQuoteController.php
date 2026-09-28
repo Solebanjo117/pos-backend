@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Helpers\TaxRateHelper;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\SaveSalesQuoteDraftRequest;
 use App\Models\CustomerVehicle;
 use App\Models\Product;
 use App\Models\ProductInventory;
@@ -11,6 +12,7 @@ use App\Models\SalesOrder;
 use App\Models\SalesQuote;
 use App\Models\Setting;
 use App\Services\CashierQueueService;
+use App\Services\SalesQuoteDraftService;
 use App\Services\SalesQuoteOperationalDetailService;
 use App\Services\SalesQuoteService;
 use App\Services\TransactionTraceService;
@@ -23,9 +25,29 @@ class SalesQuoteController extends Controller
 {
     public function __construct(
         private SalesQuoteService $salesQuoteService,
+        private SalesQuoteDraftService $salesQuoteDraftService,
         private SalesQuoteOperationalDetailService $operationalDetailService,
         private CashierQueueService $cashierQueueService,
     ) {}
+
+    public function saveDraft(SaveSalesQuoteDraftRequest $request, string $draftUuid): JsonResponse
+    {
+        $result = $this->salesQuoteDraftService->save($draftUuid, $request->validated(), $request->user());
+
+        if ($result['conflict']) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La cotización cambió o ya no admite edición. Revisa la versión guardada antes de continuar.',
+                'data' => $result['quote']->exists ? $result['quote'] : null,
+            ], 409);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Cotización guardada.',
+            'data' => $result['quote'],
+        ], $result['created'] ? 201 : 200);
+    }
 
     /**
      * Returns an already-created quote for the given idempotency key, if any.
@@ -142,6 +164,7 @@ class SalesQuoteController extends Controller
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
+            'items.*.notes' => 'nullable|string|max:5000',
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
@@ -204,6 +227,7 @@ class SalesQuoteController extends Controller
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
                         ...$this->discountAmountAttributes($itemData),
                         'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
+                        'notes' => $itemData['notes'] ?? null,
                         'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                         'custom_description' => $itemData['custom_description'] ?? null,
                     ]);
@@ -242,7 +266,8 @@ class SalesQuoteController extends Controller
     {
         $quote = SalesQuote::findOrFail($id);
 
-        if (! in_array($quote->status, ['draft', 'sent'])) {
+        if (! in_array($quote->status, ['draft', 'sent'])
+            || $quote->converted_order_id !== null) {
             return response()->json(['message' => 'Solo se pueden editar cotizaciones en borrador o enviadas.'], 422);
         }
 
@@ -265,6 +290,7 @@ class SalesQuoteController extends Controller
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
+            'items.*.notes' => 'nullable|string|max:5000',
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
@@ -305,7 +331,12 @@ class SalesQuoteController extends Controller
         }
 
         try {
-            DB::transaction(function () use ($quote, $validated) {
+            $updated = DB::transaction(function () use ($quote, $validated): bool {
+                $quote = SalesQuote::query()->whereKey($quote->id)->lockForUpdate()->firstOrFail();
+                if (! in_array($quote->status, ['draft', 'sent'], true)
+                    || $quote->converted_order_id !== null) {
+                    return false;
+                }
                 $quote->update(collect($validated)->only(['customer_id', 'customer_vehicle_id', 'warehouse_id', 'valid_until', 'notes', 'internal_notes', 'status'])->toArray());
 
                 if (isset($validated['items'])) {
@@ -321,6 +352,7 @@ class SalesQuoteController extends Controller
                             'discount_percent' => $itemData['discount_percent'] ?? 0,
                             ...$this->discountAmountAttributes($itemData),
                             'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
+                            'notes' => $itemData['notes'] ?? null,
                             'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                             'custom_description' => $itemData['custom_description'] ?? null,
                         ]);
@@ -328,7 +360,17 @@ class SalesQuoteController extends Controller
 
                     $quote->calculateTotals();
                 }
+                $quote->update([
+                    'draft_revision' => (int) $quote->draft_revision + 1,
+                    'draft_request_hash' => null,
+                ]);
+
+                return true;
             });
+
+            if (! $updated) {
+                return response()->json(['message' => 'La cotización cambió y ya no admite edición.'], 409);
+            }
 
             return response()->json([
                 'success' => true,
@@ -364,6 +406,7 @@ class SalesQuoteController extends Controller
             'items.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'items.*.discount_amount' => 'nullable|numeric|min:0',
             'items.*.tax_percent' => 'nullable|integer|min:0|max:100',
+            'items.*.notes' => 'nullable|string|max:5000',
             'items.*.is_custom_line' => 'nullable|boolean',
             'items.*.custom_description' => 'nullable|string|max:255',
         ]);
@@ -426,6 +469,7 @@ class SalesQuoteController extends Controller
                         'discount_percent' => $itemData['discount_percent'] ?? 0,
                         ...$this->discountAmountAttributes($itemData),
                         'tax_percent' => TaxRateHelper::resolve($itemData['tax_percent'] ?? null),
+                        'notes' => $itemData['notes'] ?? null,
                         'is_custom_line' => (bool) ($itemData['is_custom_line'] ?? false),
                         'custom_description' => $itemData['custom_description'] ?? null,
                     ]);
@@ -498,15 +542,21 @@ class SalesQuoteController extends Controller
      */
     public function sendToCashier(int $id): JsonResponse
     {
-        $quote = SalesQuote::findOrFail($id);
+        $quote = DB::transaction(function () use ($id): ?SalesQuote {
+            $quote = SalesQuote::query()->whereKey($id)->lockForUpdate()->firstOrFail();
+            if (! $quote->sendToCashier()) {
+                return null;
+            }
+            $this->cashierQueueService->enqueueSale($quote);
 
-        if (! $quote->sendToCashier()) {
+            return $quote->fresh();
+        });
+
+        if (! $quote) {
             return response()->json([
-                'message' => "No se puede enviar a caja desde el estado '{$quote->status_label}'.",
+                'message' => 'La cotización ya no está disponible para enviar a Caja.',
             ], 422);
         }
-
-        $this->cashierQueueService->enqueueSale($quote->fresh());
 
         return response()->json([
             'message' => "Cotización {$quote->quote_number} enviada a Caja",
@@ -526,21 +576,25 @@ class SalesQuoteController extends Controller
      */
     public function removeFromCashierQueue(Request $request, int $id): JsonResponse
     {
-        $quote = SalesQuote::findOrFail($id);
+        $quote = DB::transaction(function () use ($request, $id): ?SalesQuote {
+            $quote = SalesQuote::query()->whereKey($id)->lockForUpdate()->firstOrFail();
+            if ($quote->status !== 'sent_to_cashier') {
+                return null;
+            }
+            $quote->update([
+                'status' => 'sent',
+                'sent_to_cashier_at' => null,
+            ]);
+            $this->cashierQueueService->cancelForSource(SalesQuote::class, $quote->id, $request->user());
 
-        if ($quote->status !== 'sent_to_cashier') {
+            return $quote->fresh();
+        });
+
+        if (! $quote) {
             return response()->json([
                 'message' => 'Esta cotización no está en la cola de caja.',
             ], 422);
         }
-
-        // Revertir a estado 'sent' (genérico de cotización pendiente)
-        // NO usar 'draft' porque ya fue procesada/enviada
-        $quote->update([
-            'status' => 'sent',
-            'sent_to_cashier_at' => null,
-        ]);
-        $this->cashierQueueService->cancelForSource(SalesQuote::class, $quote->id, $request->user());
 
         return response()->json([
             'message' => "Cotización {$quote->quote_number} removida de la cola de caja",
@@ -678,13 +732,19 @@ class SalesQuoteController extends Controller
      */
     public function destroy(int $id): JsonResponse
     {
-        $quote = SalesQuote::findOrFail($id);
+        $deleted = DB::transaction(function () use ($id): bool {
+            $quote = SalesQuote::query()->whereKey($id)->lockForUpdate()->firstOrFail();
+            if ($quote->status === 'converted' || $quote->converted_order_id !== null) {
+                return false;
+            }
+            $quote->delete();
 
-        if ($quote->status === 'converted') {
+            return true;
+        });
+
+        if (! $deleted) {
             return response()->json(['message' => 'No se puede eliminar una cotización ya convertida.'], 422);
         }
-
-        $quote->delete();
 
         return response()->json(['message' => 'Cotización eliminada']);
     }
@@ -695,14 +755,6 @@ class SalesQuoteController extends Controller
      */
     public function convert(Request $request, int $id): JsonResponse
     {
-        $quote = SalesQuote::with('items')->findOrFail($id);
-
-        if (! $quote->canBeConverted()) {
-            return response()->json([
-                'message' => 'Esta cotización no puede ser convertida. Verifica su estado y que tenga artículos.',
-            ], 422);
-        }
-
         $validated = $request->validate([
             'payment_method' => 'required|in:cash,card,transfer,credit,multiple',
             'payment_status' => 'nullable|in:pending,partial,paid',
@@ -710,7 +762,11 @@ class SalesQuoteController extends Controller
         ]);
 
         try {
-            $order = DB::transaction(function () use ($quote, $validated, $request) {
+            $result = DB::transaction(function () use ($id, $validated, $request): ?array {
+                $quote = SalesQuote::query()->whereKey($id)->lockForUpdate()->firstOrFail();
+                if (! $quote->canBeConverted()) {
+                    return null;
+                }
                 // Create the SalesOrder from the quote
                 $order = SalesOrder::create([
                     'customer_id' => $quote->customer_id,
@@ -745,13 +801,23 @@ class SalesQuoteController extends Controller
                     'converted_order_id' => $order->id,
                 ]);
 
-                return $order->fresh(['customer', 'user', 'items.product']);
+                return [$quote, $order->fresh(['customer', 'user', 'items.product'])];
             });
+
+            if (! $result) {
+                return response()->json([
+                    'message' => 'Esta cotización no puede ser convertida. Verifica su estado y que tenga artículos.',
+                ], 422);
+            }
+
+            [$quote, $order] = $result;
 
             return response()->json([
                 'message' => "Cotización {$quote->quote_number} convertida a Orden {$order->order_number}",
                 'data' => $order,
             ], 201);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            throw $e;
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error al convertir cotización',

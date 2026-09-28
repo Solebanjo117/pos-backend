@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\SavePaymentMethodRequest;
 use App\Models\PaymentMethod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -37,20 +38,9 @@ class PaymentMethodController extends Controller
         return response()->json(PaymentMethod::notArchived()->ordered()->get());
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(SavePaymentMethodRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'name' => 'required|string|max:100',
-            'is_active' => 'sometimes|boolean',
-            'requires_reference' => 'boolean',
-            'requires_cash_count' => 'boolean',
-            'liquidity_bucket' => 'sometimes|string|in:cash,bank,credit,store_credit',
-            'available_in_sales' => 'sometimes|boolean',
-            'available_in_customer_receipts' => 'sometimes|boolean',
-            'available_in_supplier_payments' => 'sometimes|boolean',
-            'available_in_purchase_orders' => 'sometimes|boolean',
-            'available_in_returns' => 'sometimes|boolean',
-        ]);
+        $validated = $request->validated();
 
         $code = PaymentMethod::generateCode($validated['name']);
         $existing = PaymentMethod::where('code', $code)->first();
@@ -69,6 +59,8 @@ class PaymentMethodController extends Controller
             'code' => $code,
             'is_active' => $validated['is_active'] ?? true,
             'is_system' => false,
+            'requires_financial_account' => $validated['requires_financial_account'] ?? true,
+            'default_financial_account_id' => $validated['default_financial_account_id'] ?? null,
             'requires_reference' => $validated['requires_reference'] ?? false,
             'requires_cash_count' => $validated['requires_cash_count'] ?? false,
             'liquidity_bucket' => $validated['liquidity_bucket'] ?? PaymentMethod::LIQUIDITY_BANK,
@@ -83,26 +75,16 @@ class PaymentMethodController extends Controller
         return response()->json($method, 201);
     }
 
-    public function update(Request $request, PaymentMethod $paymentMethod): JsonResponse
+    public function update(SavePaymentMethodRequest $request, PaymentMethod $paymentMethod): JsonResponse
     {
-        $validated = $request->validate([
-            'name' => 'sometimes|string|max:100',
-            'is_active' => 'sometimes|boolean',
-            'requires_reference' => 'sometimes|boolean',
-            'requires_cash_count' => 'sometimes|boolean',
-            'liquidity_bucket' => 'sometimes|string|in:cash,bank,credit,store_credit',
-            'available_in_sales' => 'sometimes|boolean',
-            'available_in_customer_receipts' => 'sometimes|boolean',
-            'available_in_supplier_payments' => 'sometimes|boolean',
-            'available_in_purchase_orders' => 'sometimes|boolean',
-            'available_in_returns' => 'sometimes|boolean',
-            'sort_order' => 'sometimes|integer|min:0',
-        ]);
+        $validated = $request->validated();
 
         if ($paymentMethod->is_system) {
             $validated = array_intersect_key($validated, [
                 'is_active' => true,
                 'requires_reference' => true,
+                'requires_financial_account' => true,
+                'default_financial_account_id' => true,
                 'requires_cash_count' => true,
                 'liquidity_bucket' => true,
                 'available_in_sales' => true,

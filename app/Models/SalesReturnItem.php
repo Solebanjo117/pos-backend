@@ -18,6 +18,7 @@ class SalesReturnItem extends Model
         'quantity',
         'unit_price',
         'subtotal',
+        'reporting_unit_cost',
         'user_id',
         'seller_id',
     ];
@@ -26,6 +27,7 @@ class SalesReturnItem extends Model
         'quantity' => 'integer',
         'unit_price' => 'decimal:2',
         'subtotal' => 'decimal:2',
+        'reporting_unit_cost' => 'decimal:4',
     ];
 
     protected $appends = ['product_name', 'product_sku', 'user_name'];

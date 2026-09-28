@@ -64,6 +64,15 @@ function createApPaymentMethod(string $code, string $name, int $sortOrder): void
     ]);
 }
 
+function createApBank(): FinancialAccount
+{
+    return FinancialAccount::create([
+        'name' => 'Banco pruebas', 'type' => 'bank', 'currency' => 'USD',
+        'opening_balance' => 500, 'current_balance' => 500,
+        'ledger_account_id' => LedgerAccount::where('code', '1110')->firstOrFail()->id,
+        'is_active' => true, 'is_legacy' => false,
+    ]);
+}
 it('lists payable documents with invoice fallback and capabilities', function () {
     ['buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
 
@@ -113,6 +122,8 @@ it('records a bank payment from the selected financial account without requiring
         'amount' => 30,
         'method' => 'transfer',
         'financial_account_id' => $account->id,
+        'reference_number' => 'ACH-30',
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 30],
         ],
@@ -151,7 +162,9 @@ it('records partial and full accounts payable payments from supplier account', f
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 50,
         'method' => 'transfer',
+        'financial_account_id' => createApBank()->id,
         'reference_number' => 'ACH-50',
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 50],
         ],
@@ -172,7 +185,9 @@ it('records partial and full accounts payable payments from supplier account', f
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 70,
         'method' => 'transfer',
+        'financial_account_id' => createApBank()->id,
         'reference_number' => 'ACH-70',
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 70],
         ],
@@ -201,6 +216,7 @@ it('rejects non real accounts payable payment methods', function (string $method
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 10,
         'method' => $method,
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 10],
         ],
@@ -212,10 +228,12 @@ it('rejects non real accounts payable payment methods', function (string $method
 
 it('requires an open cash session before recording a cash accounts payable payment', function () {
     ['buyer' => $buyer, 'supplier' => $supplier, 'purchaseOrder' => $purchaseOrder] = accountsPayableContext();
+    createApPaymentMethod('cash', 'Efectivo', 1);
 
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 10,
         'method' => 'cash',
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 10],
         ],
@@ -239,6 +257,7 @@ it('records accounts payable cash payment as cash drawer withdrawal', function (
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 40,
         'method' => 'cash',
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 40],
         ],
@@ -282,7 +301,9 @@ it('records accounts payable transfer payment as method withdrawal without cash 
     $this->actingAs($buyer)->postJson("/api/v1/accounts-payable/{$supplier->id}/payments", [
         'amount' => 40,
         'method' => 'transfer',
+        'financial_account_id' => createApBank()->id,
         'reference_number' => 'ACH-40',
+        'idempotency_key' => (string) \Illuminate\Support\Str::uuid(),
         'applications' => [
             ['document_id' => $purchaseOrder->id, 'amount' => 40],
         ],

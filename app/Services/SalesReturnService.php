@@ -88,6 +88,7 @@ class SalesReturnService
                     'variant_id' => $orderItem->variant_id,
                     'quantity' => $returnQty,
                     'unit_price' => $amounts['unit_subtotal'],
+                    'reporting_unit_cost' => (float) $orderItem->unit_cost > 0 ? $orderItem->unit_cost : null,
                     'subtotal' => $amounts['subtotal'],
                     'user_id' => $returnItem['user_id'] ?? $user->id,
                     'seller_id' => $returnItem['seller_id'] ?? $orderItem->seller_id,
@@ -219,7 +220,7 @@ class SalesReturnService
                         ->lockForUpdate()
                         ->first();
 
-                    if (! $account) {
+                    if (! $account && ($return->financial_account_id || PaymentMethod::requiresAccount($method))) {
                         throw ValidationException::withMessages([
                             'financial_account_id' => 'Selecciona una cuenta bancaria activa para este reembolso.',
                         ]);
@@ -686,6 +687,7 @@ class SalesReturnService
         SalesOrderPayment::create([
             'sales_order_id' => $salesReturn->sales_order_id,
             'sales_return_id' => $salesReturn->id,
+            'pos_session_id' => \App\Models\PosSession::query()->where('user_id', $user->id)->where('warehouse_id', $salesReturn->warehouse_id)->where('status', 'open')->value('id'),
             'amount' => -1 * abs($amount),
             'method' => $method ?? $salesReturn->refund_method,
             'reference_number' => $reference,

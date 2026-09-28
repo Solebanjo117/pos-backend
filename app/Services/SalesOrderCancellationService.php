@@ -26,6 +26,13 @@ class SalesOrderCancellationService
                 return $order;
             }
 
+            if ($order->status === 'pending' && \App\Models\SalesQuote::query()
+                ->where('converted_order_id', $order->id)
+                ->whereIn('status', ['sent_to_deposit', 'sent_to_cashier'])->exists()) {
+                throw ValidationException::withMessages([
+                    'order' => 'Esta transacción está vinculada a una cotización en preparación o cobro.',
+                ]);
+            }
             if ($order->returns->contains('status', 'pending')) {
                 throw ValidationException::withMessages([
                     'order' => 'Resuelva la devolucion pendiente antes de anular esta factura.',

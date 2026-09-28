@@ -75,7 +75,7 @@ class OperationalLedgerService
             return null;
         }
 
-        $bucket = PaymentMethod::liquidityBucket($payment->method);
+        $bucket = ($payment->liquidity_bucket ?? PaymentMethod::liquidityBucket($payment->method));
         $liquidity = match ($bucket) {
             PaymentMethod::LIQUIDITY_CASH => 'cash',
             PaymentMethod::LIQUIDITY_BANK => 'bank',
@@ -146,7 +146,7 @@ class OperationalLedgerService
             return null;
         }
 
-        $bucket = PaymentMethod::liquidityBucket($payment->method);
+        $bucket = ($payment->liquidity_bucket ?? PaymentMethod::liquidityBucket($payment->method));
         $liquidity = $bucket === PaymentMethod::LIQUIDITY_CASH ? 'cash' : ($bucket === PaymentMethod::LIQUIDITY_BANK ? 'bank' : null);
         if ($liquidity === null) {
             return null;
@@ -214,13 +214,18 @@ class OperationalLedgerService
 
         $liquidity = $movement->financial_account_id ? 'bank' : 'cash';
         $isInbound = $movement->movement_type === CapitalMovement::TYPE_IN;
+        $desired = $isInbound ? [$liquidity => $amount, 'contributed_capital' => -$amount] : [$liquidity => -$amount, 'contributed_capital' => $amount];
+        if ($movement->source_type === 'allocated_cash_operation') {
+            $desired = ['contributed_capital' => $isInbound ? -$amount : $amount];
+            foreach (\App\Models\OperationalPayment::query()->where('source_type', \App\Models\CashOperationRequest::class)->where('source_id', $movement->source_id)->get() as $payment) {
+                $desired[$payment->liquidity_bucket] = ($desired[$payment->liquidity_bucket] ?? 0) + ($isInbound ? 1 : -1) * (float) $payment->amount;
+            }
+        }
 
         return $this->syncDesired(
             'capital_movement',
             (int) $movement->id,
-            $isInbound
-                ? [$liquidity => $amount, 'contributed_capital' => -$amount]
-                : [$liquidity => -$amount, 'contributed_capital' => $amount],
+            $desired,
             $movement->business_datetime ?? $movement->movement_date ?? $movement->created_at,
             $movement->warehouse_id,
             $movement->user_id,

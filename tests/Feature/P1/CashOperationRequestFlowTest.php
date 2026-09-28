@@ -18,6 +18,7 @@ uses(RefreshDatabase::class);
 
 function cashOperationContext(): array
 {
+    \App\Models\PaymentMethod::create(['code' => 'cash', 'name' => 'Efectivo', 'is_active' => true, 'liquidity_bucket' => 'cash', 'available_in_supplier_payments' => true, 'available_in_customer_receipts' => true]);
     $warehouse = Warehouse::query()->create(['code' => 'W-CASH-REQUEST', 'name' => 'Caja solicitudes']);
     $admin = User::factory()->create(['role' => 'admin', 'current_warehouse_id' => $warehouse->id, 'is_active' => true]);
     $cashier = User::factory()->create(['role' => 'cashier', 'current_warehouse_id' => $warehouse->id, 'is_active' => true]);

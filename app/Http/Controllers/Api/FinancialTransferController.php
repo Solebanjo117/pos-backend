@@ -134,6 +134,9 @@ class FinancialTransferController extends Controller
     /** @return array{id: int, name: string, type: string} */
     private function endpointLabel(string $type, int $id): array
     {
+        if ($type === 'warehouse_cash') {
+            return ['id' => $id, 'name' => 'Efectivo · '.(\App\Models\Warehouse::query()->find($id)?->name ?? 'Sucursal'), 'type' => 'cash'];
+        }
         if ($type === FinancialTransfer::ENDPOINT_FINANCIAL_ACCOUNT) {
             $account = FinancialAccount::query()->find($id);
 

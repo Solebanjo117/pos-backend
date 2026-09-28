@@ -39,9 +39,7 @@ class CashMovementService
             }
 
             $amount = round((float) $data['amount'], 2);
-            $in = (float) $session->cashMovements()->where('type', 'in')->sum('amount');
-            $out = (float) $session->cashMovements()->where('type', 'out')->sum('amount');
-            $balanceBefore = round((float) $session->opening_amount + $in - $out, 2);
+            $balanceBefore = (float) app(PosSessionReconciliationService::class)->build($session)['summary']['expected_cash'];
             if ($data['type'] === 'out' && $amount > $balanceBefore) {
                 throw new \InvalidArgumentException('La caja no tiene saldo suficiente para realizar esta salida.');
             }

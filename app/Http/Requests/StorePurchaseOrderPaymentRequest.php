@@ -29,6 +29,7 @@ class StorePurchaseOrderPaymentRequest extends FormRequest
             'method' => ['required', Rule::in($validMethods)],
             'reference_number' => ['nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
+            'financial_account_id' => ['nullable', 'integer', Rule::exists('financial_accounts', 'id')->where(fn ($query) => $query->where('is_active', true)->where('is_legacy', false))],
         ];
     }
 

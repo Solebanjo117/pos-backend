@@ -52,6 +52,8 @@ class PaymentMethod extends Model
         'archived_at',
         'is_system',
         'requires_reference',
+        'requires_financial_account',
+        'default_financial_account_id',
         'requires_cash_count',
         'liquidity_bucket',
         'available_in_sales',
@@ -67,6 +69,7 @@ class PaymentMethod extends Model
         'archived_at' => 'datetime',
         'is_system' => 'boolean',
         'requires_reference' => 'boolean',
+        'requires_financial_account' => 'boolean',
         'requires_cash_count' => 'boolean',
         'available_in_sales' => 'boolean',
         'available_in_customer_receipts' => 'boolean',
@@ -222,6 +225,12 @@ class PaymentMethod extends Model
         }
 
         return self::LIQUIDITY_BANK;
+    }
+
+    public static function requiresAccount(?string $code): bool
+    {
+        return static::liquidityBucket($code) === self::LIQUIDITY_BANK
+            && (static::query()->where('code', $code)->value('requires_financial_account') ?? true);
     }
 
     public static function contextColumn(?string $context): ?string

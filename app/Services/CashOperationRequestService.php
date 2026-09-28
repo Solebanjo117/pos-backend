@@ -96,9 +96,9 @@ class CashOperationRequestService
         }
     }
 
-    public function complete(CashOperationRequest $request, CashierQueueEntry $entry, User $user): CashOperationRequest
+    public function complete(CashOperationRequest $request, CashierQueueEntry $entry, User $user, array $data = []): CashOperationRequest
     {
-        return DB::transaction(function () use ($request, $user): CashOperationRequest {
+        return DB::transaction(function () use ($request, $user, $data): CashOperationRequest {
             $request = CashOperationRequest::query()->lockForUpdate()->findOrFail($request->id);
             if ($request->status === CashOperationRequest::STATUS_COMPLETED) {
                 return $request;
@@ -109,6 +109,30 @@ class CashOperationRequestService
 
             $isInbound = in_array($request->operation_type, [CashOperationRequest::TYPE_CASH_IN, CashOperationRequest::TYPE_FUNDING], true);
             $category = $request->fundingCategory?->name;
+            if ($request->operation_type === CashOperationRequest::TYPE_FUNDING && isset($data['payments'])) {
+                $service = app(OperationalPaymentService::class);
+                $payments = $service->normalize($data['payments'], (float) $request->amount, \App\Models\PaymentMethod::CONTEXT_CUSTOMER_RECEIPTS);
+                $records = $service->record($request, $payments, 'in', $user);
+                $singleCashMovement = $records->count() === 1 ? $records->first()->cash_movement_id : null;
+                $capital = CapitalMovement::query()->create([
+                    'warehouse_id' => $request->warehouse_id,
+                    'user_id' => $user->id,
+                    'movement_type' => CapitalMovement::TYPE_IN,
+                    'amount' => $request->amount,
+                    'movement_date' => now()->toDateString(),
+                    'reason' => $category ?: 'Aportación de fondos',
+                    'notes' => $request->notes,
+                    'source_type' => 'allocated_cash_operation',
+                    'cash_movement_id' => $singleCashMovement,
+                    'source_id' => $request->id,
+                    'business_datetime' => now(),
+                    'idempotency_key' => $request->idempotency_key,
+                ]);
+                $request->update(['status' => CashOperationRequest::STATUS_COMPLETED, 'cash_movement_id' => $singleCashMovement, 'capital_movement_id' => $capital->id, 'processed_by' => $user->id, 'processed_at' => now()]);
+                activity('cash_operations')->performedOn($request)->causedBy($user)->log('Aportación procesada con distribución de pagos');
+
+                return $request->fresh(['capitalMovement']);
+            }
             $movement = $this->cashMovementService->record($user, $request->warehouse_id, [
                 'type' => $isInbound ? 'in' : 'out',
                 'subtype' => $request->operation_type,
@@ -180,6 +204,16 @@ class CashOperationRequestService
             $entry = CashierQueueEntry::query()->lockForUpdate()->findOrFail($entry->id);
             if ($entry->warehouse_id !== $warehouseId) {
                 throw new \InvalidArgumentException('La solicitud no pertenece a la sucursal activa.');
+            }
+            if ($entry->source instanceof \App\Models\PurchasePaymentRequest) {
+                abort_unless($user->hasRole(['admin', 'manager']) || $entry->source->requested_by === $user->id || $entry->opened_by === $user->id, 403);
+                if (! in_array($entry->status, ['pending', 'opened'], true)) {
+                    throw new \InvalidArgumentException('La solicitud ya no se puede cancelar.');
+                }
+                $entry->update(['status' => 'cancelled', 'cancelled_by' => $user->id, 'cancelled_at' => now(), 'metadata' => array_merge($entry->metadata ?? [], ['cancellation_reason' => $reason])]);
+                activity('purchase_payments')->performedOn($entry)->causedBy($user)->withProperties(['reason' => $reason])->log('Solicitud cancelada');
+
+                return $entry->fresh(['source', 'warehouse', 'opener']);
             }
             $request = CashOperationRequest::query()->where('queue_entry_id', $entry->id)->lockForUpdate()->first();
             if (! $request) {

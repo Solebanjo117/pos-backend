@@ -10,6 +10,9 @@ Route::middleware(['web'])->group(function () {
         ->middleware('role:admin,manager,seller');
     Route::post('/sales-quotes/from-pos', [SalesQuoteController::class, 'storeFromPos'])
         ->middleware('role:admin,manager,seller');
+    Route::put('/sales-quotes/drafts/{draftUuid}', [SalesQuoteController::class, 'saveDraft'])
+        ->whereUuid('draftUuid')
+        ->middleware(['role:admin,manager,seller', 'warehouse_context']);
     Route::get('/sales-quotes/pending-at-cashier', [SalesQuoteController::class, 'pendingAtCashier'])
         ->middleware('role:admin,manager,cashier');
     Route::get('/sales-quotes/{id}/operational-detail', [SalesQuoteController::class, 'operationalDetail'])

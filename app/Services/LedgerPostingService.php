@@ -168,6 +168,16 @@ class LedgerPostingService
             : $this->accountByCode('1110', 'Bank');
         [$thirdPartyType, $thirdPartyId] = $this->expenseThirdParty($expense);
 
+        $allocations = \App\Models\OperationalPayment::query()->where('source_type', $expense->getMorphClass())->where('source_id', $expense->id)->whereNull('reversed_at')->get();
+        $credits = $allocations->isEmpty() ? [[
+            'account_code' => $liquidityAccount->code, 'account_name' => $liquidityAccount->name,
+            'debit' => 0, 'credit' => (float) $expense->amount,
+        ]] : $allocations->map(fn ($payment) => [
+            'account_code' => $payment->liquidity_bucket === 'cash' ? '1100' : '1110',
+            'account_name' => $payment->liquidity_bucket === 'cash' ? 'Cash' : 'Bank',
+            'debit' => 0, 'credit' => (float) $payment->amount,
+        ])->all();
+
         return $this->postManualEntry([
             'source_type' => 'operational_expense_payment',
             'source_id' => $expense->id,
@@ -189,14 +199,7 @@ class LedgerPostingService
                     'debit' => (float) $expense->amount,
                     'credit' => 0,
                 ],
-                [
-                    'account_code' => $liquidityAccount->code,
-                    'account_name' => $liquidityAccount->name,
-                    'third_party_type' => $thirdPartyType,
-                    'third_party_id' => $thirdPartyId,
-                    'debit' => 0,
-                    'credit' => (float) $expense->amount,
-                ],
+                ...$credits,
             ],
         ]);
     }

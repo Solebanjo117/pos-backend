@@ -2204,75 +2204,7 @@ class ReportService
      */
     public function generateBrandProfitability(array $filters): array
     {
-        $warehouseId = $filters['warehouse_id'] ?? null;
-
-        $query = \App\Models\SalesOrder::with(['items.product.defaultVariant.brand', 'items.variant.brand'])
-            ->whereIn('status', ['confirmed', 'processing', 'completed'])
-            ->whereBetween('date', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
-
-        if ($warehouseId) {
-            $query->whereHas('items', function ($q) use ($warehouseId) {
-                $q->where('warehouse_id', $warehouseId);
-            });
-        }
-
-        $orders = $query->get();
-
-        $brandsData = [];
-
-        foreach ($orders as $order) {
-            $items = $warehouseId
-                ? $order->items->where('warehouse_id', $warehouseId)
-                : $order->items;
-
-            foreach ($items as $item) {
-                // Determine brand
-                $brandId = null;
-                $brandName = 'Sin Marca';
-
-                if ($item->variant && $item->variant->brand) {
-                    $brandId = $item->variant->brand->id;
-                    $brandName = $item->variant->brand->name;
-                } elseif ($item->product && $item->product->defaultVariant && $item->product->defaultVariant->brand) {
-                    $brandId = $item->product->defaultVariant->brand->id;
-                    $brandName = $item->product->defaultVariant->brand->name;
-                }
-
-                $key = $brandId ?? 'unknown';
-
-                if (! isset($brandsData[$key])) {
-                    $brandsData[$key] = [
-                        'brand_id' => $brandId,
-                        'brand_name' => $brandName,
-                        'revenue' => 0,
-                        'cogs' => 0,
-                        'profit' => 0,
-                        'items_sold' => 0,
-                    ];
-                }
-
-                $revenue = $item->subtotal;
-                $cogs = (float) $item->unit_cost * $item->quantity;
-
-                $brandsData[$key]['revenue'] += $revenue;
-                $brandsData[$key]['cogs'] += $cogs;
-                $brandsData[$key]['profit'] += ($revenue - $cogs);
-                $brandsData[$key]['items_sold'] += $item->quantity;
-            }
-        }
-
-        // Calculate margins and sort by profit
-        $result = collect(array_values($brandsData))->map(function ($data) {
-            $data['margin'] = $data['revenue'] > 0 ? ($data['profit'] / $data['revenue']) * 100 : 0;
-            $data['revenue'] = round($data['revenue'], 2);
-            $data['cogs'] = round($data['cogs'], 2);
-            $data['profit'] = round($data['profit'], 2);
-            $data['margin'] = round($data['margin'], 2);
-
-            return $data;
-        })->sortByDesc('profit')->values()->all();
-
-        return ['data' => $result];
+        return app(SalesLineReportService::class)->legacy($filters, 'brand');
     }
 
     /**
@@ -2283,66 +2215,7 @@ class ReportService
      */
     public function generateCategoryProfitability(array $filters): array
     {
-        $warehouseId = $filters['warehouse_id'] ?? null;
-
-        $query = \App\Models\SalesOrder::with(['items.product.category'])
-            ->whereIn('status', ['confirmed', 'processing', 'completed'])
-            ->whereBetween('date', [$filters['date_from'].' 00:00:00', $filters['date_to'].' 23:59:59']);
-
-        if ($warehouseId) {
-            $query->whereHas('items', function ($q) use ($warehouseId) {
-                $q->where('warehouse_id', $warehouseId);
-            });
-        }
-
-        $orders = $query->get();
-
-        $categoriesData = [];
-
-        foreach ($orders as $order) {
-            $items = $warehouseId
-                ? $order->items->where('warehouse_id', $warehouseId)
-                : $order->items;
-
-            foreach ($items as $item) {
-                $categoryId = $item->product->category_id ?? null;
-                $categoryName = $item->product->category->name ?? 'Sin Categoría';
-
-                $key = $categoryId ?? 'unknown';
-
-                if (! isset($categoriesData[$key])) {
-                    $categoriesData[$key] = [
-                        'category_id' => $categoryId,
-                        'category_name' => $categoryName,
-                        'revenue' => 0,
-                        'cogs' => 0,
-                        'profit' => 0,
-                        'items_sold' => 0,
-                    ];
-                }
-
-                $revenue = $item->subtotal;
-                $cogs = (float) $item->unit_cost * $item->quantity;
-
-                $categoriesData[$key]['revenue'] += $revenue;
-                $categoriesData[$key]['cogs'] += $cogs;
-                $categoriesData[$key]['profit'] += ($revenue - $cogs);
-                $categoriesData[$key]['items_sold'] += $item->quantity;
-            }
-        }
-
-        // Calculate margins and sort by profit
-        $result = collect(array_values($categoriesData))->map(function ($data) {
-            $data['margin'] = $data['revenue'] > 0 ? ($data['profit'] / $data['revenue']) * 100 : 0;
-            $data['revenue'] = round($data['revenue'], 2);
-            $data['cogs'] = round($data['cogs'], 2);
-            $data['profit'] = round($data['profit'], 2);
-            $data['margin'] = round($data['margin'], 2);
-
-            return $data;
-        })->sortByDesc('profit')->values()->all();
-
-        return ['data' => $result];
+        return app(SalesLineReportService::class)->legacy($filters, 'category');
     }
 
     /**

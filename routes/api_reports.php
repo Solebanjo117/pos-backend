@@ -51,3 +51,14 @@ Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context']
     Route::get('/inventory-items/export/{format}', [ReportController::class, 'exportInventoryItems']);
     Route::get('/movement-history/export/{format}', [ReportController::class, 'exportMovementHistory']);
 });
+
+Route::prefix('reports')->middleware(['role:admin,manager', 'warehouse_context'])->group(function (): void {
+    Route::get('/cash-position', [\App\Http\Controllers\Api\MoneyReportController::class, 'cash']);
+    Route::get('/sales-lines', [\App\Http\Controllers\Api\MoneyReportController::class, 'sales']);
+    Route::get('/sales-line-options', [\App\Http\Controllers\Api\MoneyReportController::class, 'options']);
+    Route::get('/{report}/export/{format}', [\App\Http\Controllers\Api\MoneyReportController::class, 'export'])->whereIn('report', ['cash-position', 'sales-lines', 'payment-methods']);
+});
+Route::middleware('role:admin')->group(function (): void {
+    Route::get('/financial-accounts/report', [\App\Http\Controllers\Api\MoneyReportController::class, 'accounts']);
+    Route::get('/financial-accounts/{financialAccount}/movements', [\App\Http\Controllers\Api\MoneyReportController::class, 'accountMovements']);
+});

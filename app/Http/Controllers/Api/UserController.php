@@ -216,9 +216,11 @@ class UserController extends Controller
             ? \App\Models\Warehouse::select('id', 'name')->orderBy('name')->get()
             : $user->warehouses()->select('warehouses.id', 'warehouses.name')->orderBy('warehouses.name')->get();
 
+        $effectiveWarehouseId = $user->getEffectiveWarehouseId();
+
         return response()->json([
-            'current_warehouse_id' => $user->current_warehouse_id,
-            'current_warehouse' => $user->currentWarehouse,
+            'current_warehouse_id' => $effectiveWarehouseId,
+            'current_warehouse' => $effectiveWarehouseId ? $user->currentWarehouse : null,
             'allowed_warehouses' => $allowedWarehouses,
         ]);
     }

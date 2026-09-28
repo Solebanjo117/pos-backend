@@ -381,3 +381,15 @@ it('rolls back payment quote queue and inventory when prepared checkout fails', 
         ->and((int) $context['inventory']->fresh()->quantity_available)->toBe(5)
         ->and((int) $context['lot']->fresh()->quantity_available)->toBe(5);
 });
+
+it('reuses the prepared quote order when an administrator charges it', function (): void {
+    $context = preparedQuoteCheckoutContext();
+    $context['cashier']->update(['role' => 'admin']);
+    $payload = preparedQuotePaymentPayload($context, (string) Str::uuid(), [['method' => 'cash', 'amount' => 107]]);
+    $this->actingAs($context['cashier'])->postJson('/api/v1/sales-orders', $payload)
+        ->assertCreated()->assertJsonPath('data.id', $context['order']->id);
+    $this->postJson('/api/v1/sales-orders', $payload)->assertCreated();
+    expect(SalesOrder::count())->toBe(1)
+        ->and($context['order']->payments()->count())->toBe(1)
+        ->and((int) $context['inventory']->fresh()->quantity_available)->toBe(4);
+});

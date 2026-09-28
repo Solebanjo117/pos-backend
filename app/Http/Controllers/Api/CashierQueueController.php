@@ -28,6 +28,7 @@ class CashierQueueController extends Controller
                 CashierQueueEntry::TYPE_CASH_IN,
                 CashierQueueEntry::TYPE_CASH_OUT,
                 CashierQueueEntry::TYPE_FUNDING,
+                'purchase_payment',
             ])],
             'per_page' => ['nullable', 'integer', 'min:10', 'max:100'],
         ]);
@@ -157,6 +158,15 @@ class CashierQueueController extends Controller
                 'money_refund_amount' => (float) $source->money_refund_amount,
                 'receivable_applied_amount' => (float) $source->receivable_applied_amount,
                 'store_credit_amount' => (float) $source->store_credit_amount,
+            ],
+            $source instanceof \App\Models\PurchasePaymentRequest => [
+                'id' => $source->id,
+                'document_number' => $source->purchaseOrder?->po_number,
+                'description' => 'Pago de compra',
+                'party' => $source->purchaseOrder?->supplier?->name ?? 'Proveedor',
+                'amount' => (float) $source->amount,
+                'notes' => $source->notes,
+                'created_at' => $source->created_at?->toISOString(),
             ],
             default => null,
         };

@@ -179,6 +179,7 @@ it('registers transfer purchase order payment as transfer withdrawal without cas
         'amount' => 64.20,
         'method' => 'transfer',
         'reference_number' => 'ACH-123',
+        'financial_account_id' => \App\Models\FinancialAccount::create(['name' => 'Banco compra', 'type' => 'bank', 'currency' => 'USD', 'opening_balance' => 100, 'current_balance' => 100, 'ledger_account_id' => \App\Models\LedgerAccount::where('code', '1110')->firstOrFail()->id, 'is_active' => true, 'is_legacy' => false])->id,
     ])->assertCreated();
 
     expect(CashMovement::count())->toBe(0);

@@ -178,6 +178,7 @@ class OperationalExpenseService
                 app(CashierQueueService::class)->cancelForSource(OperationalExpense::class, (int) $expense->id, Auth::user());
             }
             $this->ledgerPostingService->reverseSource('operational_expense_payment', (int) $expense->id, Auth::id(), 'Reversa de pago de gasto.');
+            app(OperationalPaymentService::class)->reverse($expense, Auth::user());
             $this->ledgerPostingService->reverseSource('operational_expense', (int) $expense->id, Auth::id(), 'Reversa de gasto operativo.');
 
             if ($expense->cashMovement) {
@@ -229,10 +230,20 @@ class OperationalExpenseService
                 throw new \InvalidArgumentException('Explique la diferencia entre el monto estimado y el monto final.');
             }
 
+            $allocations = null;
+            if (isset($data['payments'])) {
+                $allocations = app(OperationalPaymentService::class)->normalize($data['payments'], $finalAmount, \App\Models\PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS);
+                $data['payment_method'] = count($allocations) === 1 ? $allocations[0]['method'] : 'mixed';
+            }
+
             $method = (string) ($data['payment_method'] ?? '');
             $session = $this->openSessionForUserAndWarehouse($user, $expense->warehouse_id);
             if ($method === 'cash' && ! $session) {
                 throw new \InvalidArgumentException('Debe existir una sesion de caja abierta en esta sucursal para pagar en efectivo.');
+            }
+
+            if ($allocations !== null) {
+                app(OperationalPaymentService::class)->record($expense, $allocations, 'out', $user);
             }
 
             $expense->fill([
@@ -241,12 +252,13 @@ class OperationalExpenseService
                 'variance_amount' => $variance,
                 'variance_reason' => $data['variance_reason'] ?? null,
                 'payment_method' => $method,
+                'pos_session_id' => $session?->id,
                 'reference_number' => $data['reference_number'] ?? null,
                 'status' => 'paid',
                 'paid_at' => now(),
             ])->save();
 
-            if ($method === 'cash' && $session) {
+            if ($allocations === null && $method === 'cash' && $session) {
                 $movement = $this->createCashMovementIfNeeded($this->currentExpenseData($expense), $session, $expense, $user->id);
                 $expense->update(['cash_movement_id' => $movement?->id, 'pos_session_id' => $session->id]);
             }

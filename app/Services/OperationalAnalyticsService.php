@@ -12,47 +12,7 @@ class OperationalAnalyticsService
     /** @param array<string, mixed> $filters */
     public function salesByProduct(array $filters): array
     {
-        $returns = DB::table('sales_return_items as sri')
-            ->join('sales_returns as sr', 'sr.id', '=', 'sri.sales_return_id')
-            ->where('sr.status', 'approved')
-            ->groupBy('sri.sales_order_item_id')
-            ->selectRaw('sri.sales_order_item_id, SUM(sri.quantity) as returned_quantity, SUM(sri.subtotal) as returned_subtotal');
-
-        $query = DB::table('sales_order_items as soi')
-            ->join('sales_orders as so', 'so.id', '=', 'soi.sales_order_id')
-            ->leftJoin('products as p', 'p.id', '=', 'soi.product_id')
-            ->leftJoin('product_variants as pv', 'pv.id', '=', 'soi.variant_id')
-            ->leftJoinSub($returns, 'returned', 'returned.sales_order_item_id', '=', 'soi.id')
-            ->whereIn('so.status', ['confirmed', 'processing', 'completed'])
-            ->when($filters['date_from'] ?? null, fn (Builder $q, string $date) => $q->whereDate('so.date', '>=', $date))
-            ->when($filters['date_to'] ?? null, fn (Builder $q, string $date) => $q->whereDate('so.date', '<=', $date))
-            ->when($filters['warehouse_id'] ?? null, fn (Builder $q, int $id) => $q->where('soi.warehouse_id', $id))
-            ->when($filters['search'] ?? null, function (Builder $q, string $search): void {
-                $like = '%'.mb_strtolower($search).'%';
-                $q->where(function (Builder $nested) use ($like): void {
-                    $nested->whereRaw('LOWER(p.name) LIKE ?', [$like])
-                        ->orWhereRaw('LOWER(p.sku_base) LIKE ?', [$like])
-                        ->orWhereRaw('LOWER(pv.sku) LIKE ?', [$like])
-                        ->orWhereRaw('LOWER(soi.custom_description) LIKE ?', [$like]);
-                });
-            })
-            ->groupBy('soi.product_id', 'soi.variant_id', 'p.name', 'p.sku_base', 'pv.sku', 'soi.custom_description')
-            ->selectRaw("soi.product_id, soi.variant_id, COALESCE(p.name, soi.custom_description, 'Articulo') as product_name, COALESCE(pv.sku, p.sku_base, 'MISC') as sku")
-            ->selectRaw('SUM(soi.quantity) as quantity_sold')
-            ->selectRaw('SUM(COALESCE(returned.returned_quantity, 0)) as quantity_returned')
-            ->selectRaw('SUM(soi.subtotal) as gross_sales')
-            ->selectRaw('SUM(COALESCE(returned.returned_subtotal, 0)) as returns_amount')
-            ->selectRaw('SUM(soi.subtotal - COALESCE(returned.returned_subtotal, 0)) as net_sales')
-            ->selectRaw('SUM((soi.quantity - COALESCE(returned.returned_quantity, 0)) * soi.unit_cost) as cost')
-            ->orderByDesc('net_sales');
-
-        return $this->paginateWithSummary($query, $filters, [
-            'quantity_sold', 'quantity_returned', 'gross_sales', 'returns_amount', 'net_sales', 'cost',
-        ], function (array $row): array {
-            $row['profit'] = round((float) $row['net_sales'] - (float) $row['cost'], 2);
-
-            return $row;
-        });
+        return app(SalesLineReportService::class)->report([...$filters, 'group_by' => 'product']);
     }
 
     /** @param array<string, mixed> $filters */

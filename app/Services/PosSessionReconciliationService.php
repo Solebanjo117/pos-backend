@@ -85,11 +85,15 @@ class PosSessionReconciliationService
     private function paymentsByMethod(PosSession $session, ?Carbon $until): array
     {
         $query = SalesOrderPayment::query()
+            ->whereNull('account_payment_batch_id')
             ->where('created_by', $session->user_id)
             ->where('paid_at', '>=', $session->opened_at)
             ->where(function ($query) use ($session): void {
-                $query->whereHas('salesOrder', fn ($query) => $query->where('pos_session_id', $session->id))
-                    ->orWhereHas('salesReturn', fn ($query) => $query->where('warehouse_id', $session->warehouse_id));
+                $query->where('pos_session_id', $session->id)
+                    ->orWhere(fn ($query) => $query->whereNull('pos_session_id')
+                        ->where(fn ($legacy) => $legacy
+                            ->whereHas('salesOrder', fn ($query) => $query->where('pos_session_id', $session->id))
+                            ->orWhereHas('salesReturn', fn ($query) => $query->where('warehouse_id', $session->warehouse_id))));
             })
             ->where(function ($query): void {
                 $query->whereNull('reference_number')
@@ -134,7 +138,8 @@ class PosSessionReconciliationService
         $purchaseWithdrawals = PurchaseOrderPayment::query()
             ->where('pos_session_id', $session->id)
             ->where(function ($query): void {
-                $query->where('method', '!=', 'cash')
+                $query->where('liquidity_bucket', '!=', 'cash')
+                    ->orWhere(fn ($legacy) => $legacy->whereNull('liquidity_bucket')->where('method', '!=', 'cash'))
                     ->orWhereNull('cash_movement_id');
             })
             ->selectRaw('method, SUM(amount) as withdrawals')
@@ -151,6 +156,7 @@ class PosSessionReconciliationService
 
         $operationalExpenseWithdrawals = OperationalExpense::query()
             ->where('pos_session_id', $session->id)
+            ->whereNotExists(fn ($query) => $query->selectRaw('1')->from('operational_payments')->where('source_type', OperationalExpense::class)->whereColumn('source_id', 'operational_expenses.id'))
             ->where('payment_method', '!=', 'cash')
             ->selectRaw('payment_method, SUM(amount) as withdrawals')
             ->groupBy('payment_method')
@@ -169,6 +175,12 @@ class PosSessionReconciliationService
             );
         }
 
+        foreach (\App\Models\OperationalPayment::query()->where('pos_session_id', $session->id)->where('liquidity_bucket', 'bank')->whereNull('reversed_at')->get() as $payment) {
+            $salesPayments[$payment->method] ??= ['payments' => 0.0, 'withdrawals' => 0.0];
+            $key = $payment->direction === 'in' ? 'payments' : 'withdrawals';
+            $salesPayments[$payment->method][$key] += ($payment->direction === 'in' ? 1 : -1) * (float) $payment->amount;
+        }
+
         return $salesPayments;
     }
 
@@ -177,6 +189,7 @@ class PosSessionReconciliationService
         return $this->money((float) CashMovement::query()
             ->where('pos_session_id', $session->id)
             ->where('type', $type)
+            ->where(fn ($query) => $query->whereNull('subtype')->orWhere('subtype', '!=', 'sales_return_refund'))
             ->sum('amount'));
     }
 

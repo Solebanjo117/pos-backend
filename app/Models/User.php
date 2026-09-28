@@ -137,16 +137,14 @@ class User extends Authenticatable
 
     /**
      * Get the effective warehouse ID for the current user session.
-     * Falls back to first allowed warehouse if current is not set or not allowed.
+     * Only an explicitly assigned and authorized warehouse is effective.
      */
     public function getEffectiveWarehouseId(): ?int
     {
         if ($this->current_warehouse_id && $this->hasWarehouseAccess($this->current_warehouse_id)) {
             return $this->current_warehouse_id;
         }
-        // Fallback to first allowed warehouse
-        $first = $this->warehouses()->first();
 
-        return $first?->id;
+        return null;
     }
 }

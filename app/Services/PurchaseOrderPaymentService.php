@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Models\CashMovement;
 use App\Models\PosSession;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderPayment;
@@ -24,6 +23,9 @@ class PurchaseOrderPaymentService
             return null;
         }
 
+        $normalized = app(OperationalPaymentService::class)->normalize([$data], (float) $data['amount'], \App\Models\PaymentMethod::CONTEXT_PURCHASE_ORDERS)[0];
+        $data = array_merge($data, $normalized);
+
         $amount = round((float) $data['amount'], 2);
         $amountDue = round((float) $purchaseOrder->amount_due, 2);
 
@@ -37,10 +39,23 @@ class PurchaseOrderPaymentService
         );
 
         return DB::transaction(function () use ($purchaseOrder, $data, $amount, $session): PurchaseOrderPayment {
+            if ($purchaseOrder->supplier_id) {
+                \App\Models\Supplier::query()->lockForUpdate()->findOrFail($purchaseOrder->supplier_id);
+            }
+            $purchaseOrder = PurchaseOrder::query()->lockForUpdate()->findOrFail($purchaseOrder->id);
+            $session = PosSession::query()->whereKey($session->id)->where('status', 'open')->lockForUpdate()->first();
+            if (! $session) {
+                throw new \InvalidArgumentException('La sesión de Caja ya está cerrada.');
+            }
+            if ((int) round($amount * 100) > (int) round((float) $purchaseOrder->amount_due * 100)) {
+                throw new \InvalidArgumentException('El importe excede el saldo actualizado de la compra.');
+            }
             if ($purchaseOrder->supplier) {
                 $this->accountLedgerService->recordSupplierPayment($purchaseOrder->supplier, [
                     'amount' => $amount,
                     'method' => $data['method'],
+                    'payment_context' => \App\Models\PaymentMethod::CONTEXT_PURCHASE_ORDERS,
+                    'financial_account_id' => $data['financial_account_id'] ?? null,
                     'reference_number' => $data['reference_number'] ?? null,
                     'notes' => $data['notes'] ?? null,
                     'pos_session_id' => $session->id,
@@ -82,11 +97,12 @@ class PurchaseOrderPaymentService
     {
         $cashMovement = null;
 
-        if ($data['method'] === 'cash') {
-            $cashMovement = CashMovement::create([
+        if (\App\Models\PaymentMethod::liquidityBucket($data['method']) === 'cash') {
+            $cashMovement = app(CashMovementService::class)->record(Auth::user(), $session->warehouse_id, [
                 'pos_session_id' => $session->id,
                 'user_id' => Auth::id(),
                 'type' => 'out',
+                'subtype' => 'purchase_payment',
                 'amount' => $amount,
                 'reason' => 'Pago OC '.$purchaseOrder->po_number,
                 'notes' => $data['notes'] ?? null,
@@ -97,7 +113,8 @@ class PurchaseOrderPaymentService
             $amount,
             $data['method'],
             $data['reference_number'] ?? null,
-            $data['notes'] ?? null
+            $data['notes'] ?? null,
+            $data['financial_account_id'] ?? null
         );
 
         $payment->update([

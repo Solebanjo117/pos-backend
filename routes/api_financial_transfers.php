@@ -21,3 +21,14 @@ Route::middleware('role:admin')->group(function (): void {
     Route::patch('/financial-accounts/{financialAccount}', [FinancialAccountController::class, 'update']);
     Route::post('/financial-transfers/{financialTransfer}/reverse', [FinancialTransferController::class, 'reverse']);
 });
+
+Route::middleware(['role:admin,manager,cashier', 'warehouse_context'])->group(function () {
+    Route::get('cash/availability', [\App\Http\Controllers\Api\WarehouseCashController::class, 'index']);
+    Route::post('cash/reconciliation', [\App\Http\Controllers\Api\WarehouseCashController::class, 'store']);
+});
+
+Route::middleware(['role:admin,manager,cashier', 'warehouse_context'])->group(function () {
+    Route::get('cash/payment-movements', [\App\Http\Controllers\Api\OperationalPaymentController::class, 'index']);
+    Route::get('cash/payment-summary', [\App\Http\Controllers\Api\OperationalPaymentController::class, 'summary']);
+    Route::post('cash/payments/{scope}/{payment}/account', [\App\Http\Controllers\Api\OperationalPaymentController::class, 'assign']);
+});

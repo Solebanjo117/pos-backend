@@ -45,3 +45,9 @@ Route::prefix('purchase-orders')->middleware(['role:admin,manager,buyer', 'wareh
     Route::post('/{poId}/payments', [PurchaseOrderPaymentController::class, 'store']);
     Route::delete('/{poId}/payments/{paymentId}', [PurchaseOrderPaymentController::class, 'destroy']);
 });
+
+Route::middleware(['role:admin,manager,buyer', 'warehouse_context'])->group(function () {
+    Route::post('purchase-orders/{purchaseOrder}/payment-requests/{paymentRequest}/cancel', [\App\Http\Controllers\Api\PurchasePaymentRequestController::class, 'cancel']);
+    Route::get('purchase-orders/{purchaseOrder}/payment-requests', [\App\Http\Controllers\Api\PurchasePaymentRequestController::class, 'index']);
+    Route::post('purchase-orders/{purchaseOrder}/payment-requests', [\App\Http\Controllers\Api\PurchasePaymentRequestController::class, 'store']);
+});

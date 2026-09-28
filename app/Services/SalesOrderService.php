@@ -26,7 +26,7 @@ class SalesOrderService
      */
     public function getAll(array $filters = []): LengthAwarePaginator
     {
-        $query = SalesOrder::with(['customer', 'customerVehicle.model.make', 'customerVehicle.chassis', 'customerVehicle.engine', 'referredByCustomer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns']);
+        $query = SalesOrder::with(['customer', 'customerVehicle.model.make', 'customerVehicle.chassis', 'customerVehicle.engine', 'referredByCustomer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns', 'sourceQuote:id,converted_order_id,quote_number,status']);
 
         // Apply filters
         if (isset($filters['status'])) {
@@ -79,7 +79,7 @@ class SalesOrderService
      */
     public function getById(int $id): ?SalesOrder
     {
-        return SalesOrder::with(['customer', 'customerVehicle.model.make', 'customerVehicle.chassis', 'customerVehicle.engine', 'referredByCustomer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns'])
+        return SalesOrder::with(['customer', 'customerVehicle.model.make', 'customerVehicle.chassis', 'customerVehicle.engine', 'referredByCustomer', 'user', 'items.product', 'items.warehouse', 'payments', 'returns', 'sourceQuote:id,converted_order_id,quote_number,status'])
             ->findOrFail($id);
     }
 
@@ -105,7 +105,7 @@ class SalesOrderService
                 $sourceQuote = null;
                 $cashierSession = null;
 
-                if ($isCashier) {
+                if ($isCashier || ! empty($data['source_quote_id'])) {
                     [$data, $sourceQuote, $existingOrder, $cashierSession] = $this->prepareCashierCheckout(
                         $data,
                         $idempotencyKey,
@@ -627,6 +627,22 @@ class SalesOrderService
         }
 
         return DB::transaction(function () use ($order, $data) {
+            $order = SalesOrder::query()->lockForUpdate()->findOrFail($order->id);
+            if (! $order->canBeEdited() || SalesQuote::query()->where('converted_order_id', $order->id)->exists()) {
+                throw ValidationException::withMessages(['status' => 'Esta transacción debe continuar desde su cotización o desde Caja.']);
+            }
+            $user = Auth::user();
+            $warehouseId = $user?->getEffectiveWarehouseId();
+            if ($user && (! $warehouseId || ! $user->hasWarehouseAccess($warehouseId)
+                || ! $order->items()->where('warehouse_id', $warehouseId)->exists()
+                || $order->items()->where('warehouse_id', '!=', $warehouseId)->exists())) {
+                throw ValidationException::withMessages(['warehouse_id' => 'La transacción no pertenece a la sucursal activa.']);
+            }
+            foreach ($data['items'] ?? [] as $item) {
+                if ($user && (int) $item['warehouse_id'] !== (int) $warehouseId) {
+                    throw ValidationException::withMessages(['items' => 'Los artículos deben pertenecer a la sucursal activa.']);
+                }
+            }
             $order->update([
                 'customer_id' => $data['customer_id'] ?? $order->customer_id,
                 'customer_vehicle_id' => array_key_exists('customer_vehicle_id', $data) ? $data['customer_vehicle_id'] : $order->customer_vehicle_id,
@@ -676,6 +692,7 @@ class SalesOrderService
     {
         return \Illuminate\Support\Facades\DB::transaction(function () use ($orderId, $itemData) {
             $order = $this->getById($orderId);
+            $this->assertDirectLineEditingAllowed($order);
 
             $isConfirmed = in_array($order->status, ['confirmed', 'processing', 'completed']);
 
@@ -812,6 +829,7 @@ class SalesOrderService
         return DB::transaction(function () use ($itemId, $data) {
             $item = SalesOrderItem::findOrFail($itemId);
             $order = $item->salesOrder;
+            $this->assertDirectLineEditingAllowed($order);
 
             $isPostSaleOrder = in_array($order->status, ['confirmed', 'processing', 'completed'], true);
             if (! $order->canBeEdited() && (! $isPostSaleOrder || ! $item->added_after_sale)) {
@@ -892,6 +910,7 @@ class SalesOrderService
         return DB::transaction(function () use ($itemId) {
             $item = SalesOrderItem::findOrFail($itemId);
             $order = $item->salesOrder;
+            $this->assertDirectLineEditingAllowed($order);
 
             if ($order->canBeEdited()) {
                 return $item->delete();
@@ -924,6 +943,17 @@ class SalesOrderService
     /**
      * Whether the order status allows post-sale item mutations.
      */
+    private function assertDirectLineEditingAllowed(SalesOrder $order): void
+    {
+        if (SalesQuote::query()->where('converted_order_id', $order->id)->exists()) {
+            throw ValidationException::withMessages(['order' => 'Continúa esta transacción desde su cotización o Caja.']);
+        }
+        if (in_array($order->status, ['confirmed', 'processing', 'completed'], true)
+            && ($order->amount_paid > 0 || $order->payments()->where('method', 'store_credit')->exists())) {
+            throw ValidationException::withMessages(['order' => 'Amplía esta venta desde Caja. Para reducir artículos utiliza Devoluciones.']);
+        }
+    }
+
     private function isPostSaleMutableOrder(SalesOrder $order): bool
     {
         return in_array($order->status, ['confirmed', 'processing', 'completed'], true);

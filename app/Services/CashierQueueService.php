@@ -229,6 +229,9 @@ class CashierQueueService
                 throw new \InvalidArgumentException('La solicitud no pertenece a la sucursal activa.');
             }
             if ($entry->status === CashierQueueEntry::STATUS_COMPLETED) {
+                $savedHash = data_get($entry->metadata, 'completion_hash');
+                abort_if($savedHash && ! hash_equals($savedHash, hash('sha256', json_encode($data, JSON_THROW_ON_ERROR))), 409, 'La solicitud ya fue completada con otros datos.');
+
                 return $entry->load(['source', 'warehouse', 'completer']);
             }
             if ($entry->status === CashierQueueEntry::STATUS_OPENED && $entry->opened_by !== $user->id) {
@@ -236,6 +239,14 @@ class CashierQueueService
             }
             if (! in_array($entry->status, [CashierQueueEntry::STATUS_PENDING, CashierQueueEntry::STATUS_OPENED], true)) {
                 throw new \InvalidArgumentException('Este registro ya no se puede completar.');
+            }
+            $entry->update(['metadata' => array_merge($entry->metadata ?? [], ['completion_hash' => hash('sha256', json_encode($data, JSON_THROW_ON_ERROR))])]);
+
+            if ($entry->entry_type === 'purchase_payment' && $entry->source instanceof \App\Models\PurchasePaymentRequest) {
+                app(PurchasePaymentRequestService::class)->settle($entry->source, $data, $user);
+                $entry->update(['status' => CashierQueueEntry::STATUS_COMPLETED, 'final_amount' => $entry->estimated_amount, 'completed_by' => $user->id, 'completed_at' => now()]);
+
+                return $entry->fresh(['source', 'warehouse', 'completer']);
             }
 
             if ($entry->status === CashierQueueEntry::STATUS_PENDING) {
@@ -248,10 +259,8 @@ class CashierQueueService
 
             if ($entry->entry_type === CashierQueueEntry::TYPE_EXPENSE && $entry->source instanceof OperationalExpense) {
                 if ((bool) data_get($entry->metadata, 'fixed_cash_amount', false)) {
-                    $data = [
-                        'final_amount' => (float) $entry->estimated_amount,
-                        'payment_method' => 'cash',
-                    ];
+                    $data['final_amount'] = (float) $entry->estimated_amount;
+                    $data['payment_method'] ??= 'cash';
                 }
                 $expense = $this->expenseService->settleFromQueue($entry->source, $entry, $data, $user);
                 $entry->update([
@@ -274,7 +283,7 @@ class CashierQueueService
                 in_array($entry->entry_type, [CashierQueueEntry::TYPE_CASH_IN, CashierQueueEntry::TYPE_CASH_OUT, CashierQueueEntry::TYPE_FUNDING], true)
                 && $entry->source instanceof CashOperationRequest
             ) {
-                $request = app(CashOperationRequestService::class)->complete($entry->source, $entry, $user);
+                $request = app(CashOperationRequestService::class)->complete($entry->source, $entry, $user, $data);
                 $entry->update([
                     'status' => CashierQueueEntry::STATUS_COMPLETED,
                     'final_amount' => $request->amount,

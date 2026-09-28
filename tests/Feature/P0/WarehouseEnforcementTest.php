@@ -60,4 +60,22 @@ class WarehouseEnforcementTest extends TestCase
         $data = $res->json('data.0');
         $this->assertSame(5, $data['total_stock']);
     }
+
+    public function test_missing_active_warehouse_does_not_choose_an_allowed_warehouse(): void
+    {
+        $warehouse = Warehouse::create(['code' => 'NO-ACTIVE', 'name' => 'Permitida']);
+        $user = User::factory()->create(['role' => 'cashier', 'is_active' => true, 'current_warehouse_id' => null]);
+        $user->warehouses()->attach($warehouse->id);
+        $this->assertNull($user->getEffectiveWarehouseId());
+        $this->actingAs($user)->getJson('/api/v1/products')->assertStatus(409);
+    }
+
+    public function test_context_does_not_publish_a_warehouse_after_access_is_removed(): void
+    {
+        $warehouse = Warehouse::create(['code' => 'REVOKED', 'name' => 'Sin permiso']);
+        $user = User::factory()->create(['role' => 'seller', 'is_active' => true, 'current_warehouse_id' => $warehouse->id]);
+        $this->actingAs($user)->getJson('/api/v1/user/warehouse-context')->assertOk()
+            ->assertJsonPath('current_warehouse_id', null)
+            ->assertJsonPath('current_warehouse', null);
+    }
 }

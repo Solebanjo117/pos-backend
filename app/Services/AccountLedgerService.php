@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Exceptions\IdempotencyConflictException;
 use App\Models\AccountLedgerEntry;
 use App\Models\AccountPaymentBatch;
-use App\Models\CashMovement;
 use App\Models\Customer;
 use App\Models\PaymentMethod;
 use App\Models\PosSession;
@@ -162,11 +161,11 @@ class AccountLedgerService
                 $amount = round((float) $data['amount'], 2);
                 $applications = $this->normalizeCustomerApplications($customer, $data['applications'] ?? [], $amount);
                 $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
-                $session = ($data['method'] ?? null) === 'cash'
+                $session = \App\Models\PaymentMethod::liquidityBucket($data['method'] ?? null) === 'cash'
                     ? $this->resolveCustomerReceiptSession($applications, $data['pos_session_id'] ?? null)
                     : null;
 
-                if (($data['method'] ?? null) === 'cash' && ! $session) {
+                if (\App\Models\PaymentMethod::liquidityBucket($data['method'] ?? null) === 'cash' && ! $session) {
                     throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar cobros.');
                 }
 
@@ -188,6 +187,7 @@ class AccountLedgerService
                         paidAt: $data['paid_at'] ?? now(),
                         referenceNumber: $data['reference_number'] ?? $batch->batch_number,
                         financialAccountId: $data['financial_account_id'] ?? null,
+                        accountPaymentBatchId: $batch->id,
                     );
 
                     $batch->applications()->create([
@@ -366,6 +366,17 @@ class AccountLedgerService
     public function recordSupplierPayment(Supplier $supplier, array $data): array
     {
         return DB::transaction(function () use ($supplier, $data): array {
+            $supplier = Supplier::query()->lockForUpdate()->findOrFail($supplier->id);
+            $key = $data['idempotency_key'] ?? null;
+            $hash = $key ? $this->paymentRequestHash($data) : null;
+            if ($key && ($existing = AccountPaymentBatch::query()->where('idempotency_key', $key)->first())) {
+                abort_unless($existing->account_type === 'supplier' && (int) $existing->account_id === (int) $supplier->id && $existing->request_hash && hash_equals($existing->request_hash, $hash), 409, 'La clave de idempotencia ya fue utilizada con otros datos.');
+
+                return ['batch' => $existing->load('applications'), 'ledger_entry' => $existing->ledgerEntries()->first(), 'statement' => $this->supplierStatement($supplier)];
+            }
+            $data['request_hash'] = $hash;
+            $context = $data['payment_context'] ?? PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS;
+            $data = array_merge($data, app(OperationalPaymentService::class)->normalize([$data], (float) $data['amount'], $context)[0]);
             $amount = round((float) $data['amount'], 2);
             $applications = $this->normalizeSupplierApplications($supplier, $data['applications'] ?? [], $amount);
             $appliedTotal = round(array_sum(array_column($applications, 'amount')), 2);
@@ -375,24 +386,24 @@ class AccountLedgerService
                 throw new \InvalidArgumentException('El monto aplicado excede el monto del pago.');
             }
 
-            if (($data['method'] ?? null) === 'cash' && ! $session) {
+            if (\App\Models\PaymentMethod::liquidityBucket($data['method'] ?? null) === 'cash' && ! $session) {
                 throw new \InvalidArgumentException('Debe existir una sesion de caja abierta para esta sucursal antes de registrar pagos de compra.');
             }
 
             $cashMovement = null;
-            if (($data['method'] ?? null) === 'cash') {
+            if (\App\Models\PaymentMethod::liquidityBucket($data['method'] ?? null) === 'cash') {
                 $cashReason = 'Pago proveedor '.$supplier->name;
                 if (count($applications) === 1) {
                     $cashOrder = PurchaseOrder::query()->find($applications[0]['document_id']);
                     $cashReason = $cashOrder ? 'Pago OC '.$cashOrder->po_number : $cashReason;
                 }
 
-                $cashMovement = CashMovement::create([
-                    'pos_session_id' => $session->id,
-                    'user_id' => Auth::id(),
+                $cashMovement = app(CashMovementService::class)->record(Auth::user(), $session->warehouse_id, [
                     'type' => 'out',
+                    'subtype' => 'purchase_payment',
                     'amount' => $amount,
                     'reason' => $cashReason,
+                    'reference_number' => $data['reference_number'] ?? null,
                     'notes' => $data['notes'] ?? null,
                 ]);
             }
@@ -507,9 +518,9 @@ class AccountLedgerService
 
     private function createPaymentBatch(string $accountType, int $accountId, string $direction, float $amount, array $data): AccountPaymentBatch
     {
-        $context = $accountType === 'supplier'
+        $context = $data['payment_context'] ?? ($accountType === 'supplier'
             ? PaymentMethod::CONTEXT_SUPPLIER_PAYMENTS
-            : PaymentMethod::CONTEXT_CUSTOMER_RECEIPTS;
+            : PaymentMethod::CONTEXT_CUSTOMER_RECEIPTS);
         $method = (string) ($data['method'] ?? '');
 
         if (! in_array($method, PaymentMethod::realMoneyCodes($context), true)) {
@@ -717,17 +728,23 @@ class AccountLedgerService
      */
     private function normalizeSupplierApplications(Supplier $supplier, array $applications, float $amount): array
     {
-        if (! empty($applications)) {
-            return collect($applications)
-                ->map(fn (array $application): array => [
-                    'document_id' => (int) $application['document_id'],
-                    'amount' => round((float) $application['amount'], 2),
-                ])
-                ->values()
-                ->all();
+        if (empty($applications)) {
+            $applications = $this->autoApplyDocuments($this->openPurchaseOrders($supplier), $amount);
+        }
+        $normalized = collect($applications)->groupBy('document_id')->map(fn ($lines, $id) => ['document_id' => (int) $id, 'amount' => round((float) $lines->sum('amount'), 2)])->sortBy('document_id')->values();
+        $orders = PurchaseOrder::query()->with('payments')->where('supplier_id', $supplier->id)->whereIn('id', $normalized->pluck('document_id'))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        if ($orders->count() !== $normalized->count()) {
+            throw new \InvalidArgumentException('Uno o más documentos no pertenecen al proveedor.');
+        }
+        foreach ($normalized as $application) {
+            $order = $orders[$application['document_id']];
+            abort_unless(Auth::user()->isAdmin() || (int) $order->warehouse_id === (int) Auth::user()->current_warehouse_id, 403);
+            if ($order->status === 'cancelled' || $application['amount'] <= 0 || (int) round($application['amount'] * 100) > (int) round((float) $order->amount_due * 100)) {
+                throw new \InvalidArgumentException('El importe excede el saldo actualizado de la compra '.$order->po_number.'.');
+            }
         }
 
-        return $this->autoApplyDocuments($this->openPurchaseOrders($supplier), $amount);
+        return $normalized->all();
     }
 
     /**

@@ -18,6 +18,13 @@ class FinancialLiquiditySyncService
 
     public function sync(Model $source): ?FinancialAccountMovement
     {
+        if (\App\Models\OperationalPayment::query()->where('source_type', $source->getMorphClass())->where('source_id', $source->getKey())->exists()) {
+            return null;
+        }
+
+        if ($source->getAttribute('liquidity_bucket') === 'bank' && ! $source->getAttribute('financial_account_id')) {
+            return null;
+        }
         $effect = $this->effect($source);
         if (! $effect) {
             return null;
@@ -78,7 +85,7 @@ class FinancialLiquiditySyncService
     private function effect(Model $source): ?array
     {
         if ($source instanceof SalesOrderPayment) {
-            if (PaymentMethod::liquidityBucket($source->method) !== PaymentMethod::LIQUIDITY_BANK) {
+            if (($source->liquidity_bucket ?? PaymentMethod::liquidityBucket($source->method)) !== PaymentMethod::LIQUIDITY_BANK) {
                 return null;
             }
 
@@ -93,7 +100,7 @@ class FinancialLiquiditySyncService
         }
 
         if ($source instanceof PurchaseOrderPayment) {
-            if (PaymentMethod::liquidityBucket($source->method) !== PaymentMethod::LIQUIDITY_BANK) {
+            if (($source->liquidity_bucket ?? PaymentMethod::liquidityBucket($source->method)) !== PaymentMethod::LIQUIDITY_BANK) {
                 return null;
             }
 
@@ -113,7 +120,7 @@ class FinancialLiquiditySyncService
         }
 
         if ($source instanceof CapitalMovement) {
-            if ($source->cash_movement_id) {
+            if ($source->cash_movement_id || $source->source_type === 'allocated_cash_operation') {
                 return null;
             }
 

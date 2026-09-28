@@ -56,6 +56,7 @@ Route::middleware(['web', App\Http\Middleware\TrustFrontendProxyAuth::class.':re
     // POS & Sales: seller, cashier, manager, admin
     // ---------------------------------------------------------------
     require __DIR__.'/api_sales_orders.php';
+    require __DIR__.'/api_transactions.php';
     require __DIR__.'/api_pos_sessions.php';
     require __DIR__.'/api_cashier_queue.php';
     require __DIR__.'/api_tickets.php';

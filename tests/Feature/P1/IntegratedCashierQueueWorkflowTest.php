@@ -16,6 +16,8 @@ uses(RefreshDatabase::class);
 
 function integratedQueueContext(): array
 {
+    \App\Models\PaymentMethod::create(['code' => 'cash', 'name' => 'Efectivo', 'is_active' => true, 'liquidity_bucket' => 'cash', 'available_in_supplier_payments' => true]);
+    \App\Models\PaymentMethod::create(['code' => 'transfer', 'name' => 'Transferencia', 'is_active' => true, 'liquidity_bucket' => 'bank', 'requires_financial_account' => false, 'available_in_supplier_payments' => true]);
     $warehouse = Warehouse::create([
         'code' => 'W-QUEUE-'.fake()->unique()->randomNumber(5),
         'name' => 'Caja unificada',

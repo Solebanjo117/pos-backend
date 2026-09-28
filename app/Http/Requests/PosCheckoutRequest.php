@@ -163,7 +163,7 @@ class PosCheckoutRequest extends FormRequest
                     ->where('is_legacy', false)
                     ->exists();
 
-                if (! $isEligible) {
+                if (! $isEligible && ($accountId || PaymentMethod::requiresAccount($payment['method']))) {
                     $validator->errors()->add("payments.{$index}.financial_account_id", 'Selecciona una cuenta financiera activa para este cobro.');
                 }
             }

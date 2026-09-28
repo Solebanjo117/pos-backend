@@ -109,7 +109,7 @@ class PaymentMethodSeeder extends Seeder
                 'sort_order' => 10,
             ]),
             [
-                'name' => 'Credito',
+                'name' => 'Crédito',
                 'code' => 'credit',
                 'is_system' => true,
                 'requires_reference' => false,
@@ -137,7 +137,7 @@ class PaymentMethodSeeder extends Seeder
                 'sort_order' => 12,
             ],
             [
-                'name' => 'Credito proveedor',
+                'name' => 'Crédito proveedor',
                 'code' => 'supplier_credit',
                 'is_system' => true,
                 'requires_reference' => false,
