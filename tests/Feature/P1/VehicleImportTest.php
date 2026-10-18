@@ -154,3 +154,48 @@ it('keeps matching model names scoped to their make and year range', function ()
     $this->assertDatabaseCount('vehicle_makes', 2);
     $this->assertDatabaseCount('vehicle_models', 3);
 });
+
+it('imports the exported vehicle database csv creating missing makes and reading engine specs', function () {
+    VehicleMake::create(['name' => 'TOYOTA']);
+
+    $path = sys_get_temp_dir().'/vehicle-database-'.bin2hex(random_bytes(8)).'.csv';
+    file_put_contents($path, implode("\n", [
+        '"Make Name","Engine Code","Engine Specs","Model Name","Years","VIN"',
+        '"BMW","S54B32","3.2L NA I6 (338 hp)","M3 E46","2000-2006","WBSBL9340001001"',
+        '"BMW","S54B32HP","3.2L High Output I6 CSL (355 hp)","M3 E46","2000-2006","WBSBL9340001003"',
+        '"TOYOTA","1NZFE","1.5L 16V DOHC","YARIS P10","2000-2005","FGHJRT"',
+        '"ISUZU","4JK1-TC","2.5 L","DMAX RA RC","2000-2011",""',
+        '"ISUZU","1KDFTV","3.0L 16V DOHC Turbo Diesel","DMAX RT","2012-2017",""',
+        '',
+    ]));
+    test()->beforeApplicationDestroyed(fn () => file_exists($path) && unlink($path));
+
+    $preview = $this->post('/api/v1/vehicles/import/preview', [
+        'file' => new UploadedFile($path, 'vehicle_database_2026-10-06.csv', 'text/csv', null, true),
+    ])
+        ->assertSuccessful()
+        ->assertJsonPath('data.count', 5)
+        ->assertJsonPath('data.rows.0.data.make', 'BMW')
+        ->assertJsonPath('data.rows.0.data.displacement', '3.2L')
+        ->assertJsonPath('data.rows.0.data.aspiration', 'Naturally Aspirated')
+        ->assertJsonPath('data.rows.3.data.displacement', '2.5L')
+        ->assertJsonPath('data.rows.4.data.aspiration', 'Turbo')
+        ->assertJsonPath('data.rows.4.data.fuel_type', 'Diesel');
+
+    expect(collect($preview->json('data.rows'))->every('is_valid'))->toBeTrue();
+
+    $this->postJson('/api/v1/vehicles/import/execute', [
+        'rows' => array_column($preview->json('data.rows'), 'data'),
+    ])
+        ->assertSuccessful()
+        ->assertJsonPath('data.success_count', 5)
+        ->assertJsonPath('data.error_count', 0);
+
+    expect(VehicleMake::query()->orderBy('name')->pluck('name')->all())->toBe(['BMW', 'ISUZU', 'TOYOTA'])
+        ->and(VehicleEngine::where('engine_code', 'S54B32')->firstOrFail()->displacement)->toBe('3.2L')
+        ->and(VehicleEngine::where('engine_code', 'S54B32')->firstOrFail()->aspiration)->toBe('Naturally Aspirated')
+        ->and(VehicleEngine::where('engine_code', 'S54B32HP')->firstOrFail()->aspiration)->toBeNull()
+        ->and(VehicleEngine::where('engine_code', '4JK1-TC')->firstOrFail()->displacement)->toBe('2.5L')
+        ->and(VehicleEngine::where('engine_code', '1KDFTV')->firstOrFail()->fuel_type)->toBe('Diesel')
+        ->and(VehicleVin::count())->toBe(3);
+});

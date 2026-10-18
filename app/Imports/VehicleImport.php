@@ -66,6 +66,7 @@ class VehicleImport extends BaseImport
             'generation', 'generacion' => 'generation',
             'code', 'codigo', 'chassis', 'chassis_code' => 'code',
             'engine', 'motor', 'engine_code' => 'engine',
+            'engine_specs', 'engine_spec', 'especificaciones_motor', 'specs' => 'engine_specs',
             'displacement', 'cilindrada' => 'displacement',
             'fuel_type', 'combustible', 'tipo_combustible' => 'fuel_type',
             'aspiration', 'aspiracion' => 'aspiration',
@@ -115,8 +116,14 @@ class VehicleImport extends BaseImport
         return $errors;
     }
 
+    protected function mapRowToPreview(array $row, ?array $errors = null, ?array $warnings = null): array
+    {
+        return parent::mapRowToPreview($this->withEngineSpecs($row), $errors, $warnings);
+    }
+
     public function processRow(array $row): mixed
     {
+        $row = $this->withEngineSpecs($row);
         $makeId = $this->resolveIdOrCreateByName(VehicleMake::class, 'name', $row['make']);
         [$yearFrom, $yearTo] = $this->parseYearRangeFromRow($row);
 
@@ -210,6 +217,46 @@ class VehicleImport extends BaseImport
         }
 
         return $model;
+    }
+
+    /**
+     * Completa cilindrada, aspiración y combustible vacíos a partir de la columna
+     * libre de especificaciones (ej. "3.2L NA I6 (338 hp)").
+     *
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function withEngineSpecs(array $row): array
+    {
+        $specs = trim((string) ($row['engine_specs'] ?? ''));
+        if ($specs === '') {
+            return $row;
+        }
+
+        if ($this->nullIfEmpty($row['displacement'] ?? null) === null
+            && preg_match('/(\d+(?:[.,]\d+)?)\s*L\b/i', $specs, $matches) === 1) {
+            $row['displacement'] = str_replace(',', '.', $matches[1]).'L';
+        }
+
+        if ($this->nullIfEmpty($row['aspiration'] ?? null) === null) {
+            $row['aspiration'] = match (true) {
+                preg_match('/\bturbo\b/i', $specs) === 1 => 'Turbo',
+                preg_match('/\bsupercharged\b/i', $specs) === 1 => 'Supercharged',
+                preg_match('/\bNA\b|naturally aspirated/', $specs) === 1 => 'Naturally Aspirated',
+                default => $row['aspiration'] ?? null,
+            };
+        }
+
+        if ($this->nullIfEmpty($row['fuel_type'] ?? null) === null) {
+            $row['fuel_type'] = match (true) {
+                preg_match('/\bdiesel\b/i', $specs) === 1 => 'Diesel',
+                preg_match('/\bh[ií]brido\b|\bhybrid\b/iu', $specs) === 1 => 'Hybrid',
+                preg_match('/\bel[eé]ctrico\b|\belectric\b/iu', $specs) === 1 => 'Electric',
+                default => $row['fuel_type'] ?? null,
+            };
+        }
+
+        return $row;
     }
 
     private function parseYearRangeFromRow(array $row): array
