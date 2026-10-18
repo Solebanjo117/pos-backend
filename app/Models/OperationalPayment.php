@@ -7,9 +7,9 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class OperationalPayment extends Model
 {
-    protected $fillable = ['warehouse_id', 'source_type', 'source_id', 'line_number', 'direction', 'method', 'liquidity_bucket', 'amount', 'financial_account_id', 'cash_movement_id', 'pos_session_id', 'created_by', 'reference_number', 'notes', 'reversed_at'];
+    protected $fillable = ['warehouse_id', 'source_type', 'source_id', 'line_number', 'direction', 'method', 'liquidity_bucket', 'amount', 'financial_account_id', 'cash_movement_id', 'pos_session_id', 'created_by', 'reference_number', 'notes', 'reversed_at', 'business_datetime'];
 
-    protected $casts = ['amount' => 'decimal:2', 'reversed_at' => 'datetime'];
+    protected $casts = ['amount' => 'decimal:2', 'reversed_at' => 'datetime', 'business_datetime' => 'datetime'];
 
     protected $appends = ['pending_account'];
 

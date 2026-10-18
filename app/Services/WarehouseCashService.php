@@ -15,13 +15,17 @@ use Illuminate\Validation\ValidationException;
 
 class WarehouseCashService
 {
-    public function availability(int $warehouseId): array
+    public function availability(int $warehouseId, mixed $asOf = null): array
     {
         $baseline = WarehouseCashBalance::query()->where('warehouse_id', $warehouseId)->first();
         if (! $baseline) {
             return ['initialized' => false, 'balance' => null, 'warehouse_id' => $warehouseId];
         }
-        $changes = WarehouseCashEntry::query()->where('warehouse_id', $warehouseId)->where(fn ($query) => $query->where('occurred_at', '>', $baseline->cutoff_at)->orWhere(fn ($sameSecond) => $sameSecond->where('occurred_at', $baseline->cutoff_at)->where('id', '>', $baseline->starting_entry_id)))->sum('amount');
+        $cutoff = $asOf ? \Carbon\Carbon::parse($asOf) : now();
+        if ($cutoff->lt($baseline->cutoff_at)) {
+            return ['initialized' => true, 'balance' => null, 'warehouse_id' => $warehouseId, 'baseline' => $baseline];
+        }
+        $changes = app(CashPositionReportService::class)->query($warehouseId, $baseline)->where('effective_at', '<=', $cutoff)->sum('amount');
 
         return ['initialized' => true, 'balance' => round((float) $baseline->opening_balance + (float) $changes, 2), 'warehouse_id' => $warehouseId, 'baseline' => $baseline];
     }
@@ -49,6 +53,22 @@ class WarehouseCashService
 
             return $this->availability($warehouseId);
         });
+    }
+
+    public function minimumBalanceFrom(int $warehouseId, mixed $effectiveAt): ?float
+    {
+        $available = $this->availability($warehouseId, $effectiveAt);
+        if ($available['balance'] === null) {
+            return null;
+        }
+        $balance = $minimum = (float) $available['balance'];
+        foreach (app(CashPositionReportService::class)->query($warehouseId, $available['baseline'])
+            ->where('effective_at', '>', $effectiveAt)->where('effective_at', '<=', now())->orderBy('effective_at')->orderBy('id')->get(['amount']) as $entry) {
+            $balance = round($balance + (float) $entry->amount, 2);
+            $minimum = min($minimum, $balance);
+        }
+
+        return $minimum;
     }
 
     public function capture(Model $source, bool $reverse = false, bool $historical = false): void
@@ -97,7 +117,7 @@ class WarehouseCashService
             'reporting_kind' => $kind, 'reporting_reference' => $source->reference_number,
             'reporting_method' => $operationalPayment?->method ?? $source->method ?? $source->payment_method ?? 'cash',
             'reporting_document_url' => $url, 'reporting_session_id' => $source->pos_session_id,
-            'reporting_business_datetime' => $source->business_datetime,
+            'reporting_business_datetime' => $reverse ? now() : ($source->business_datetime ?? $source->paid_at ?? $source->created_at),
         ]);
     }
 

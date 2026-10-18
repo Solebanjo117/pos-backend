@@ -188,7 +188,7 @@ class FinancialDrilldownService
     {
         $payments = SalesOrderPayment::query()
             ->with(['salesOrder.customer', 'salesOrder.items', 'creator'])
-            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->where('amount', '>', 0)
             ->whereHas('salesOrder', fn (Builder $query) => $query->whereIn('status', self::SALES_STATUSES))
@@ -397,7 +397,7 @@ class FinancialDrilldownService
     {
         $payments = PurchaseOrderPayment::query()
             ->with(['purchaseOrder.supplier', 'user'])
-            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereHas('purchaseOrder', fn (Builder $query) => $query->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('purchaseOrder', fn (Builder $purchase) => $purchase->where('warehouse_id', $warehouseId)))
@@ -1147,8 +1147,17 @@ class FinancialDrilldownService
             ->concat($this->liquidityExpenseRows($bucket, $from, $to, $warehouseId))
             ->concat($this->liquidityAdjustmentRows($bucket, $from, $to, $warehouseId));
 
-        if ($bucket === 'cash') {
-            $rows = $rows->concat($this->liquidityCapitalRows($from, $to, $warehouseId));
+        $rows = $rows->concat($this->liquidityCapitalRows($bucket, $from, $to, $warehouseId))
+            ->concat($this->liquidityReceiptRows($bucket, $from, $to, $warehouseId))
+            ->concat($this->liquidityTransferRows($bucket, $from, $to, $warehouseId));
+        if ($bucket === 'cash' && $warehouseId && ($baseline = \App\Models\WarehouseCashBalance::query()->where('warehouse_id', $warehouseId)->first())) {
+            [$start, $end] = $this->timestampBounds($from, $to);
+            $entries = app(CashPositionReportService::class)->query($warehouseId, $baseline)->whereBetween('effective_at', [$start, $end])->get();
+            $rows = collect([$rows->first()])->concat($entries->map(fn ($entry) => [
+                'id' => 'cash-entry-'.$entry->id, 'date' => Carbon::parse($entry->effective_at)->timezone(RegionalDateRange::timezone())->toDateString(),
+                ...$this->traceFields($entry->occurred_at, $entry->effective_at, 'effective_at'), 'source' => $entry->kind,
+                'description' => $entry->reference ?? $entry->reason, 'user' => $entry->user_name, 'method' => $entry->method, 'amount' => (float) $entry->amount,
+            ]));
         }
 
         return $this->collectionPayload($metric, $bucket === 'cash' ? 'Efectivo' : 'Banco', [
@@ -1231,7 +1240,8 @@ class FinancialDrilldownService
     {
         return SalesOrderPayment::query()
             ->with(['salesOrder.customer', 'salesOrder.items', 'salesReturn', 'creator'])
-            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
+            ->whereNull('account_payment_batch_id')
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereHas('salesOrder', fn (Builder $query) => $query->whereIn('status', self::SALES_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('salesOrder.items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))
@@ -1261,7 +1271,7 @@ class FinancialDrilldownService
     {
         return PurchaseOrderPayment::query()
             ->with(['purchaseOrder.supplier', 'user'])
-            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_MONEY_METHODS)
             ->whereHas('purchaseOrder', fn (Builder $query) => $query->whereNotIn('status', self::PURCHASE_EXCLUDED_STATUSES))
             ->when($warehouseId, fn (Builder $query) => $query->whereHas('purchaseOrder', fn (Builder $purchase) => $purchase->where('warehouse_id', $warehouseId)))
@@ -1289,7 +1299,12 @@ class FinancialDrilldownService
             ->where(fn (Builder $query) => $query->where('affects_cash_flow', true)->orWhereNull('affects_cash_flow'))
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->get()
-            ->filter(fn (OperationalExpense $expense): bool => $this->paymentBucket($expense->payment_method) === $bucket)
+            ->map(function (OperationalExpense $expense) use ($bucket): OperationalExpense {
+                $payments = \App\Models\OperationalPayment::query()->where('source_type', $expense->getMorphClass())->where('source_id', $expense->id)->whereNull('reversed_at')->get();
+                $expense->amount = $payments->isNotEmpty() ? $payments->where('liquidity_bucket', $bucket)->sum('amount') : ($this->paymentBucket($expense->payment_method) === $bucket ? $expense->amount : 0);
+
+                return $expense;
+            })->filter(fn ($expense) => (float) $expense->amount > 0)
             ->map(fn (OperationalExpense $expense): array => [
                 'id' => 'expense-'.$expense->id,
                 'date' => $expense->expense_date?->toDateString(),
@@ -1302,7 +1317,7 @@ class FinancialDrilldownService
             ]);
     }
 
-    private function liquidityCapitalRows(Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    private function liquidityCapitalRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
     {
         return CapitalMovement::query()
             ->with(['user'])
@@ -1310,6 +1325,12 @@ class FinancialDrilldownService
             ->whereDate('movement_date', '<=', $to->toDateString())
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))
             ->get()
+            ->map(function (CapitalMovement $movement) use ($bucket): CapitalMovement {
+                $payments = $movement->source_type === 'allocated_cash_operation' ? \App\Models\OperationalPayment::query()->where('source_type', \App\Models\CashOperationRequest::class)->where('source_id', $movement->source_id)->whereNull('reversed_at')->get() : collect();
+                $movement->amount = $payments->isNotEmpty() ? $payments->where('liquidity_bucket', $bucket)->sum('amount') : (($movement->financial_account_id ? 'bank' : 'cash') === $bucket ? $movement->amount : 0);
+
+                return $movement;
+            })->filter(fn ($movement) => (float) $movement->amount > 0)
             ->map(fn (CapitalMovement $movement): array => [
                 'id' => 'capital-'.$movement->id,
                 'date' => $movement->movement_date?->toDateString(),
@@ -1317,9 +1338,44 @@ class FinancialDrilldownService
                 'source' => 'Capital',
                 'description' => $movement->reason,
                 'user' => $movement->user?->name,
-                'method' => 'Efectivo',
+                'method' => $bucket === 'cash' ? 'Efectivo' : 'Banco',
                 'amount' => $this->money($movement->movement_type === CapitalMovement::TYPE_IN ? $movement->amount : -$movement->amount),
             ]);
+    }
+
+    private function liquidityReceiptRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return \App\Models\AccountPaymentBatch::query()->with('creator')->where('account_type', 'customer')->where('direction', 'incoming')->where('liquidity_bucket', $bucket)
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
+            ->when($warehouseId, fn ($q) => $q->where(fn ($scope) => $scope->where('warehouse_id', $warehouseId)->orWhereHas('posSession', fn ($s) => $s->where('warehouse_id', $warehouseId))))
+            ->get()->map(fn ($receipt) => ['id' => 'receipt-'.$receipt->id, 'date' => $this->localDate($receipt->business_datetime ?? $receipt->paid_at),
+                ...$this->traceFields($receipt->created_at, $receipt->business_datetime ?? $receipt->paid_at, 'business_datetime'), 'source' => 'Recibo de cliente',
+                'description' => $receipt->batch_number, 'user' => $receipt->creator?->name, 'method' => $receipt->method, 'amount' => (float) $receipt->amount]);
+    }
+
+    private function liquidityTransferRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection
+    {
+        return \App\Models\FinancialTransfer::query()->with('creator')->whereBetween('business_datetime', $this->timestampBounds($from, $to))->get()->map(function ($transfer) use ($bucket, $warehouseId): array {
+            $warehouses = [];
+            $amount = 0.0;
+            foreach (['from' => -1, 'to' => 1] as $side => $sign) {
+                $type = $transfer->{$side.'_endpoint_type'};
+                $id = (int) $transfer->{$side.'_endpoint_id'};
+                if ($type !== 'financial_account') {
+                    $warehouses[] = $type === 'warehouse_cash' ? $id : (int) \App\Models\PosSession::query()->find($id)?->warehouse_id;
+                }
+                if (($type === 'financial_account' ? 'bank' : 'cash') === $bucket) {
+                    $amount += $sign * (float) $transfer->amount;
+                }
+            }
+            if ($warehouseId && ! in_array($warehouseId, $warehouses, true)) {
+                $amount = 0;
+            }
+
+            return ['id' => 'transfer-'.$transfer->id, 'date' => $this->localDate($transfer->business_datetime),
+                ...$this->traceFields($transfer->created_at, $transfer->business_datetime, 'business_datetime'), 'source' => 'Transferencia',
+                'description' => $transfer->folio, 'user' => $transfer->creator?->name, 'method' => $bucket === 'cash' ? 'Efectivo' : 'Banco', 'amount' => $amount];
+        })->filter(fn ($row) => abs($row['amount']) > 0.005)->values();
     }
 
     private function liquidityAdjustmentRows(string $bucket, Carbon $from, Carbon $to, ?int $warehouseId): Collection

@@ -46,7 +46,7 @@ PHP;
         Warehouse::whereKey($warehouse->id)->lockForUpdate()->firstOrFail();
         try {
             foreach ($requests as $request) {
-                $process = new Process([PHP_BINARY, '-d', 'extension=gd', '-r', $worker], base_path(), ['APP_ENV' => 'testing', 'CACHE_STORE' => 'array', 'SESSION_DRIVER' => 'array', 'REPORT_TEST_CONNECTION' => base64_encode(json_encode(config('database.connections.pgsql'))), 'REPORT_TEST_USER' => (string) $user->id, 'REPORT_TEST_PAYLOAD' => json_encode($request)]);
+                $process = new Process([PHP_BINARY, '-r', $worker], base_path(), ['APP_ENV' => 'testing', 'CACHE_STORE' => 'array', 'SESSION_DRIVER' => 'array', 'REPORT_TEST_CONNECTION' => base64_encode(json_encode(config('database.connections.pgsql'))), 'REPORT_TEST_USER' => (string) $user->id, 'REPORT_TEST_PAYLOAD' => json_encode($request)]);
                 $process->setTimeout(30)->start();
                 $processes[] = $process;
             }

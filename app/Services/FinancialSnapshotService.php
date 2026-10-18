@@ -30,7 +30,7 @@ class FinancialSnapshotService
 
     private const NON_CASH_METHODS = ['credit', 'store_credit', 'supplier_credit'];
 
-    private const CURRENT_VERSION = 3;
+    private const CURRENT_VERSION = 4;
 
     public function computeDay(string|Carbon $date, ?int $warehouseId = null, bool $force = false): FinancialDailySnapshot
     {
@@ -340,7 +340,11 @@ class FinancialSnapshotService
             ->orderByDesc('date')
             ->first();
 
-        if ($previous) {
+        if ($previous && $previous->date->toDateString() === $day->copy()->subDay()->toDateString()) {
+            if (! $previous->is_locked && ! $this->snapshotIsFresh($previous, Carbon::parse($previous->date)->startOfDay(), $warehouseId)) {
+                $previous = $this->computeDay($previous->date, $warehouseId);
+            }
+
             return [
                 'cash' => $this->money($previous->closing_cash),
                 'bank' => $this->money($previous->closing_bank ?? 0),
@@ -357,11 +361,13 @@ class FinancialSnapshotService
                 $flows['cash_sales']
                 - $flows['cash_purchases']
                 - $flows['cash_expenses']
-                + $flows['investment_in']
-                - $flows['investment_out']
+                + $flows['cash_investment_in']
+                - $flows['cash_investment_out']
                 + $flows['customer_payments']
                 - $flows['supplier_payments']
                 + $flows['cash_adjustments']
+                + $flows['cash_transfers']
+                + $flows['unapplied_cash_receipts']
             ),
             'bank' => $this->money(
                 $flows['bank_sales']
@@ -370,6 +376,10 @@ class FinancialSnapshotService
                 + $flows['customer_bank_payments']
                 - $flows['supplier_bank_payments']
                 + $flows['bank_adjustments']
+                + $flows['bank_investment_in']
+                - $flows['bank_investment_out']
+                + $flows['bank_transfers']
+                + $flows['unapplied_bank_receipts']
             ),
             'inventory' => $this->inventoryValueForDate($day->copy()->subDay(), $warehouseId),
             'accounts_receivable' => $this->money($flows['credit_sales'] - $flows['customer_payments'] - $flows['customer_bank_payments'] + $flows['accounts_receivable_adjustments']),
@@ -394,6 +404,8 @@ class FinancialSnapshotService
             $this->supplierPaymentFlows($from, $to, $warehouseId),
             $this->capitalFlows($from, $to, $warehouseId),
             $this->adjustmentFlows($from, $to, $warehouseId),
+            $this->transferFlows($from, $to, $warehouseId),
+            $this->unappliedReceiptFlows($from, $to, $warehouseId),
         ] as $partial) {
             foreach ($partial as $key => $value) {
                 $flows[$key] = $this->money($flows[$key] + $value);
@@ -429,12 +441,12 @@ class FinancialSnapshotService
             $sameDayCashPayments = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
                     && (float) $payment->amount > 0
-                    && $this->localDate($payment->paid_at) === $orderDate)
+                    && $this->localDate($payment->business_datetime ?? $payment->paid_at) === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $sameDayBankPayments = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
                     && (float) $payment->amount > 0
-                    && $this->localDate($payment->paid_at) === $orderDate)
+                    && $this->localDate($payment->business_datetime ?? $payment->paid_at) === $orderDate)
                 ->sum(fn (SalesOrderPayment $payment): float => (float) $payment->amount * $ratio);
             $creditMarkers = $order->payments
                 ->filter(fn (SalesOrderPayment $payment): bool => in_array($payment->method, self::NON_CASH_METHODS, true))
@@ -541,11 +553,11 @@ class FinancialSnapshotService
             $total = $this->money($order->total);
             $sameDayCashPayments = $order->payments
                 ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'cash'
-                    && $this->localDate($payment->paid_at) === $orderDate)
+                    && $this->localDate($payment->business_datetime ?? $payment->paid_at) === $orderDate)
                 ->sum(fn (PurchaseOrderPayment $payment): float => (float) $payment->amount);
             $sameDayBankPayments = $order->payments
                 ->filter(fn (PurchaseOrderPayment $payment): bool => $this->paymentBucket($payment->method) === 'bank'
-                    && $this->localDate($payment->paid_at) === $orderDate)
+                    && $this->localDate($payment->business_datetime ?? $payment->paid_at) === $orderDate)
                 ->sum(fn (PurchaseOrderPayment $payment): float => (float) $payment->amount);
             $cashPurchases = min($total, $sameDayCashPayments);
             $bankPurchases = min(max($total - $cashPurchases, 0), $sameDayBankPayments);
@@ -562,8 +574,13 @@ class FinancialSnapshotService
     {
         $flows = $this->emptyFlows();
         $expenses = OperationalExpense::query()
-            ->whereDate('expense_date', '<=', $to->toDateString())
-            ->when($from, fn (Builder $query) => $query->whereDate('expense_date', '>=', $from->toDateString()))
+            ->where('status', '!=', 'draft')
+            ->where(function (Builder $query) use ($from, $to): void {
+                $query->where(fn ($q) => $q->whereDate('expense_date', '<=', $to->toDateString())->when($from, fn ($q) => $q->whereDate('expense_date', '>=', $from->toDateString())))
+                    ->orWhereRaw('COALESCE(business_datetime, paid_at, expense_date) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
+                    ->orWhereIn('id', \App\Models\OperationalPayment::query()->where('source_type', OperationalExpense::class)->where(fn ($q) => $q
+                        ->whereBetween('business_datetime', $this->timestampBounds($from, $to))->orWhereBetween('reversed_at', $this->timestampBounds($from, $to)))->select('source_id'));
+            })
             ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope
                 ->whereNull('warehouse_id')
                 ->orWhere('warehouse_id', $warehouseId)))
@@ -573,20 +590,40 @@ class FinancialSnapshotService
             $amount = $this->money($expense->amount);
             $affectsIncomeStatement = (bool) ($expense->affects_income_statement ?? true);
             $affectsCashFlow = (bool) ($expense->affects_cash_flow ?? true);
+            $inPeriod = fn (Carbon $at): bool => $at->betweenIncluded(...$this->timestampBounds($from, $to));
+            $economicAt = Carbon::parse($expense->expense_date?->toDateString(), RegionalDateRange::timezone())->startOfDay()->utc();
+            $payments = \App\Models\OperationalPayment::query()->where('source_type', $expense->getMorphClass())->where('source_id', $expense->id)->get();
+            $reversedAt = $payments->whereNotNull('reversed_at')->max('reversed_at');
 
-            if ($affectsIncomeStatement) {
+            if ($affectsIncomeStatement && $inPeriod($economicAt) && (! in_array($expense->status, ['cancelled', 'reversed'], true) || $reversedAt)) {
                 $flows['expenses'] = $this->money($flows['expenses'] + $amount);
+            }
+            if ($affectsIncomeStatement && $reversedAt && $inPeriod(Carbon::parse($reversedAt))) {
+                $flows['expenses'] = $this->money($flows['expenses'] - $amount);
             }
 
             if (! $affectsCashFlow) {
                 continue;
             }
 
-            $bucket = $this->paymentBucket($expense->payment_method);
-            if ($bucket === 'cash') {
-                $flows['cash_expenses'] = $this->money($flows['cash_expenses'] + $amount);
-            } elseif ($bucket === 'bank') {
-                $flows['bank_expenses'] = $this->money($flows['bank_expenses'] + $amount);
+            if ($payments->isEmpty()) {
+                if ($expense->status !== 'paid') {
+                    continue;
+                }
+                $payments = collect([(object) ['liquidity_bucket' => $this->paymentBucket($expense->payment_method), 'amount' => $amount,
+                    'business_datetime' => $expense->business_datetime ?? $expense->paid_at ?? $economicAt, 'reversed_at' => null]]);
+            }
+            foreach ($payments as $payment) {
+                if (in_array($payment->liquidity_bucket, ['cash', 'bank'], true)) {
+                    $key = $payment->liquidity_bucket.'_expenses';
+                    $effectiveAt = $payment->business_datetime ?? $expense->business_datetime ?? $expense->paid_at ?? $economicAt;
+                    if ($inPeriod(Carbon::parse($effectiveAt))) {
+                        $flows[$key] = $this->money($flows[$key] + (float) $payment->amount);
+                    }
+                    if ($payment->reversed_at && $inPeriod(Carbon::parse($payment->reversed_at))) {
+                        $flows[$key] = $this->money($flows[$key] - (float) $payment->amount);
+                    }
+                }
             }
         }
 
@@ -598,7 +635,7 @@ class FinancialSnapshotService
         $flows = $this->emptyFlows();
         $payments = SalesOrderPayment::query()
             ->with('salesOrder.items')
-            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_CASH_METHODS)
             ->where('amount', '>', 0)
             ->get();
@@ -609,7 +646,7 @@ class FinancialSnapshotService
                 continue;
             }
 
-            if ($this->localDate($payment->paid_at) === $order->date?->toDateString()) {
+            if ($this->localDate($payment->business_datetime ?? $payment->paid_at) === $order->date?->toDateString()) {
                 continue;
             }
 
@@ -636,7 +673,7 @@ class FinancialSnapshotService
         $flows = $this->emptyFlows();
         $payments = PurchaseOrderPayment::query()
             ->with('purchaseOrder')
-            ->whereBetween('paid_at', $this->timestampBounds($from, $to))
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
             ->whereNotIn('method', self::NON_CASH_METHODS)
             ->get();
 
@@ -646,7 +683,7 @@ class FinancialSnapshotService
                 continue;
             }
 
-            if ($this->localDate($payment->paid_at) === $order->order_date?->toDateString()) {
+            if ($this->localDate($payment->business_datetime ?? $payment->paid_at) === $order->order_date?->toDateString()) {
                 continue;
             }
 
@@ -681,6 +718,93 @@ class FinancialSnapshotService
         foreach ($movements as $movement) {
             $key = $movement->movement_type === CapitalMovement::TYPE_IN ? 'investment_in' : 'investment_out';
             $flows[$key] = $this->money($flows[$key] + (float) $movement->amount);
+            $payments = $movement->source_type === 'allocated_cash_operation'
+                ? \App\Models\OperationalPayment::query()->where('source_type', \App\Models\CashOperationRequest::class)->where('source_id', $movement->source_id)->whereNull('reversed_at')->get()
+                : collect();
+            if ($payments->isEmpty()) {
+                $payments = collect([(object) ['liquidity_bucket' => $movement->financial_account_id ? 'bank' : 'cash', 'amount' => $movement->amount]]);
+            }
+            foreach ($payments as $payment) {
+                if (in_array($payment->liquidity_bucket, ['cash', 'bank'], true)) {
+                    $liquidityKey = $payment->liquidity_bucket.'_'.$key;
+                    $flows[$liquidityKey] = $this->money($flows[$liquidityKey] + (float) $payment->amount);
+                }
+            }
+        }
+
+        return $flows;
+    }
+
+    private function transferFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
+    {
+        $flows = $this->emptyFlows();
+        $transfers = \App\Models\FinancialTransfer::query()->whereBetween('business_datetime', $this->timestampBounds($from, $to))->get();
+        foreach ($transfers as $transfer) {
+            $cashWarehouses = [];
+            foreach (['from', 'to'] as $side) {
+                $type = $transfer->{$side.'_endpoint_type'};
+                $id = (int) $transfer->{$side.'_endpoint_id'};
+                if ($type === 'warehouse_cash') {
+                    $cashWarehouses[$side] = $id;
+                } elseif ($type === 'pos_session') {
+                    $cashWarehouses[$side] = (int) \App\Models\PosSession::query()->whereKey($id)->value('warehouse_id');
+                }
+            }
+            if ($warehouseId && ! in_array($warehouseId, $cashWarehouses, true)) {
+                continue;
+            }
+            foreach (['from' => -1, 'to' => 1] as $side => $sign) {
+                $bucket = isset($cashWarehouses[$side]) ? 'cash' : 'bank';
+                if ($bucket === 'cash' && $warehouseId && $cashWarehouses[$side] !== $warehouseId) {
+                    continue;
+                }
+                $key = $bucket.'_transfers';
+                $flows[$key] = $this->money($flows[$key] + $sign * (float) $transfer->amount);
+            }
+        }
+
+        return $flows;
+    }
+
+    private function unappliedReceiptFlows(?Carbon $from, Carbon $to, ?int $warehouseId): array
+    {
+        $flows = $this->emptyFlows();
+        $receipts = \App\Models\AccountPaymentBatch::query()->with('applications')->where('account_type', 'customer')->where('direction', 'incoming')
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))
+            ->when($warehouseId, fn ($q) => $q->where(fn ($scope) => $scope->where('warehouse_id', $warehouseId)->orWhereHas('posSession', fn ($s) => $s->where('warehouse_id', $warehouseId))))->get();
+        foreach ($receipts as $receipt) {
+            $bucket = $receipt->liquidity_bucket ?? $this->paymentBucket($receipt->method);
+            if (in_array($bucket, ['cash', 'bank'], true)) {
+                $key = 'unapplied_'.$bucket.'_receipts';
+                $flows[$key] = $this->money($flows[$key] + ($receipt->receipt_accounting_version === 1 ? (float) $receipt->amount : max(0, (float) $receipt->amount - (float) $receipt->applications->sum('amount'))));
+            }
+        }
+
+        // Applications settle receivables; they must not collect the same receipt a second time,
+        // including when an advance is applied on a later business date.
+        $applications = SalesOrderPayment::query()->with('salesOrder.items', 'salesOrder.payments')
+            ->whereIn('account_payment_batch_id', \App\Models\AccountPaymentBatch::query()->where('receipt_accounting_version', 1)->select('id'))
+            ->whereRaw('COALESCE(business_datetime, paid_at, created_at) BETWEEN ? AND ?', $this->timestampBounds($from, $to))->where('amount', '>', 0)->get();
+        foreach ($applications as $payment) {
+            $order = $payment->salesOrder;
+            $bucket = $this->paymentBucket($payment->method);
+            if (! $order || ! in_array($order->status, self::SALES_STATUSES, true) || ! in_array($bucket, ['cash', 'bank'], true)) {
+                continue;
+            }
+            $total = $this->salesOrderScopedTotal($order, $warehouseId);
+            $ratio = $this->salesOrderWarehouseRatio($order, $warehouseId, $total);
+            $contribution = (float) $payment->amount * $ratio;
+            if ($this->localDate($payment->business_datetime ?? $payment->paid_at) === $order->date?->toDateString()) {
+                $sameDay = $order->payments->filter(fn ($p) => (float) $p->amount > 0 && $this->localDate($p->business_datetime ?? $p->paid_at) === $order->date?->toDateString());
+                $cash = (float) $sameDay->filter(fn ($p) => $this->paymentBucket($p->method) === 'cash')->sum('amount');
+                $bank = (float) $sameDay->filter(fn ($p) => $this->paymentBucket($p->method) === 'bank')->sum('amount');
+                $cashSales = min($total, $cash * $ratio);
+                $recognized = $bucket === 'cash' ? $cashSales : min(max(0, $total - $cashSales), $bank * $ratio);
+                $denominator = $bucket === 'cash' ? $cash : $bank;
+                $contribution = $denominator > 0 ? $recognized * (float) $payment->amount / $denominator : 0;
+            }
+            $key = 'unapplied_'.$bucket.'_receipts';
+            $flows[$key] = $this->money($flows[$key] - $contribution);
         }
 
         return $flows;
@@ -718,11 +842,13 @@ class FinancialSnapshotService
             + $flows['cash_sales']
             - $flows['cash_purchases']
             - $flows['cash_expenses']
-            + $flows['investment_in']
-            - $flows['investment_out']
+            + $flows['cash_investment_in']
+            - $flows['cash_investment_out']
             + $flows['customer_payments']
             - $flows['supplier_payments']
             + $flows['cash_adjustments']
+            + $flows['cash_transfers']
+            + $flows['unapplied_cash_receipts']
         );
         $closingBank = $this->money(
             $opening['bank']
@@ -732,8 +858,24 @@ class FinancialSnapshotService
             + $flows['customer_bank_payments']
             - $flows['supplier_bank_payments']
             + $flows['bank_adjustments']
+            + $flows['bank_investment_in']
+            - $flows['bank_investment_out']
+            + $flows['bank_transfers']
+            + $flows['unapplied_bank_receipts']
         );
         $closingInventory = $this->inventoryValueForDate(Carbon::parse($date), $warehouseId);
+        if ($warehouseId) {
+            [$start, $end] = RegionalDateRange::utcBounds($date, $date);
+            $cashService = app(WarehouseCashService::class);
+            $startCash = $cashService->availability($warehouseId, $start->copy()->subMicrosecond());
+            $endCash = $cashService->availability($warehouseId, $end->min(now()));
+            if ($startCash['balance'] !== null) {
+                $opening['cash'] = $startCash['balance'];
+            }
+            if ($endCash['balance'] !== null) {
+                $closingCash = $endCash['balance'];
+            }
+        }
         $accountsPayable = $this->money($opening['accounts_payable'] + $flows['credit_purchases'] - $flows['supplier_payments'] - $flows['supplier_bank_payments'] + $flows['accounts_payable_adjustments']);
         $accountsReceivable = $this->money($opening['accounts_receivable'] + $flows['credit_sales'] - $flows['customer_payments'] - $flows['customer_bank_payments'] + $flows['accounts_receivable_adjustments']);
         $grossProfit = $this->money(
@@ -771,7 +913,7 @@ class FinancialSnapshotService
 
     private function dailyRow(FinancialDailySnapshot $snapshot): array
     {
-        $salesCollected = $this->money($snapshot->cash_sales + ($snapshot->bank_sales ?? 0) + $snapshot->customer_payments + ($snapshot->customer_bank_payments ?? 0));
+        $salesCollected = $this->money($snapshot->cash_sales + ($snapshot->bank_sales ?? 0) + $snapshot->customer_payments + ($snapshot->customer_bank_payments ?? 0) + ($snapshot->unapplied_cash_receipts ?? 0) + ($snapshot->unapplied_bank_receipts ?? 0));
         $sales = $this->money($snapshot->cash_sales + ($snapshot->bank_sales ?? 0) + $snapshot->credit_sales + ($snapshot->sales_adjustments ?? 0));
         $purchasesPaid = $this->money($snapshot->cash_purchases + ($snapshot->bank_purchases ?? 0) + $snapshot->supplier_payments + ($snapshot->supplier_bank_payments ?? 0));
         $purchases = $this->money($snapshot->cash_purchases + ($snapshot->bank_purchases ?? 0) + $snapshot->credit_purchases + ($snapshot->purchase_adjustments ?? 0));
@@ -807,6 +949,14 @@ class FinancialSnapshotService
             'opening_inventory' => $this->money($snapshot->opening_inventory),
             'opening_accounts_receivable' => $this->money($snapshot->opening_accounts_receivable),
             'opening_accounts_payable' => $this->money($snapshot->opening_accounts_payable),
+            'cash_investment_in' => $this->money($snapshot->cash_investment_in ?? 0),
+            'cash_investment_out' => $this->money($snapshot->cash_investment_out ?? 0),
+            'bank_investment_in' => $this->money($snapshot->bank_investment_in ?? 0),
+            'bank_investment_out' => $this->money($snapshot->bank_investment_out ?? 0),
+            'cash_transfers' => $this->money($snapshot->cash_transfers ?? 0),
+            'bank_transfers' => $this->money($snapshot->bank_transfers ?? 0),
+            'unapplied_cash_receipts' => $this->money($snapshot->unapplied_cash_receipts ?? 0),
+            'unapplied_bank_receipts' => $this->money($snapshot->unapplied_bank_receipts ?? 0),
             'cash_sales' => $this->money($snapshot->cash_sales),
             'bank_sales' => $this->money($snapshot->bank_sales ?? 0),
             'credit_sales' => $this->money($snapshot->credit_sales),
@@ -864,7 +1014,7 @@ class FinancialSnapshotService
             'expenses' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->expenses + (float) ($snapshot->expense_adjustments ?? 0))),
             'sales' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->credit_sales + (float) ($snapshot->sales_adjustments ?? 0))),
             'sales_total' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->credit_sales + (float) ($snapshot->sales_adjustments ?? 0))),
-            'sales_collected' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->customer_payments + (float) ($snapshot->customer_bank_payments ?? 0))),
+            'sales_collected' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cash_sales + (float) ($snapshot->bank_sales ?? 0) + (float) $snapshot->customer_payments + (float) ($snapshot->customer_bank_payments ?? 0) + (float) ($snapshot->unapplied_cash_receipts ?? 0) + (float) ($snapshot->unapplied_bank_receipts ?? 0))),
             'sales_pending' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->credit_sales + (float) ($snapshot->accounts_receivable_adjustments ?? 0))),
             'cogs' => $this->money($snapshots->sum(fn (FinancialDailySnapshot $snapshot): float => (float) $snapshot->cogs_cash_sales + (float) ($snapshot->cogs_bank_sales ?? 0) + (float) $snapshot->cogs_credit_sales)),
             'profit' => $this->money($snapshots->sum('net_profit')),
@@ -884,6 +1034,14 @@ class FinancialSnapshotService
             'closing_inventory' => $this->money($last?->closing_inventory ?? 0),
             'accounts_receivable' => $this->money($last?->accounts_receivable ?? 0),
             'accounts_payable' => $this->money($last?->accounts_payable ?? 0),
+            'cash_investment_in' => $this->money($snapshots->sum('cash_investment_in')),
+            'cash_investment_out' => $this->money($snapshots->sum('cash_investment_out')),
+            'bank_investment_in' => $this->money($snapshots->sum('bank_investment_in')),
+            'bank_investment_out' => $this->money($snapshots->sum('bank_investment_out')),
+            'cash_transfers' => $this->money($snapshots->sum('cash_transfers')),
+            'bank_transfers' => $this->money($snapshots->sum('bank_transfers')),
+            'unapplied_cash_receipts' => $this->money($snapshots->sum('unapplied_cash_receipts')),
+            'unapplied_bank_receipts' => $this->money($snapshots->sum('unapplied_bank_receipts')),
             'cash_sales' => $this->money($snapshots->sum('cash_sales')),
             'bank_sales' => $this->money($snapshots->sum('bank_sales')),
             'credit_sales' => $this->money($snapshots->sum('credit_sales')),
@@ -920,6 +1078,14 @@ class FinancialSnapshotService
     private function emptyFlows(): array
     {
         return [
+            'cash_investment_in' => 0.0,
+            'cash_investment_out' => 0.0,
+            'bank_investment_in' => 0.0,
+            'bank_investment_out' => 0.0,
+            'cash_transfers' => 0.0,
+            'bank_transfers' => 0.0,
+            'unapplied_cash_receipts' => 0.0,
+            'unapplied_bank_receipts' => 0.0,
             'cash_sales' => 0.0,
             'bank_sales' => 0.0,
             'credit_sales' => 0.0,
@@ -1042,11 +1208,17 @@ class FinancialSnapshotService
     {
         $date = $day->toDateString();
         $timestamps = collect([
+            $this->latestTimestamp(\App\Models\FinancialTransfer::query()->where('business_datetime', '<=', $this->timestampBounds(null, $day)[1])),
+            $this->latestTimestamp(\App\Models\AccountPaymentBatch::query()->whereRaw('COALESCE(business_datetime, paid_at, created_at) <= ?', [$this->timestampBounds(null, $day)[1]])
+                ->when($warehouseId, fn ($q) => $q->where(fn ($scope) => $scope->where('warehouse_id', $warehouseId)->orWhereHas('posSession', fn ($s) => $s->where('warehouse_id', $warehouseId))))),
+            $this->latestTimestamp(\App\Models\OperationalPayment::query()->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))),
+            $this->latestTimestamp(\App\Models\WarehouseCashBalance::query()->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))),
+            $this->latestTimestamp(\App\Models\WarehouseCashEntry::query()->when($warehouseId, fn ($q) => $q->where('warehouse_id', $warehouseId))),
             $this->latestTimestamp(SalesOrder::query()
-                ->whereDate('date', $date)
+                ->whereDate('date', '<=', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->whereHas('items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))),
             $this->latestTimestamp(SalesOrderPayment::query()
-                ->whereDate('paid_at', $date)
+                ->whereRaw('COALESCE(business_datetime, paid_at, created_at) <= ?', [$this->timestampBounds(null, $day)[1]])
                 ->when($warehouseId, fn (Builder $query) => $query->whereHas('salesOrder.items', fn (Builder $items) => $items->where('warehouse_id', $warehouseId)))),
             $this->latestTimestamp(SalesReturn::query()
                 ->where('status', 'approved')
@@ -1058,19 +1230,19 @@ class FinancialSnapshotService
                 })
                 ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))),
             $this->latestTimestamp(PurchaseOrder::query()
-                ->whereDate('order_date', $date)
+                ->whereDate('order_date', '<=', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->where('warehouse_id', $warehouseId))),
             $this->latestTimestamp(PurchaseOrderPayment::query()
-                ->whereDate('paid_at', $date)
+                ->whereRaw('COALESCE(business_datetime, paid_at, created_at) <= ?', [$this->timestampBounds(null, $day)[1]])
                 ->when($warehouseId, fn (Builder $query) => $query->whereHas('purchaseOrder', fn (Builder $purchase) => $purchase->where('warehouse_id', $warehouseId)))),
             $this->latestTimestamp(OperationalExpense::query()
-                ->whereDate('expense_date', $date)
+                ->whereDate('expense_date', '<=', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))),
             $this->latestTimestamp(CapitalMovement::query()
-                ->whereDate('movement_date', $date)
+                ->whereDate('movement_date', '<=', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))),
             $this->latestTimestamp(FinancialAdjustment::query()
-                ->whereDate('adjustment_date', $date)
+                ->whereDate('adjustment_date', '<=', $date)
                 ->when($warehouseId, fn (Builder $query) => $query->where(fn (Builder $scope) => $scope->whereNull('warehouse_id')->orWhere('warehouse_id', $warehouseId)))),
             $this->latestTimestamp(InventoryLot::query()
                 ->whereDate('received_at', '<=', $date)
@@ -1124,6 +1296,15 @@ class FinancialSnapshotService
     private function snapshotWarnings(Carbon $day, ?int $warehouseId): array
     {
         $warnings = [];
+        if ($warehouseId) {
+            $warnings[] = 'bank_is_operational_payment_bucket';
+        }
+        if ($warehouseId && app(WarehouseCashService::class)->availability($warehouseId, $this->timestampBounds($day, $day)[1]->min(now()))['balance'] === null) {
+            $warnings[] = 'cash_balance_not_reconciled_at_cutoff';
+        }
+        if (\App\Models\FinancialAccount::query()->where('currency', '!=', \App\Models\Setting::get('store_currency', 'USD'))->exists()) {
+            $warnings[] = 'consolidated_bank_currency_conversion_unavailable';
+        }
 
         if ($day->lt(Carbon::today())) {
             $warnings[] = 'inventory_historical_value_uses_current_fifo_lot_availability';

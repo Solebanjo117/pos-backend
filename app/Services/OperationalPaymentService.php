@@ -50,9 +50,17 @@ class OperationalPaymentService
         return DB::transaction(function () use ($source, $payments, $direction, $user): Collection {
             $records = collect();
             foreach ($payments as $index => $payment) {
-                $record = OperationalPayment::query()->create([...$payment, 'source_type' => $source->getMorphClass(), 'source_id' => $source->id, 'line_number' => $index, 'warehouse_id' => $source->warehouse_id, 'direction' => $direction, 'created_by' => $user->id, 'pos_session_id' => \App\Models\PosSession::query()->where('user_id', $user->id)->where('warehouse_id', $source->warehouse_id)->where('status', 'open')->value('id')]);
+                $effectiveAt = \Carbon\Carbon::parse($source->business_datetime ?? $source->paid_at ?? now());
+                if ($effectiveAt->gt(now())) {
+                    throw ValidationException::withMessages(['business_datetime' => 'La fecha efectiva del pago no puede estar en el futuro.']);
+                }
+                $baseline = \App\Models\WarehouseCashBalance::query()->where('warehouse_id', $source->warehouse_id)->first();
+                if ($payment['liquidity_bucket'] === 'cash' && $baseline && $effectiveAt->lt($baseline->cutoff_at)) {
+                    throw ValidationException::withMessages(['business_datetime' => 'La salida o entrada de efectivo no puede ser anterior al saldo conciliado.']);
+                }
+                $record = OperationalPayment::query()->create([...$payment, 'source_type' => $source->getMorphClass(), 'source_id' => $source->id, 'line_number' => $index, 'warehouse_id' => $source->warehouse_id, 'direction' => $direction, 'created_by' => $user->id, 'business_datetime' => $source->business_datetime ?? $source->paid_at ?? now(), 'pos_session_id' => \App\Models\PosSession::query()->where('user_id', $user->id)->where('warehouse_id', $source->warehouse_id)->where('status', 'open')->value('id')]);
                 if ($record->liquidity_bucket === 'cash') {
-                    $movement = app(CashMovementService::class)->record($user, $source->warehouse_id, ['type' => $direction, 'subtype' => 'operational_payment', 'amount' => $record->amount, 'reason' => 'Pago operativo #'.$record->id, 'reference_number' => $record->reference_number, 'source_type' => $record->getMorphClass(), 'source_id' => $record->id]);
+                    $movement = app(CashMovementService::class)->record($user, $source->warehouse_id, ['type' => $direction, 'subtype' => 'operational_payment', 'amount' => $record->amount, 'reason' => 'Pago operativo #'.$record->id, 'reference_number' => $record->reference_number, 'source_type' => $record->getMorphClass(), 'source_id' => $record->id, 'business_datetime' => $record->business_datetime]);
                     $record->update(['cash_movement_id' => $movement->id]);
                 } elseif ($record->financial_account_id) {
                     $this->postBank($record);
@@ -91,6 +99,18 @@ class OperationalPaymentService
 
         return DB::transaction(function () use ($payment, $accountId, $user, $warehouseId): Model {
             $payment = $payment->newQuery()->lockForUpdate()->findOrFail($payment->id);
+            if ($payment instanceof \App\Models\AccountPaymentBatch) {
+                abort_unless((int) ($payment->warehouse_id ?? $payment->posSession?->warehouse_id) === $warehouseId, 403);
+                if ($payment->receipt_accounting_version !== 1 || $payment->liquidity_bucket !== 'bank' || ($payment->financial_account_id && (int) $payment->financial_account_id !== $accountId)) {
+                    throw ValidationException::withMessages(['financial_account_id' => 'Este recibo requiere conciliación o ya tiene otra cuenta asignada.']);
+                }
+                FinancialAccount::query()->where('is_active', true)->where('is_legacy', false)->lockForUpdate()->findOrFail($accountId);
+                $payment->update(['financial_account_id' => $accountId]);
+                app(FinancialLiquiditySyncService::class)->sync($payment);
+                activity('payments')->performedOn($payment)->causedBy($user)->log('Cuenta financiera asignada al recibo');
+
+                return $payment->fresh();
+            }
             $document = $payment instanceof \App\Models\SalesOrderPayment ? $payment->salesOrder : $payment->purchaseOrder;
             $documentWarehouse = $payment instanceof \App\Models\SalesOrderPayment ? app(WarehouseCashService::class)->salesPaymentWarehouse($payment) : (int) $document->warehouse_id;
             abort_unless($documentWarehouse === $warehouseId, 403);
@@ -121,6 +141,9 @@ class OperationalPaymentService
     private function postBank(OperationalPayment $payment): void
     {
         $account = FinancialAccount::query()->where('is_active', true)->where('is_legacy', false)->lockForUpdate()->findOrFail($payment->financial_account_id);
-        app(FinancialAccountMovementService::class)->record($account, $payment->direction, (float) $payment->amount, ['source_type' => $payment->getMorphClass(), 'source_id' => $payment->id, 'source_line_key' => 'liquidity', 'reference' => $payment->reference_number, 'notes' => $payment->notes, 'created_by' => $payment->created_by]);
+        if (strtoupper($account->currency) !== strtoupper(\App\Models\Setting::get('store_currency', 'USD'))) {
+            throw ValidationException::withMessages(['financial_account_id' => 'La cuenta debe usar la moneda de la tienda; no hay conversión cambiaria configurada.']);
+        }
+        app(FinancialAccountMovementService::class)->record($account, $payment->direction, (float) $payment->amount, ['source_type' => $payment->getMorphClass(), 'source_id' => $payment->id, 'source_line_key' => 'liquidity', 'business_datetime' => $payment->business_datetime ?? $payment->source?->business_datetime ?? $payment->source?->paid_at ?? $payment->created_at, 'reference' => $payment->reference_number, 'notes' => $payment->notes, 'created_by' => $payment->created_by]);
     }
 }

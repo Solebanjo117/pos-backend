@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class FinancialDailySnapshot extends Model
 {
     protected $fillable = [
+        'cash_investment_in', 'cash_investment_out', 'bank_investment_in', 'bank_investment_out',
+        'cash_transfers', 'bank_transfers', 'unapplied_cash_receipts', 'unapplied_bank_receipts',
         'warehouse_id',
         'date',
         'opening_cash',
@@ -58,6 +60,14 @@ class FinancialDailySnapshot extends Model
     ];
 
     protected $casts = [
+        'cash_investment_in' => 'decimal:2',
+        'cash_investment_out' => 'decimal:2',
+        'bank_investment_in' => 'decimal:2',
+        'bank_investment_out' => 'decimal:2',
+        'cash_transfers' => 'decimal:2',
+        'bank_transfers' => 'decimal:2',
+        'unapplied_cash_receipts' => 'decimal:2',
+        'unapplied_bank_receipts' => 'decimal:2',
         'date' => 'date',
         'opening_cash' => 'decimal:2',
         'opening_bank' => 'decimal:2',

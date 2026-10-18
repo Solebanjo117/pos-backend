@@ -38,6 +38,8 @@ class FinancialTransfer extends Model
         'created_by',
         'reversal_of_id',
         'reversed_by_transfer_id',
+        'collection_date_from',
+        'collection_date_to',
     ];
 
     protected $hidden = ['receipt_path', 'request_hash'];
@@ -63,5 +65,10 @@ class FinancialTransfer extends Model
     public function reversedBy(): BelongsTo
     {
         return $this->belongsTo(self::class, 'reversed_by_transfer_id');
+    }
+
+    public function depositAllocations(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(CashDepositAllocation::class);
     }
 }

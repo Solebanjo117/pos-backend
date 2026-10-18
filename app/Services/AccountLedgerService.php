@@ -529,6 +529,8 @@ class AccountLedgerService
 
         return AccountPaymentBatch::create([
             'account_type' => $accountType,
+            'warehouse_id' => $accountType === 'customer' ? ($data['warehouse_id'] ?? \App\Models\PosSession::query()->find($data['pos_session_id'] ?? null)?->warehouse_id ?? Auth::user()?->getEffectiveWarehouseId()) : null,
+            'receipt_accounting_version' => $accountType === 'customer' && $direction === 'incoming' ? 1 : 0,
             'account_id' => $accountId,
             'pos_session_id' => $data['pos_session_id'] ?? null,
             'cash_movement_id' => $data['cash_movement_id'] ?? null,
@@ -542,6 +544,7 @@ class AccountLedgerService
             'reference_number' => $data['reference_number'] ?? null,
             'notes' => $data['notes'] ?? null,
             'paid_at' => $data['paid_at'] ?? now(),
+            'business_datetime' => $data['business_datetime'] ?? $data['paid_at'] ?? now(),
             'created_by' => Auth::id(),
         ]);
     }

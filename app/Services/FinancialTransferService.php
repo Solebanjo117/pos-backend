@@ -31,7 +31,7 @@ class FinancialTransferService
             if (($data[$side.'_endpoint_type'] ?? null) === 'warehouse_cash') {
                 $warehouseId = (int) $data[$side.'_endpoint_id'];
                 abort_unless($user->isAdmin() || $user->warehouses()->whereKey($warehouseId)->exists(), 403);
-                if (! PosSession::query()->where('warehouse_id', $warehouseId)->where('user_id', $user->id)->where('status', 'open')->exists()) {
+                if (empty($data['collection_date_from']) && ! PosSession::query()->where('warehouse_id', $warehouseId)->where('user_id', $user->id)->where('status', 'open')->exists()) {
                     throw new InvalidArgumentException('Abra una sesión de Caja en la sucursal para transferir efectivo.');
                 }
             }
@@ -47,11 +47,21 @@ class FinancialTransferService
             return ['transfer' => $this->loadTransfer($existing), 'replayed' => true];
         }
 
+        $replayed = false;
         try {
-            $transfer = DB::transaction(function () use ($data, $user, $requestHash): FinancialTransfer {
+            $transfer = DB::transaction(function () use ($data, $user, $requestHash, &$replayed): FinancialTransfer {
                 $warehouseIds = collect(['from', 'to'])->filter(fn ($side) => $data[$side.'_endpoint_type'] === 'warehouse_cash')->map(fn ($side) => (int) $data[$side.'_endpoint_id'])->sort()->values();
                 foreach ($warehouseIds as $warehouseId) {
                     \App\Models\Warehouse::query()->lockForUpdate()->findOrFail($warehouseId);
+                }
+                $existing = FinancialTransfer::query()->where('idempotency_key', $data['idempotency_key'])->first();
+                if ($existing) {
+                    if (! hash_equals($existing->request_hash, $requestHash)) {
+                        throw new InvalidArgumentException('La clave de idempotencia ya fue utilizada con otros datos.');
+                    }
+                    $replayed = true;
+
+                    return $existing;
                 }
                 [$from, $fromBalance] = $this->lockEndpoint($data['from_endpoint_type'], (int) $data['from_endpoint_id']);
                 [$to, $toBalance] = $this->lockEndpoint($data['to_endpoint_type'], (int) $data['to_endpoint_id']);
@@ -62,6 +72,13 @@ class FinancialTransferService
                     }
                 }
                 $amount = round((float) $data['amount'], 2);
+                if ($amount <= 0 || abs((float) $data['amount'] - $amount) > 0.000001) {
+                    throw new InvalidArgumentException('El monto debe ser positivo y tener como máximo dos decimales.');
+                }
+                $currency = fn (Model $endpoint): string => strtoupper($endpoint instanceof FinancialAccount ? $endpoint->currency : \App\Models\Setting::get('store_currency', 'USD'));
+                if ($currency($from) !== $currency($to)) {
+                    throw new InvalidArgumentException('Las cuentas deben usar la misma moneda; no hay conversión cambiaria configurada.');
+                }
 
                 if ($this->endpointKey($data['from_endpoint_type'], $from->getKey()) === $this->endpointKey($data['to_endpoint_type'], $to->getKey())) {
                     throw new InvalidArgumentException('La cuenta de origen y destino deben ser diferentes.');
@@ -74,9 +91,36 @@ class FinancialTransferService
                 $businessDatetime = $user->isAdmin() && ! empty($data['business_datetime'])
                     ? $data['business_datetime']
                     : now();
+                $effectiveAt = \Carbon\Carbon::parse($businessDatetime);
+                if ($effectiveAt->gt(now())) {
+                    throw new InvalidArgumentException('La fecha efectiva no puede estar en el futuro.');
+                }
+                if ($from instanceof \App\Models\Warehouse) {
+                    $historicalMinimum = app(WarehouseCashService::class)->minimumBalanceFrom((int) $from->id, $effectiveAt);
+                    if ($historicalMinimum === null || $historicalMinimum < $amount) {
+                        throw new InvalidArgumentException('El efectivo disponible en la fecha efectiva no alcanza o no está conciliado.');
+                    }
+                }
+                if ($from instanceof FinancialAccount && ! $from->allow_negative_balance) {
+                    $balance = (float) $from->opening_balance;
+                    $minimum = null;
+                    foreach ($from->movements()->whereRaw('COALESCE(business_datetime, created_at) <= ?', [now()])->orderByRaw('COALESCE(business_datetime, created_at)')->orderBy('id')->get() as $movement) {
+                        $at = $movement->business_datetime ?? $movement->created_at;
+                        if ($at->gt($effectiveAt) && $minimum === null) {
+                            $minimum = $balance;
+                        }
+                        $balance = round($balance + ($movement->direction === 'in' ? 1 : -1) * (float) $movement->amount, 2);
+                        if ($minimum !== null) {
+                            $minimum = min($minimum, $balance);
+                        }
+                    }
+                    if (($minimum ?? $balance) < $amount) {
+                        throw new InvalidArgumentException('El banco de origen no tiene saldo suficiente desde la fecha efectiva.');
+                    }
+                }
 
                 $transfer = FinancialTransfer::create([
-                    ...$data,
+                    ...collect($data)->except('deposit_allocations')->all(),
                     'folio' => $this->documentSequenceService->nextFinancialTransferFolio(),
                     'request_hash' => $requestHash,
                     'amount' => $amount,
@@ -109,7 +153,7 @@ class FinancialTransferService
             return ['transfer' => $this->loadTransfer($existing), 'replayed' => true];
         }
 
-        return ['transfer' => $this->loadTransfer($transfer), 'replayed' => false];
+        return ['transfer' => $this->loadTransfer($transfer), 'replayed' => $replayed];
     }
 
     public function reverse(FinancialTransfer $original, User $user, ?string $reason = null): FinancialTransfer
@@ -135,12 +179,17 @@ class FinancialTransferService
                 'notes' => $reason,
                 'business_datetime' => now(),
                 'reversal_of_id' => $locked->id,
+                'collection_date_from' => $locked->collection_date_from,
+                'collection_date_to' => $locked->collection_date_to,
             ], $user);
 
             $reversal = $result['transfer'];
             $locked->update([
                 'status' => FinancialTransfer::STATUS_REVERSED,
                 'reversed_by_transfer_id' => $reversal->id,
+            ]);
+            $locked->depositAllocations()->whereNull('released_at')->update([
+                'released_at' => now(), 'released_by_transfer_id' => $reversal->id,
             ]);
 
             return $this->loadTransfer($reversal);
@@ -194,6 +243,15 @@ class FinancialTransferService
         User $user,
     ): void {
         if ($endpoint instanceof \App\Models\Warehouse) {
+            if ($transfer->collection_date_from) {
+                app(WarehouseCashService::class)->record((int) $endpoint->id, FinancialTransfer::class, (int) $transfer->id,
+                    $direction === 'in' ? $amount : -$amount, $direction, now(), (int) $user->id, 'Depósito '.$transfer->folio,
+                    context: ['reporting_kind' => 'transfer', 'reporting_reference' => $transfer->folio,
+                        'reporting_method' => 'cash', 'reporting_business_datetime' => $transfer->business_datetime,
+                        'reporting_document_url' => '/finance/transfers/'.$transfer->id]);
+
+                return;
+            }
             app(CashMovementService::class)->record($user, (int) $endpoint->id, [
                 'type' => $direction,
                 'subtype' => 'financial_transfer',
@@ -304,6 +362,6 @@ class FinancialTransferService
 
     private function loadTransfer(FinancialTransfer $transfer): FinancialTransfer
     {
-        return $transfer->load(['creator:id,name', 'reversalOf:id,folio', 'reversedBy:id,folio']);
+        return $transfer->load(['creator:id,name', 'reversalOf:id,folio', 'reversedBy:id,folio', 'depositAllocations']);
     }
 }

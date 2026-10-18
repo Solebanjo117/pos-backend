@@ -60,8 +60,8 @@ class MoneyReportController extends Controller
         } elseif ($report === 'cash-position') {
             $result = app(CashPositionReportService::class)->report($filters, true);
             $query = $result['query'];
-            $summary = $result['summary'];
-            $columns = ['occurred_at' => 'Registro efectivo', 'business_datetime' => 'Fecha comercial', 'kind' => 'Tipo', 'description' => 'Descripción', 'reference' => 'Referencia', 'amount' => 'Importe', 'balance' => 'Saldo', 'user_name' => 'Responsable', 'transfer_id' => 'Transferencia'];
+            $summary = [...$result['summary'], 'advertencias' => implode(' ', $result['warnings'])];
+            $columns = ['occurred_at' => 'Registro efectivo', 'business_datetime' => 'Fecha comercial', 'kind' => 'Tipo', 'description' => 'Descripción', 'reference' => 'Referencia', 'amount' => 'Importe', 'balance' => 'Saldo', 'user_name' => 'Responsable', 'transfer_id' => 'Transferencia', 'origin' => 'Origen del registro', 'included_in_cash_balance' => 'Incluido en saldo conciliado'];
             $map = fn ($row) => app(CashPositionReportService::class)->normalize($row, $summary['opening_balance']);
         } elseif ($report === 'payment-methods') {
             $service = app(CashPaymentQueryService::class);

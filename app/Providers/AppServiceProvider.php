@@ -41,7 +41,20 @@ class AppServiceProvider extends ServiceProvider
     {
         foreach ([\App\Models\CashMovement::class, SalesOrderPayment::class, \App\Models\AccountPaymentBatch::class] as $cashSource) {
             $cashSource::created(fn ($source) => app(\App\Services\WarehouseCashService::class)->capture($source));
-            $cashSource::deleting(fn ($source) => app(\App\Services\WarehouseCashService::class)->capture($source, true));
+            $cashSource::deleting(function ($source): void {
+                if ($source instanceof SalesOrderPayment || $source instanceof \App\Models\AccountPaymentBatch) {
+                    $scope = $source instanceof SalesOrderPayment && ! $source->account_payment_batch_id ? 'sales' : 'receipts';
+                    $sourceId = $source instanceof SalesOrderPayment ? ($source->account_payment_batch_id ?? $source->id) : $source->id;
+                    $warehouseId = $source->warehouse_id ?? $source->posSession?->warehouse_id;
+                    if ($warehouseId) {
+                        \App\Models\Warehouse::query()->lockForUpdate()->findOrFail($warehouseId);
+                    }
+                    if (\App\Models\CashDepositAllocation::query()->where('source_scope', $scope)->where('source_id', $sourceId)->whereNull('released_at')->exists()) {
+                        throw \Illuminate\Validation\ValidationException::withMessages(['payment' => 'Reverse primero los depósitos asignados a este cobro.']);
+                    }
+                }
+                app(\App\Services\WarehouseCashService::class)->capture($source, true);
+            });
         }
         foreach ([SalesOrderPayment::class, PurchaseOrderPayment::class, \App\Models\AccountPaymentBatch::class] as $paymentClass) {
             $paymentClass::creating(function ($payment): void {
@@ -56,6 +69,7 @@ class AppServiceProvider extends ServiceProvider
             PurchaseOrderPayment::class,
             OperationalExpense::class,
             CapitalMovement::class,
+            \App\Models\AccountPaymentBatch::class,
         ] as $modelClass) {
             $modelClass::created(fn ($model) => app(FinancialLiquiditySyncService::class)->sync($model));
             $modelClass::deleting(fn ($model) => app(FinancialLiquiditySyncService::class)->reverse($model));
@@ -75,6 +89,9 @@ class AppServiceProvider extends ServiceProvider
         SalesOrderItem::saved(fn (SalesOrderItem $item) => app(OperationalLedgerService::class)->syncSalesOrder($item->salesOrder));
         SalesOrderItem::deleted(fn (SalesOrderItem $item) => app(OperationalLedgerService::class)->syncSalesOrder($item->salesOrder));
         SalesOrderPayment::created(fn (SalesOrderPayment $payment) => app(OperationalLedgerService::class)->syncSalesPayment($payment));
+        SalesOrderPayment::deleting(fn (SalesOrderPayment $payment) => app(OperationalLedgerService::class)->reverseReceiptApplication($payment));
+        \App\Models\AccountPaymentBatch::created(fn ($receipt) => app(OperationalLedgerService::class)->syncCustomerReceipt($receipt));
+        \App\Models\AccountPaymentBatch::deleting(fn ($receipt) => app(OperationalLedgerService::class)->syncCustomerReceipt($receipt, true));
         PurchaseOrder::saved(fn (PurchaseOrder $order) => app(OperationalLedgerService::class)->syncPurchaseOrder($order));
         PurchaseOrderItem::saved(fn (PurchaseOrderItem $item) => app(OperationalLedgerService::class)->syncPurchaseOrder($item->purchaseOrder));
         PurchaseOrderItem::deleted(fn (PurchaseOrderItem $item) => app(OperationalLedgerService::class)->syncPurchaseOrder($item->purchaseOrder));

@@ -50,8 +50,16 @@ class BalanceSheetLedgerService
         $controlDifference = $this->money($controlAccounts->sum(fn (array $row): float => abs((float) $row['difference'])));
         $missingSources = collect($sourceCoverage)->sum('missing');
         $historicalInventoryUnverified = ! $asOf->isToday();
+        $cashUnverified = $controlAccounts->contains(fn (array $row): bool => $row['key'] === 'cash' && ! $row['verified']);
+        $currencyUnverified = FinancialAccount::query()->where('currency', '!=', \App\Models\Setting::get('store_currency', 'USD'))->exists();
 
         $warnings = collect();
+        if ($cashUnverified) {
+            $warnings->push('El efectivo de todas las sucursales debe estar conciliado al corte antes de considerar oficial este Balance.');
+        }
+        if ($currencyUnverified) {
+            $warnings->push('Existen cuentas en otra moneda sin conversión configurada; los totales consolidados no son oficiales.');
+        }
         if ($missingSources > 0) {
             $warnings->push('Existen operaciones históricas sin asiento contable; ejecute la conciliación antes de considerar oficial este Balance.');
         }
@@ -71,6 +79,8 @@ class BalanceSheetLedgerService
         $requiresReconciliation = $missingSources > 0
             || $controlDifference > 0.005
             || $historicalInventoryUnverified
+            || $cashUnverified
+            || $currencyUnverified
             || $unclassified > 0;
         $status = abs($difference) > 0.005 || abs((float) $trialBalance['difference']) > 0.005
             ? 'unbalanced'
@@ -324,8 +334,12 @@ class BalanceSheetLedgerService
         $accountsReceivable = $this->accountsReceivableSubledger($cutoffUtc);
         $accountsPayable = $this->accountsPayableSubledger($cutoffUtc);
         $currentCutoff = $asOf->isToday();
+        $cashPositions = \App\Models\Warehouse::query()->get()->map(fn ($warehouse) => app(WarehouseCashService::class)->availability((int) $warehouse->id, $cutoffUtc->copy()->min(now())));
+        $cashVerified = $cashPositions->isNotEmpty() && $cashPositions->every(fn ($position) => $position['initialized'] && $position['balance'] !== null);
+        $cashSubledger = $cashPositions->sum(fn ($position) => (float) ($position['balance'] ?? 0));
 
         $rows = collect([
+            $this->controlRow('cash', 'Efectivo consolidado de sucursales', $ledger('cash'), $cashSubledger, $cashVerified),
             $this->controlRow('bank', 'Banco', $ledger('bank'), $bankSubledger, true),
             $this->controlRow('accounts_receivable', 'Cuentas por cobrar', $ledger('accounts_receivable'), $accountsReceivable, $currentCutoff),
             $this->controlRow('inventory', 'Inventario FIFO', $ledger('inventory'), $inventorySubledger, $currentCutoff),

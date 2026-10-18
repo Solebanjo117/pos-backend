@@ -22,11 +22,11 @@ class FinancialAccountReportService
     public function movements(FinancialAccount $account, array $filters): array
     {
         [$from, $to] = RegionalDateRange::utcBounds($filters['date_from'], $filters['date_to']);
-        $query = $account->movements()->with('creator:id,name')->whereBetween('created_at', [$from, $to])
+        $query = $account->movements()->with('creator:id,name')->whereRaw('COALESCE(business_datetime, created_at) BETWEEN ? AND ?', [$from, $to])
             ->when($filters['search'] ?? null, fn ($q, $search) => $q->where(fn ($q) => $q->where('reference', 'like', '%'.$search.'%')->orWhere('notes', 'like', '%'.$search.'%')));
         $totals = (clone $query)->selectRaw("SUM(CASE WHEN direction = 'in' THEN amount ELSE 0 END) as incoming, SUM(CASE WHEN direction = 'out' THEN amount ELSE 0 END) as outgoing")->first();
         $totals = ['incoming' => round((float) $totals->incoming, 2), 'outgoing' => round((float) $totals->outgoing, 2)];
-        $page = $query->orderByDesc('created_at')->orderByDesc('id')->paginate($filters['per_page'] ?? 25);
+        $page = $query->orderByRaw('COALESCE(business_datetime, created_at) DESC')->orderByDesc('id')->paginate($filters['per_page'] ?? 25);
         $page->getCollection()->transform(function ($movement) {
             $movement->document_url = $movement->source_type === 'financial_transfer' ? '/finance/transfers/'.$movement->source_id : null;
 

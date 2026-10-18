@@ -86,6 +86,9 @@ class OperationalLedgerService
             return null;
         }
 
+        if ($payment->account_payment_batch_id && \App\Models\AccountPaymentBatch::query()->whereKey($payment->account_payment_batch_id)->where('receipt_accounting_version', 1)->exists()) {
+            $liquidity = 'customer_credits';
+        }
         $isRefund = $payment->sales_return_id !== null || (float) $payment->amount < 0;
         $desired = $isRefund
             ? ['pending_refunds' => $amount, $liquidity => -$amount]
@@ -101,6 +104,31 @@ class OperationalLedgerService
             $isRefund ? 'Reembolso de venta' : 'Cobro de venta '.$payment->salesOrder->order_number,
             ['method' => $payment->method, 'reference' => $payment->reference_number],
         );
+    }
+
+    public function syncCustomerReceipt(\App\Models\AccountPaymentBatch $receipt, bool $reverse = false): ?JournalEntry
+    {
+        if ($receipt->receipt_accounting_version !== 1 || $receipt->account_type !== 'customer' || $receipt->direction !== 'incoming') {
+            return null;
+        }
+        $bucket = $receipt->liquidity_bucket;
+        if (! in_array($bucket, ['cash', 'bank'], true)) {
+            return null;
+        }
+
+        return $this->syncDesired('customer_receipt', (int) $receipt->id,
+            $reverse ? [] : [$bucket => (float) $receipt->amount, 'customer_credits' => -(float) $receipt->amount],
+            $reverse ? now() : ($receipt->business_datetime ?? $receipt->paid_at), $receipt->warehouse_id, $receipt->created_by,
+            $reverse ? 'Reversa recibo '.$receipt->batch_number : 'Recibo '.$receipt->batch_number);
+    }
+
+    public function reverseReceiptApplication(SalesOrderPayment $payment): ?JournalEntry
+    {
+        if (! $payment->account_payment_batch_id || ! \App\Models\AccountPaymentBatch::query()->whereKey($payment->account_payment_batch_id)->where('receipt_accounting_version', 1)->exists()) {
+            return null;
+        }
+
+        return $this->syncDesired('sales_order_payment', (int) $payment->id, [], now(), $payment->warehouse_id, auth()->id(), 'Reversa aplicación recibo');
     }
 
     public function syncPurchaseOrder(PurchaseOrder $order): ?JournalEntry

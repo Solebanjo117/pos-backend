@@ -16,15 +16,17 @@ class OperationalPaymentController extends Controller
 {
     public function index(IndexCashPaymentsRequest $request, CashPaymentQueryService $service): JsonResponse
     {
-        $result = $service->query($request->integer('warehouse_id'), $request->validated())->orderByDesc('movements.created_at')->orderByDesc('movements.id')->paginate($request->integer('per_page', 25))->toArray();
+        $result = $service->query($request->integer('warehouse_id'), $request->validated())->orderByDesc('movements.business_datetime')->orderByDesc('movements.id')->paginate($request->integer('per_page', 25))->toArray();
         $result['data'] = array_map(fn ($row) => $service->normalizeRow($row), $result['data']);
         $options = $service->query($request->integer('warehouse_id'), ['scope' => $request->input('scope', 'sales')]);
         $result['filter_options'] = [
-            'methods' => (clone $options)->select('movements.method as code', 'method_record.name')->distinct()->get(),
+            'methods' => \App\Models\PaymentMethod::query()->whereNotIn('code', \App\Models\PaymentMethod::DEFERRED_CODES)->ordered()->get(['code', 'name']),
             'operators' => (clone $options)->whereNotNull('movements.user_id')->select('movements.user_id as id', 'operator.name')->distinct()->get(),
             'sessions' => (clone $options)->whereNotNull('movements.pos_session_id')->select('movements.pos_session_id as id')->distinct()->get(),
             'warehouses' => \App\Models\Warehouse::query()->when(! $request->user()->isAdmin(), fn ($query) => $query->whereKey($request->integer('warehouse_id')))->get(['id', 'name']),
         ];
+        $result['warnings'] = \App\Models\AccountPaymentBatch::query()->where('account_type', 'customer')->where('direction', 'incoming')->whereNull('warehouse_id')->whereNull('pos_session_id')->exists()
+            ? ['Existen recibos históricos sin sucursal identificable. Revise su conciliación para completar los cobros por sucursal.'] : [];
 
         return response()->json($result);
     }
@@ -40,6 +42,7 @@ class OperationalPaymentController extends Controller
             'operations' => OperationalPayment::query()->findOrFail($payment),
             'sales' => SalesOrderPayment::query()->findOrFail($payment),
             'purchases' => PurchaseOrderPayment::query()->findOrFail($payment),
+            'receipts' => \App\Models\AccountPaymentBatch::query()->findOrFail($payment),
             default => abort(404),
         };
 

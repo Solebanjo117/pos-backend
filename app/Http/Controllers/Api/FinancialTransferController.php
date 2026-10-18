@@ -123,6 +123,8 @@ class FinancialTransferController extends Controller
     /** @return array<string, mixed> */
     private function present(FinancialTransfer $transfer): array
     {
+        $transfer->loadMissing('depositAllocations');
+
         return [
             ...$transfer->toArray(),
             'from_account' => $this->endpointLabel($transfer->from_endpoint_type, $transfer->from_endpoint_id),

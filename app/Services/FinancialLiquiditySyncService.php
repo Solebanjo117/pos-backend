@@ -34,6 +34,9 @@ class FinancialLiquiditySyncService
             $accountId = $source->getAttribute('financial_account_id')
                 ?: FinancialAccount::query()->where('is_legacy', true)->value('id');
             $account = FinancialAccount::query()->lockForUpdate()->findOrFail($accountId);
+            if (strtoupper($account->currency) !== strtoupper(\App\Models\Setting::get('store_currency', 'USD'))) {
+                throw new \InvalidArgumentException('La cuenta debe usar la moneda de la tienda; no hay conversión cambiaria configurada.');
+            }
 
             return $this->movementService->record($account, $effect['direction'], $effect['amount'], [
                 'source_type' => $source->getMorphClass(),
@@ -85,6 +88,9 @@ class FinancialLiquiditySyncService
     private function effect(Model $source): ?array
     {
         if ($source instanceof SalesOrderPayment) {
+            if ($source->account_payment_batch_id && \App\Models\AccountPaymentBatch::query()->whereKey($source->account_payment_batch_id)->where('receipt_accounting_version', 1)->exists()) {
+                return null;
+            }
             if (($source->liquidity_bucket ?? PaymentMethod::liquidityBucket($source->method)) !== PaymentMethod::LIQUIDITY_BANK) {
                 return null;
             }
@@ -105,6 +111,10 @@ class FinancialLiquiditySyncService
             }
 
             return $this->payload('out', (float) $source->amount, $source->business_datetime ?? $source->paid_at ?? $source->created_at, $source->reference_number, $source->notes, $source->user_id);
+        }
+
+        if ($source instanceof \App\Models\AccountPaymentBatch && $source->receipt_accounting_version === 1 && $source->direction === 'incoming' && $source->liquidity_bucket === 'bank') {
+            return $this->payload('in', (float) $source->amount, $source->business_datetime ?? $source->paid_at, $source->reference_number, $source->notes, $source->created_by);
         }
 
         if ($source instanceof OperationalExpense) {

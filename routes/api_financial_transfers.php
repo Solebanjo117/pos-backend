@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\CashDepositController;
 use App\Http\Controllers\Api\FinancialAccountController;
 use App\Http\Controllers\Api\FinancialTransferController;
 use Illuminate\Support\Facades\Route;
@@ -20,6 +21,11 @@ Route::middleware('role:admin')->group(function (): void {
     Route::post('/financial-accounts', [FinancialAccountController::class, 'store']);
     Route::patch('/financial-accounts/{financialAccount}', [FinancialAccountController::class, 'update']);
     Route::post('/financial-transfers/{financialTransfer}/reverse', [FinancialTransferController::class, 'reverse']);
+});
+
+Route::middleware(['role:admin,manager', 'warehouse_context'])->group(function (): void {
+    Route::get('cash/deposit-sources', [CashDepositController::class, 'sources']);
+    Route::post('cash/deposits', [CashDepositController::class, 'store']);
 });
 
 Route::middleware(['role:admin,manager,cashier', 'warehouse_context'])->group(function () {

@@ -13,6 +13,8 @@ class AccountPaymentBatch extends Model
 
     protected $fillable = [
         'account_type',
+        'warehouse_id',
+        'receipt_accounting_version',
         'account_id',
         'pos_session_id',
         'cash_movement_id',
@@ -31,6 +33,7 @@ class AccountPaymentBatch extends Model
     ];
 
     protected $casts = [
+        'receipt_accounting_version' => 'integer',
         'amount' => 'decimal:2',
         'paid_at' => 'datetime',
         'business_datetime' => 'datetime',

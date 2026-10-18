@@ -87,7 +87,7 @@ class FinancialAccountController extends Controller
             $warehouses = \App\Models\Warehouse::query()->when(! $request->user()->isAdmin(), fn ($query) => $query->whereIn('id', $request->user()->warehouses()->pluck('warehouses.id')))->get();
             foreach ($warehouses as $warehouse) {
                 $available = app(\App\Services\WarehouseCashService::class)->availability($warehouse->id);
-                $options->push(['endpoint_type' => 'warehouse_cash', 'endpoint_id' => $warehouse->id, 'account_type' => 'cash', 'name' => 'Efectivo · '.$warehouse->name, 'masked_number' => null, 'balance' => $available['balance'], 'initialized' => $available['initialized'], 'currency' => 'USD', 'allow_negative_balance' => false]);
+                $options->push(['endpoint_type' => 'warehouse_cash', 'endpoint_id' => $warehouse->id, 'account_type' => 'cash', 'name' => 'Efectivo · '.$warehouse->name, 'masked_number' => null, 'balance' => $available['balance'], 'initialized' => $available['initialized'], 'currency' => \App\Models\Setting::get('store_currency', 'USD'), 'allow_negative_balance' => false]);
             }
         }
         if (($type === null || $type === 'cash') && ($validated['purpose'] ?? null) !== 'transfer') {
@@ -112,7 +112,7 @@ class FinancialAccountController extends Controller
                     'name' => 'Caja #'.$session->id.' · '.$session->user?->name,
                     'masked_number' => null,
                     'balance' => round((float) $session->opening_amount + $in - $out, 2),
-                    'currency' => 'USD',
+                    'currency' => \App\Models\Setting::get('store_currency', 'USD'),
                     'allow_negative_balance' => false,
                 ];
             }));
