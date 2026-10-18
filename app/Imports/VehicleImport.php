@@ -58,8 +58,8 @@ class VehicleImport extends BaseImport
     protected function mapHeader(string $header): string
     {
         return match ($header) {
-            'make', 'marca', 'marca_auto', 'vehicle_make' => 'make',
-            'model', 'modelo', 'vehicle_model' => 'model',
+            'make', 'make_name', 'marca', 'marca_auto', 'vehicle_make' => 'make',
+            'model', 'model_name', 'modelo', 'vehicle_model' => 'model',
             'year', 'ano', 'year_range', 'years' => 'year',
             'ano_desde', 'year_from' => 'year_from',
             'ano_hasta', 'year_to' => 'year_to',
