@@ -2,6 +2,20 @@
 - Patrones del proyecto: _PROJECT_DOCS/PATTERNS.md
 - Bugs resueltos y reglas derivadas: _PROJECT_DOCS/LESSONS_LEARNED.md
 
+## Skills para backend y frontend — 2026-10-06
+
+Se instalaron seis skills en la carpeta personal de Codex `$CODEX_HOME/skills` (por defecto `~/.codex/skills`), disponibles para trabajar en ambos repositorios:
+
+- `vue-best-practices` y `vue-testing-best-practices`: componentes/composables Vue 3 y pruebas con Vitest/Vue Test Utils. Origen: [vuejs-ai/skills](https://github.com/vuejs-ai/skills).
+- `supabase-postgres-best-practices`: esquema, migraciones, índices, rendimiento y concurrencia de PostgreSQL, también fuera de Supabase. Origen: [supabase/agent-skills](https://github.com/supabase/agent-skills).
+- `web-design-guidelines`: revisión de accesibilidad y experiencia de uso. Origen: [vercel-labs/agent-skills](https://github.com/vercel-labs/agent-skills).
+- `vite`: configuración, plugins, compilación y SSR de Vite. Origen: [antfu/skills](https://github.com/antfu/skills).
+- `webapp-testing`: verificaciones de navegador, capturas y logs con Python/Playwright. Origen: [anthropics/skills](https://github.com/anthropics/skills).
+
+La activación por dominio y los límites de aplicación se registraron en [AGENTS.md del backend](../AGENTS.md#additional-skills) y [AGENTS.md del frontend](../../pos-frontend/AGENTS.md#additional-skills). Se conservan las skills de Laravel, Pest, Tailwind y HermeX ya disponibles. Las reglas generales se aplican junto con los contratos del proyecto: aislamiento por sucursal, cookies/CSRF, idempotencia, trazabilidad, compatibilidad de pruebas con SQLite y reutilización de componentes.
+
+Las dependencias y versiones declaradas en cada proyecto siguen siendo la referencia. Las verificaciones de navegador usan la aplicación servida por Herd; instalar estas skills no instala Python/Playwright ni aplica migraciones. La instalación se comprobó mediante los manifiestos y sus referencias locales; esta actualización de contexto no constituye validación funcional o visual de la aplicación.
+
 ## Actualización de contexto — 2026-09-06
 
 ### Alcance y estado Git auditado
