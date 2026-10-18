@@ -19,6 +19,16 @@ class DocumentSequenceService
         return str_pad((string) $this->next(self::COMMERCIAL), 10, '0', STR_PAD_LEFT);
     }
 
+    /**
+     * Folio diario de orden de venta: YYMMDD + secuencia de 4 dígitos que se reinicia cada día.
+     */
+    public function nextSalesOrderFolio(CarbonInterface $regionalDatetime): string
+    {
+        $date = $regionalDatetime->format('ymd');
+
+        return $date.str_pad((string) $this->next('sales_order:'.$date), 4, '0', STR_PAD_LEFT);
+    }
+
     public function nextQuoteFolio(CarbonInterface $regionalDatetime): string
     {
         $date = $regionalDatetime->format('Ymd');

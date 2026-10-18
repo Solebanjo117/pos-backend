@@ -240,7 +240,9 @@ class SalesOrder extends Model
      */
     public static function generateOrderNumber(): string
     {
-        return app(\App\Services\DocumentSequenceService::class)->nextCommercialFolio();
+        return app(\App\Services\DocumentSequenceService::class)->nextSalesOrderFolio(
+            now(\App\Support\RegionalDateRange::timezone()),
+        );
     }
 
     /**

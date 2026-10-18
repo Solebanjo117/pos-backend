@@ -171,3 +171,26 @@ it('generates date scoped quote folios without consuming the commercial sequence
         ->and($sequences->nextCommercialFolio())
         ->toBe('0000000001');
 });
+
+it('generates daily sales order folios as YYMMDD followed by a four digit sequence', function (): void {
+    $sequences = app(DocumentSequenceService::class);
+
+    expect($sequences->nextSalesOrderFolio(CarbonImmutable::parse('2026-10-11 08:00:00', 'America/Panama')))
+        ->toBe('2610110001')
+        ->and($sequences->nextSalesOrderFolio(CarbonImmutable::parse('2026-10-11 23:59:00', 'America/Panama')))
+        ->toBe('2610110002')
+        ->and($sequences->nextSalesOrderFolio(CarbonImmutable::parse('2026-10-12 00:00:00', 'America/Panama')))
+        ->toBe('2610120001')
+        ->and($sequences->nextQuoteFolio(CarbonImmutable::parse('2026-10-11 08:00:00', 'America/Panama')))
+        ->toBe('202610110001')
+        ->and($sequences->nextCommercialFolio())
+        ->toBe('0000000001');
+});
+
+it('uses the regional date when numbering sales orders', function (): void {
+    \App\Models\Setting::set('regional_timezone', 'America/Panama');
+    $this->travelTo(CarbonImmutable::parse('2026-10-12 03:30:00', 'UTC'));
+
+    expect(\App\Models\SalesOrder::generateOrderNumber())->toBe('2610110001')
+        ->and(\App\Models\SalesOrder::generateOrderNumber())->toBe('2610110002');
+});
