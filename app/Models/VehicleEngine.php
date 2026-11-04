@@ -16,7 +16,11 @@ class VehicleEngine extends Model
         'model_id',
         'make_id',
         'engine_code',
+        'nickname',
         'displacement',
+        'valves',
+        'cam_type',
+        'cylinders',
         'fuel_type',
         'aspiration',
     ];
@@ -24,6 +28,7 @@ class VehicleEngine extends Model
     protected $casts = [
         'model_id' => 'integer',
         'make_id' => 'integer',
+        'cylinders' => 'integer',
     ];
 
     /**
@@ -84,6 +89,8 @@ class VehicleEngine extends Model
     {
         $parts = array_filter([
             $this->displacement,
+            $this->valves,
+            $this->cam_type,
             $this->engine_code,
             $this->fuel_type,
         ]);

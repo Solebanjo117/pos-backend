@@ -47,6 +47,10 @@ class VehicleConfigurationController extends Controller
                 'vehicle_engines.displacement',
                 'vehicle_engines.fuel_type',
                 'vehicle_engines.aspiration',
+                'vehicle_engines.valves',
+                'vehicle_engines.cam_type',
+                'vehicle_engines.cylinders',
+                'vehicle_engines.nickname',
             ]);
 
         $search = mb_strtolower(trim((string) $request->input('search', '')));
@@ -77,6 +81,9 @@ class VehicleConfigurationController extends Controller
                     ->orWhereRaw('LOWER(COALESCE(vehicle_engines.displacement, ?)) LIKE ?', ['', $like])
                     ->orWhereRaw('LOWER(COALESCE(vehicle_engines.fuel_type, ?)) LIKE ?', ['', $like])
                     ->orWhereRaw('LOWER(COALESCE(vehicle_engines.aspiration, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(vehicle_engines.valves, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(vehicle_engines.cam_type, ?)) LIKE ?', ['', $like])
+                    ->orWhereRaw('LOWER(COALESCE(vehicle_engines.nickname, ?)) LIKE ?', ['', $like])
                     ->orWhereExists(function ($vinQuery) use ($like): void {
                         $vinQuery->selectRaw('1')
                             ->from('vehicle_vins')
@@ -165,6 +172,10 @@ class VehicleConfigurationController extends Controller
                     'displacement' => $row->displacement,
                     'fuel_type' => $row->fuel_type,
                     'aspiration' => $row->aspiration,
+                    'valves' => $row->valves,
+                    'cam_type' => $row->cam_type,
+                    'cylinders' => $row->cylinders === null ? null : (int) $row->cylinders,
+                    'nickname' => $row->nickname,
                 ],
                 'vins' => $pairVins,
                 'vins_count' => $pairVins->count(),

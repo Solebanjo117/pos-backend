@@ -21,6 +21,23 @@ class VehicleEngineController extends Controller
         'Electric',
     ];
 
+    /**
+     * Reglas de la ficha técnica del motor (compartidas por store y update).
+     */
+    private const SPEC_RULES = [
+        'nickname' => 'nullable|string|max:50',
+        'valves' => ['nullable', 'string', 'regex:/^\s*\d{1,2}\s*[vV]?\s*$/'],
+        'cam_type' => 'nullable|string|in:SOHC,DOHC,OHV,sohc,dohc,ohv',
+        'cylinders' => 'nullable|integer|min:1|max:16',
+    ];
+
+    private const SPEC_MESSAGES = [
+        'valves.regex' => 'Las válvulas deben indicarse como número, por ejemplo 16 o 16V.',
+        'cam_type.in' => 'El árbol de levas debe ser SOHC, DOHC u OHV.',
+        'cylinders.min' => 'El número de cilindros debe estar entre 1 y 16.',
+        'cylinders.max' => 'El número de cilindros debe estar entre 1 y 16.',
+    ];
+
     public function __construct(private VehicleCatalogService $catalogService) {}
 
     /**
@@ -66,6 +83,9 @@ class VehicleEngineController extends Controller
                         ->orWhereRaw('LOWER(COALESCE(displacement, ?)) LIKE ?', ['', $like])
                         ->orWhereRaw('LOWER(COALESCE(fuel_type, ?)) LIKE ?', ['', $like])
                         ->orWhereRaw('LOWER(COALESCE(aspiration, ?)) LIKE ?', ['', $like])
+                        ->orWhereRaw('LOWER(COALESCE(valves, ?)) LIKE ?', ['', $like])
+                        ->orWhereRaw('LOWER(COALESCE(cam_type, ?)) LIKE ?', ['', $like])
+                        ->orWhereRaw('LOWER(COALESCE(nickname, ?)) LIKE ?', ['', $like])
                         ->orWhereHas('make', fn ($makeQuery) => $makeQuery->whereRaw('LOWER(name) LIKE ?', [$like]));
                 });
             }
@@ -132,7 +152,8 @@ class VehicleEngineController extends Controller
             'displacement' => 'nullable|string|max:20',
             'fuel_type' => 'nullable|string|max:50',
             'aspiration' => 'nullable|string|max:50',
-        ]);
+            ...self::SPEC_RULES,
+        ], self::SPEC_MESSAGES);
 
         $modelIds = $this->resolveModelIds($validated, false);
         $validated['make_id'] = $this->resolveMakeId($validated, $modelIds);
@@ -146,7 +167,8 @@ class VehicleEngineController extends Controller
             $this->assertFuelTypeIsAllowed($validated['fuel_type']);
         }
 
-        $this->ensureEngineCodeIsUniqueForMake($validated['engine_code'], $validated['make_id']);
+        $validated = $this->normalizeSpecs($validated);
+        $this->ensureEngineCodeIsUniqueForMake($validated['engine_code'], $validated['make_id'], null, $this->specIdentity($validated));
 
         $validated['model_id'] = $modelIds[0] ?? null;
         unset($validated['model_ids']);
@@ -191,7 +213,8 @@ class VehicleEngineController extends Controller
             'displacement' => 'nullable|string|max:20',
             'fuel_type' => 'nullable|string|max:50',
             'aspiration' => 'nullable|string|max:50',
-        ]);
+            ...self::SPEC_RULES,
+        ], self::SPEC_MESSAGES);
 
         $modelIds = $this->resolveModelIdsForUpdate($validated);
         $targetModelIds = $modelIds ?? $this->extractModelIdsFromEngine($engine);
@@ -209,11 +232,18 @@ class VehicleEngineController extends Controller
             $this->assertFuelTypeIsAllowed($validated['fuel_type']);
         }
 
+        $validated = $this->normalizeSpecs($validated);
+
         $targetEngineCode = array_key_exists('engine_code', $validated)
             ? $validated['engine_code']
             : $this->normalizeEngineCode($engine->engine_code);
 
-        $this->ensureEngineCodeIsUniqueForMake($targetEngineCode, $targetMakeId, (int) $engine->id);
+        $this->ensureEngineCodeIsUniqueForMake(
+            $targetEngineCode,
+            $targetMakeId,
+            (int) $engine->id,
+            $this->specIdentity(array_merge($engine->only(['displacement', 'valves', 'cam_type']), $validated)),
+        );
 
         $validated['make_id'] = $targetMakeId;
 
@@ -476,7 +506,10 @@ class VehicleEngineController extends Controller
     /**
      * @param  array<int>  $modelIds
      */
-    private function ensureEngineCodeIsUniqueForMake(string $engineCode, int $makeId, ?int $ignoreEngineId = null): void
+    /**
+     * @param  array{displacement: ?string, valves: ?string, cam_type: ?string}  $specs
+     */
+    private function ensureEngineCodeIsUniqueForMake(string $engineCode, int $makeId, ?int $ignoreEngineId, array $specs): void
     {
         $query = VehicleEngine::query()
             ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower(trim($engineCode))])
@@ -494,11 +527,59 @@ class VehicleEngineController extends Controller
             $query->where('id', '!=', $ignoreEngineId);
         }
 
-        if ($query->exists()) {
+        $sameSpecs = $query->get(['id', 'displacement', 'valves', 'cam_type'])
+            ->contains(fn (VehicleEngine $existing): bool => $this->specIdentity($existing->only(['displacement', 'valves', 'cam_type'])) === $specs);
+
+        if ($sameSpecs) {
             throw ValidationException::withMessages([
-                'engine_code' => ['Ya existe un motor con este codigo para la marca seleccionada.'],
+                'engine_code' => ['Ya existe un motor con este código y la misma ficha (cilindrada, válvulas y árbol de levas) para la marca seleccionada.'],
             ]);
         }
+    }
+
+    /**
+     * Ficha que distingue versiones de un mismo código de motor (p. ej. 6G72 12V y 24V).
+     *
+     * @param  array<string, mixed>  $data
+     * @return array{displacement: ?string, valves: ?string, cam_type: ?string}
+     */
+    private function specIdentity(array $data): array
+    {
+        $normalize = fn (mixed $value): ?string => ($value === null || trim((string) $value) === '')
+            ? null
+            : mb_strtoupper(str_replace(' ', '', (string) $value));
+
+        return [
+            'displacement' => $normalize($data['displacement'] ?? null),
+            'valves' => $normalize($data['valves'] ?? null),
+            'cam_type' => $normalize($data['cam_type'] ?? null),
+        ];
+    }
+
+    /**
+     * Normaliza la ficha técnica: "16" -> "16V", "dohc" -> "DOHC", apodo en mayúsculas sin espacios sobrantes.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function normalizeSpecs(array $validated): array
+    {
+        if (array_key_exists('valves', $validated)) {
+            $valves = mb_strtoupper(str_replace(' ', '', (string) ($validated['valves'] ?? '')));
+            $validated['valves'] = $valves === '' ? null : (str_ends_with($valves, 'V') ? $valves : $valves.'V');
+        }
+
+        if (array_key_exists('cam_type', $validated)) {
+            $camType = mb_strtoupper(trim((string) ($validated['cam_type'] ?? '')));
+            $validated['cam_type'] = $camType === '' ? null : $camType;
+        }
+
+        if (array_key_exists('nickname', $validated)) {
+            $nickname = mb_strtoupper(trim((string) ($validated['nickname'] ?? '')));
+            $validated['nickname'] = $nickname === '' ? null : $nickname;
+        }
+
+        return $validated;
     }
 
     private function serializeEngine(VehicleEngine $engine): VehicleEngine
