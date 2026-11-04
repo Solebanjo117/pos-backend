@@ -151,7 +151,7 @@ class VehicleImport extends BaseImport
         $makeId = $this->resolveIdOrCreateByName(VehicleMake::class, 'name', $row['make']);
         [$yearFrom, $yearTo] = $this->parseYearRangeFromRow($row);
 
-        $modelName = trim($row['model']);
+        $modelName = (string) preg_replace('/\s+/u', ' ', mb_strtoupper(trim($row['model'])));
         $generation = $this->nullIfEmpty($row['generation'] ?? null) ?? $this->nullIfEmpty($row['code'] ?? null);
         $model = VehicleModel::query()
             ->where('make_id', $makeId)
