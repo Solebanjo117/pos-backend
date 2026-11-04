@@ -15,6 +15,7 @@ use App\Http\Resources\ProductResource;
 use App\Models\Product;
 use App\Models\ProductPricing;
 use App\Models\ProductVehicleCompatibility;
+use App\Services\InventoryFifoService;
 use App\Services\ProductCodeService;
 use App\Services\ProductProfileService;
 use App\Services\ProductService;
@@ -91,6 +92,7 @@ class ProductController extends Controller
 
         // For archived products, variants are also soft-deleted — must withTrashed
         $query->with([
+            'defaultVariant.brand',
             'variants' => function ($q) use ($archived) {
                 if ($archived === 'true' || $archived === 'all') {
                     $q->withTrashed();
@@ -105,6 +107,7 @@ class ProductController extends Controller
                     $q->where('warehouse_id', $warehouseId);
                 }
             },
+            'variants.inventory.warehouse',
             'inventory' => function ($q) use ($warehouseId) {
                 if ($warehouseId) {
                     $q->where('warehouse_id', $warehouseId);
@@ -334,6 +337,24 @@ class ProductController extends Controller
 
             return $product;
         });
+
+        // Costo y precio FIFO de todas las variantes de la página en lote (antes: 2 consultas por variante).
+        $fifoItems = collect($products->items())->flatMap(
+            fn (Product $product) => $product->variants->flatMap(
+                fn ($variant) => $variant->relationLoaded('inventory')
+                    ? $variant->inventory->map(fn ($inventory): array => [
+                        'product_id' => (int) $variant->product_id,
+                        'variant_id' => (int) $variant->id,
+                        'warehouse_id' => (int) $inventory->warehouse_id,
+                    ])
+                    : []
+            )
+        );
+        // Se guarda en la petición base: el Form Request es otra instancia y el Resource recibe la base.
+        app('request')->attributes->set(
+            InventoryFifoService::PRICING_MAP_ATTRIBUTE,
+            app(InventoryFifoService::class)->currentFifoPricingMany($fifoItems),
+        );
 
         return ProductResource::collection($products);
     }
