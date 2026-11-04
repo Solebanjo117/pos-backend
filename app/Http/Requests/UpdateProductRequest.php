@@ -157,7 +157,7 @@ class UpdateProductRequest extends FormRequest
             'engine_id' => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
             'name' => 'sometimes|string|max:255',
             'description' => 'nullable|string',
-            'status' => 'sometimes|in:active,discontinued,pending',
+            'status' => 'sometimes|in:active,discontinued',
             'is_universal' => 'sometimes|boolean',
             'attributes' => 'sometimes|array',
             'attributes.*.name' => 'required_with:attributes|string|max:100',
@@ -231,7 +231,7 @@ class UpdateProductRequest extends FormRequest
         return [
             'sku_base.unique' => 'El SKU ya está en uso por otro producto',
             'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
-            'status.in' => 'El estado debe ser: active, discontinued o pending',
+            'status.in' => 'El estado debe ser: activo o discontinuado',
             'codes.*.code.required' => 'Cada código debe tener un valor.',
         ];
     }

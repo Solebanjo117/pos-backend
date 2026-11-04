@@ -87,7 +87,7 @@ class ProductVariantController extends Controller
                 'string',
                 'max:50',
             ],
-            'status' => 'nullable|in:active,discontinued,pending',
+            'status' => 'nullable|in:active,discontinued',
             'codes' => 'sometimes|array|max:25',
             'codes.*.id' => 'nullable|integer',
             'codes.*.code' => 'required|string|max:255',

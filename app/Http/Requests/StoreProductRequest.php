@@ -135,7 +135,7 @@ class StoreProductRequest extends FormRequest
             'extra_category_ids' => 'nullable|array',
             'extra_category_ids.*' => 'integer|distinct|exists:categories,id',
             'engine_id' => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
-            'status' => 'in:active,discontinued,pending',
+            'status' => 'in:active,discontinued',
             'attributes' => 'nullable|array',
             'attributes.*.name' => 'required_with:attributes|string|max:100',
             'attributes.*.value' => ['required_with:attributes', function (string $attribute, mixed $value, \Closure $fail) {
@@ -240,7 +240,7 @@ class StoreProductRequest extends FormRequest
             'pricing.cost_tax_rate.between' => 'La tasa de impuesto de costo debe estar entre 0 y 100%',
             'category_id.exists' => 'La categoría seleccionada no existe',
             'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
-            'status.in' => 'El estado debe ser: activo, discontinuado o pendiente',
+            'status.in' => 'El estado debe ser: activo o discontinuado',
             'initial_inventory.*.warehouse_id.required' => 'El almacén es obligatorio',
             'initial_inventory.*.warehouse_id.exists' => 'El almacén seleccionado no existe',
             'initial_inventory.*.stock_available.required' => 'El stock disponible es obligatorio',

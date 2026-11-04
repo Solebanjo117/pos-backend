@@ -21,7 +21,7 @@ class StoreProductVariantRequest extends FormRequest
             'brand_id' => 'required|exists:brands,id',
             'sku' => ['nullable', 'string', 'max:255'],
             'upc' => ['nullable', 'string', 'max:50'],
-            'status' => 'nullable|in:active,discontinued,pending',
+            'status' => 'nullable|in:active,discontinued',
             'codes' => 'nullable|array|max:25',
             'codes.*.id' => 'nullable|integer',
             'codes.*.code' => 'required|string|max:255',
