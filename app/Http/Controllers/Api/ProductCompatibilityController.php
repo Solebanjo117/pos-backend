@@ -7,14 +7,17 @@ use App\Models\Product;
 use App\Models\ProductVehicleCompatibility;
 use App\Models\VehicleChassis;
 use App\Models\VehicleEngine;
+use App\Models\VehicleModel;
 use App\Services\ProductService;
+use App\Services\VehicleCatalogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class ProductCompatibilityController extends Controller
 {
     public function __construct(
-        private ProductService $productService
+        private ProductService $productService,
+        private VehicleCatalogService $catalogService,
     ) {}
 
     /**
@@ -38,7 +41,7 @@ class ProductCompatibilityController extends Controller
     {
         $validated = $request->validate([
             'product_id' => 'required|exists:products,id',
-            'scope_type' => 'nullable|in:universal,make,model,chassis,engine,raw',
+            'scope_type' => 'nullable|in:universal,make,model,chassis,engine,raw,vehicle',
             'make_id' => 'nullable|exists:vehicle_makes,id',
             'model_id' => 'nullable|exists:vehicle_models,id',
             'engine_id' => 'nullable|exists:vehicle_engines,id',
@@ -58,6 +61,19 @@ class ProductCompatibilityController extends Controller
             ], 422);
         }
 
+        if ($scopeType === 'vehicle') {
+            $modelId = (int) ($validated['model_id'] ?? 0);
+            $engineId = (int) ($validated['engine_id'] ?? 0);
+
+            if (! $modelId || ! $engineId || ! $this->catalogService->configurationExists($modelId, $engineId)) {
+                return response()->json([
+                    'message' => 'El vehículo seleccionado no está registrado en el catálogo (modelo y motor).',
+                ], 422);
+            }
+
+            $validated['make_id'] = VehicleModel::query()->whereKey($modelId)->value('make_id');
+        }
+
         if ($scopeType === 'raw' && trim((string) ($validated['raw_vehicle_text'] ?? '')) === '') {
             return response()->json([
                 'message' => 'Se requiere texto de carro para compatibilidad raw.',
@@ -67,7 +83,11 @@ class ProductCompatibilityController extends Controller
         // Check if compatibility already exists (by engine or chassis)
         $query = ProductVehicleCompatibility::where('product_id', $validated['product_id']);
 
-        if ($scopeType === 'engine') {
+        if ($scopeType === 'vehicle') {
+            $query->where('scope_type', 'vehicle')
+                ->where('model_id', $validated['model_id'])
+                ->where('engine_id', $validated['engine_id']);
+        } elseif ($scopeType === 'engine') {
             $query->where('engine_id', $validated['engine_id']);
         } elseif ($scopeType === 'chassis') {
             $query->where('chassis_id', $validated['chassis_id']);
@@ -184,6 +204,8 @@ class ProductCompatibilityController extends Controller
                     $context['chassis_id'],
                     $context['engine_id'],
                     $context['model_id'],
+                    $context['model_id'],
+                    $context['model_id'],
                     $context['make_id'],
                 ])
                 ->orderBy('fitment_rank');
@@ -191,9 +213,15 @@ class ProductCompatibilityController extends Controller
 
         // Filter by year if provided
         if (isset($validated['year'])) {
-            $query->whereHas('vehicleCompatibility.engine.model', function ($q) use ($validated) {
+            $inYear = function ($q) use ($validated) {
                 $q->where('year_from', '<=', $validated['year'])
                     ->where('year_to', '>=', $validated['year']);
+            };
+            $query->where(function ($years) use ($inYear): void {
+                $years->whereHas('vehicleCompatibility.engine.model', $inYear)
+                    ->orWhereHas('vehicleCompatibility', function ($compatibility) use ($inYear): void {
+                        $compatibility->where('scope_type', 'vehicle')->whereHas('model', $inYear);
+                    });
             });
         }
 
@@ -295,19 +323,42 @@ class ProductCompatibilityController extends Controller
                 });
             }
 
+            if ($context['make_id']) {
+                // Vehículo exacto (modelo + motor) de la marca buscada.
+                $nested->orWhere(function ($scope) use ($context): void {
+                    $scope->where('scope_type', 'vehicle')->where('make_id', $context['make_id']);
+                });
+            }
+
             if ($context['model_id']) {
                 // Model-scoped all_engines / all_chassis only match when model_id coincides.
                 $nested->orWhere(function ($scope) use ($context): void {
-                    $scope->where('scope_type', 'model')->where('model_id', $context['model_id']);
-                })->orWhereHas('engine', function ($engine) use ($context): void {
-                    $engine->where('model_id', $context['model_id']);
-                })->orWhereHas('chassis', function ($chassis) use ($context): void {
-                    $chassis->where('model_id', $context['model_id']);
+                    $scope->whereIn('scope_type', ['model', 'vehicle'])->where('model_id', $context['model_id']);
+                })->orWhere(function ($legacy) use ($context): void {
+                    $legacy->where(fn ($scope) => $scope->whereNull('scope_type')->orWhere('scope_type', '!=', 'vehicle'))
+                        ->where(function ($byParent) use ($context): void {
+                            $byParent->whereHas('engine', function ($engine) use ($context): void {
+                                $engine->where('model_id', $context['model_id']);
+                            })->orWhereHas('chassis', function ($chassis) use ($context): void {
+                                $chassis->where('model_id', $context['model_id']);
+                            });
+                        });
                 });
             }
 
             if ($context['engine_id']) {
-                $nested->orWhere('engine_id', $context['engine_id']);
+                // Un vehículo exacto solo coincide por motor si además coincide el modelo (cuando se conoce).
+                $nested->orWhere(function ($scope) use ($context): void {
+                    $scope->where('engine_id', $context['engine_id'])
+                        ->where(function ($vehicle) use ($context): void {
+                            $vehicle->whereNull('scope_type')->orWhere('scope_type', '!=', 'vehicle');
+                            if ($context['model_id']) {
+                                $vehicle->orWhere('model_id', $context['model_id']);
+                            } else {
+                                $vehicle->orWhere('scope_type', 'vehicle');
+                            }
+                        });
+                });
             }
 
             if ($context['chassis_id']) {
@@ -323,18 +374,21 @@ CASE
     WHEN EXISTS (
         SELECT 1 FROM product_vehicle_compatibility pvc
         WHERE pvc.product_id = products.id
-        AND ((pvc.chassis_id = ?) OR (pvc.engine_id = ?))
+        AND ((pvc.chassis_id = ?) OR (
+            pvc.engine_id = ?
+            AND (COALESCE(pvc.scope_type, '') <> 'vehicle' OR pvc.model_id = ? OR CAST(? AS INTEGER) IS NULL)
+        ))
     ) THEN 1
     WHEN EXISTS (
         SELECT 1 FROM product_vehicle_compatibility pvc
         WHERE pvc.product_id = products.id
-        AND pvc.scope_type = 'model'
+        AND pvc.scope_type IN ('model', 'vehicle')
         AND pvc.model_id = ?
     ) THEN 2
     WHEN EXISTS (
         SELECT 1 FROM product_vehicle_compatibility pvc
         WHERE pvc.product_id = products.id
-        AND pvc.scope_type = 'make'
+        AND pvc.scope_type IN ('make', 'vehicle')
         AND pvc.make_id = ?
     ) THEN 3
     WHEN products.is_universal = true OR EXISTS (

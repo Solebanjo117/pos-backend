@@ -177,13 +177,24 @@ class ProductController extends Controller
         // Vehicle Context Filter
         $engineId = $request->has('vehicle_engine_id') ? (int) $request->get('vehicle_engine_id') : null;
         $chassisId = $request->has('vehicle_chassis_id') ? (int) $request->get('vehicle_chassis_id') : null;
+        $vehicleModelId = $request->filled('vehicle_model_id') ? (int) $request->get('vehicle_model_id') : null;
+
+        // Coincidencia por motor: un vehículo exacto (modelo + motor) solo cuenta si el modelo también coincide.
+        $matchesEngine = function ($q) use ($engineId, $vehicleModelId): void {
+            $q->where('engine_id', $engineId);
+            if ($vehicleModelId) {
+                $q->where(function ($scope) use ($vehicleModelId): void {
+                    $scope->whereNull('scope_type')
+                        ->orWhere('scope_type', '!=', 'vehicle')
+                        ->orWhere('model_id', $vehicleModelId);
+                });
+            }
+        };
 
         if ($engineId || $chassisId) {
             // Mark exact fit by context (engine and/or chassis).
             if ($engineId) {
-                $query->withExists(['compatibleEngines as is_exact_fit_engine' => function ($q) use ($engineId) {
-                    $q->where('vehicle_engines.id', $engineId);
-                }]);
+                $query->withExists(['vehicleCompatibility as is_exact_fit_engine' => $matchesEngine]);
             }
 
             if ($chassisId) {
@@ -198,11 +209,9 @@ class ProductController extends Controller
             // Strict filter (default true): exact fit OR universal.
             $strictFitment = $request->boolean('strict_fitment', true);
             if ($strictFitment) {
-                $query->where(function ($q) use ($engineId, $chassisId) {
+                $query->where(function ($q) use ($engineId, $chassisId, $matchesEngine) {
                     if ($engineId) {
-                        $q->whereHas('compatibleEngines', function ($sub) use ($engineId) {
-                            $sub->where('vehicle_engines.id', $engineId);
-                        });
+                        $q->whereHas('vehicleCompatibility', $matchesEngine);
                     }
 
                     if ($chassisId) {

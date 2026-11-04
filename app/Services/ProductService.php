@@ -468,7 +468,44 @@ class ProductService
 
     private function syncVehicleCompatibility(Product $product, array $compatibility): void
     {
-        $product->vehicleCompatibility()->delete();
+        // Con keep_ids la pantalla indica qué registros existentes se conservan; el resto se borra.
+        // Sin keep_ids se mantiene el comportamiento anterior: se reemplaza todo.
+        $keepIds = $compatibility['keep_ids'] ?? null;
+        if (is_array($keepIds)) {
+            $product->vehicleCompatibility()
+                ->whereNotIn('id', collect($keepIds)->map(fn ($id): int => (int) $id)->all())
+                ->delete();
+        } else {
+            $product->vehicleCompatibility()->delete();
+        }
+
+        $vehiclePairs = collect($compatibility['vehicles'] ?? [])
+            ->map(fn ($vehicle): array => [
+                'model_id' => (int) ($vehicle['model_id'] ?? 0),
+                'engine_id' => (int) ($vehicle['engine_id'] ?? 0),
+            ])
+            ->filter(fn (array $pair): bool => $pair['model_id'] > 0 && $pair['engine_id'] > 0)
+            ->unique(fn (array $pair): string => $pair['model_id'].':'.$pair['engine_id'])
+            ->values();
+
+        foreach ($vehiclePairs as $pair) {
+            $alreadyAssigned = $product->vehicleCompatibility()
+                ->where('scope_type', 'vehicle')
+                ->where('model_id', $pair['model_id'])
+                ->where('engine_id', $pair['engine_id'])
+                ->exists();
+
+            if ($alreadyAssigned) {
+                continue;
+            }
+
+            $product->vehicleCompatibility()->create([
+                'scope_type' => 'vehicle',
+                'make_id' => VehicleModel::query()->whereKey($pair['model_id'])->value('make_id'),
+                'model_id' => $pair['model_id'],
+                'engine_id' => $pair['engine_id'],
+            ]);
+        }
 
         $makeIds = collect($compatibility['makes'] ?? [])
             ->pluck('make_id')
@@ -1590,12 +1627,12 @@ class ProductService
         // 3. Collect vehicle labels from compatibility records
         $vehicleLabels = collect();
         $explicitVehicles = ProductVehicleCompatibility::where('product_id', $product->id)
-            ->with('engine.model.make')
+            ->with(['engine.model.make', 'model.make'])
             ->get();
 
         foreach ($explicitVehicles as $compat) {
             $engine = $compat->engine;
-            $model = $engine?->model;
+            $model = $compat->scope_type === 'vehicle' ? $compat->model : $engine?->model;
             $make = $model?->make;
 
             if (! $make || ! $model) {
@@ -1872,6 +1909,8 @@ class ProductService
                     'model_id' => $compatibility->model_id,
                     'engine_id' => $compatibility->engine_id,
                     'chassis_id' => $compatibility->chassis_id,
+                    'raw_vehicle_key' => $compatibility->raw_vehicle_key,
+                    'raw_vehicle_text' => $compatibility->raw_vehicle_text,
                     'notes' => $compatibility->notes,
                     'all_engines' => (bool) $compatibility->all_engines,
                     'all_chassis' => (bool) $compatibility->all_chassis,

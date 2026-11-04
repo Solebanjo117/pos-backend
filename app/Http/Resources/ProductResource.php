@@ -179,6 +179,7 @@ class ProductResource extends JsonResource
                 $label = trim(implode(' ', array_filter([
                     $make?->name,
                     $model?->name,
+                    $model?->generation,
                     $years,
                 ])));
 

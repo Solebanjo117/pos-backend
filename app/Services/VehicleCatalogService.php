@@ -389,7 +389,7 @@ class VehicleCatalogService
         });
     }
 
-    private function configurationExists(int $modelId, int $engineId): bool
+    public function configurationExists(int $modelId, int $engineId): bool
     {
         return $this->configurationPairsQuery()
             ->where('model_id', $modelId)

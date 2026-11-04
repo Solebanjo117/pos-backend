@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Services\VehicleCatalogService;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class UpdateProductRequest extends FormRequest
 {
@@ -207,6 +209,11 @@ class UpdateProductRequest extends FormRequest
             'vehicle_compatibility.all_engines' => 'sometimes|boolean',
             'vehicle_compatibility.all_chassis' => 'sometimes|boolean',
             'vehicle_compatibility.model_id' => 'sometimes|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles' => 'nullable|array|max:500',
+            'vehicle_compatibility.vehicles.*.model_id' => 'required|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles.*.engine_id' => 'required|integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.keep_ids' => 'nullable|array',
+            'vehicle_compatibility.keep_ids.*' => 'integer',
 
             // Pricing (all optional for update)
             'pricing' => 'sometimes|array',
@@ -226,6 +233,25 @@ class UpdateProductRequest extends FormRequest
     /**
      * Custom error messages.
      */
+    public function after(): array
+    {
+        return [function (Validator $validator): void {
+            $catalog = app(VehicleCatalogService::class);
+
+            foreach ((array) $this->input('vehicle_compatibility.vehicles', []) as $index => $vehicle) {
+                $modelId = (int) ($vehicle['model_id'] ?? 0);
+                $engineId = (int) ($vehicle['engine_id'] ?? 0);
+
+                if ($modelId > 0 && $engineId > 0 && ! $catalog->configurationExists($modelId, $engineId)) {
+                    $validator->errors()->add(
+                        "vehicle_compatibility.vehicles.{$index}",
+                        'El vehículo seleccionado no está registrado en el catálogo (modelo y motor).',
+                    );
+                }
+            }
+        }];
+    }
+
     public function messages(): array
     {
         return [

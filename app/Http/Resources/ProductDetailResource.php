@@ -205,6 +205,9 @@ class ProductDetailResource extends JsonResource
                     'chassis_id' => $comp->chassis_id,
                     'make' => $comp->make?->name ?? $comp->model?->make?->name ?? $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
                     'model' => $comp->model?->name ?? $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
+                    'generation' => $comp->model?->generation ?? $comp->engine?->model?->generation ?? null,
+                    'engine_code' => $comp->engine?->engine_code,
+                    'raw_vehicle_text' => $comp->raw_vehicle_text,
                     'year_range' => $comp->model?->year_range ?? $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
                     'engine' => $comp->engine?->full_description,
                     'chassis' => $comp->chassis ? [

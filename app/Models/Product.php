@@ -481,6 +481,18 @@ class Product extends Model
                                     });
                             });
 
+                            // 2a. OR Matches an exact vehicle (model + engine) by its model, generation or make
+                            $wordMatchQuery->orWhereHas('vehicleCompatibility', function ($vq) use ($w, $operator) {
+                                $vq->where('scope_type', 'vehicle')
+                                    ->whereHas('model', function ($mq) use ($w, $operator) {
+                                        $mq->where('name', $operator, $w)
+                                            ->orWhere('generation', $operator, $w)
+                                            ->orWhereHas('make', function ($mkq) use ($w, $operator) {
+                                                $mkq->where('name', $operator, $w);
+                                            });
+                                    });
+                            });
+
                             // 2b. OR Matches Chassis Info
                             $wordMatchQuery->orWhereHas('compatibleChassis', function ($cq) use ($w, $operator) {
                                 $cq->where('code', $operator, $w)

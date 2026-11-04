@@ -3,7 +3,9 @@
 namespace App\Http\Requests;
 
 use App\Helpers\TaxRateHelper;
+use App\Services\VehicleCatalogService;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class StoreProductRequest extends FormRequest
 {
@@ -206,6 +208,11 @@ class StoreProductRequest extends FormRequest
             'vehicle_compatibility.all_engines' => 'nullable|boolean',
             'vehicle_compatibility.all_chassis' => 'nullable|boolean',
             'vehicle_compatibility.model_id' => 'nullable|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles' => 'nullable|array|max:500',
+            'vehicle_compatibility.vehicles.*.model_id' => 'required|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles.*.engine_id' => 'required|integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.keep_ids' => 'nullable|array',
+            'vehicle_compatibility.keep_ids.*' => 'integer',
             'vehicle_chassis' => 'nullable|array',
             'vehicle_chassis.*' => 'integer|exists:vehicle_chassis,id',
             'vehicle_makes' => 'nullable|array',
@@ -229,6 +236,25 @@ class StoreProductRequest extends FormRequest
     /**
      * Custom error messages.
      */
+    public function after(): array
+    {
+        return [function (Validator $validator): void {
+            $catalog = app(VehicleCatalogService::class);
+
+            foreach ((array) $this->input('vehicle_compatibility.vehicles', []) as $index => $vehicle) {
+                $modelId = (int) ($vehicle['model_id'] ?? 0);
+                $engineId = (int) ($vehicle['engine_id'] ?? 0);
+
+                if ($modelId > 0 && $engineId > 0 && ! $catalog->configurationExists($modelId, $engineId)) {
+                    $validator->errors()->add(
+                        "vehicle_compatibility.vehicles.{$index}",
+                        'El vehículo seleccionado no está registrado en el catálogo (modelo y motor).',
+                    );
+                }
+            }
+        }];
+    }
+
     public function messages(): array
     {
         return [
