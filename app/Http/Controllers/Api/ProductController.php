@@ -111,6 +111,10 @@ class ProductController extends Controller
                 }
             },
             'codes',
+            'vehicleCompatibility.make',
+            'vehicleCompatibility.model.make',
+            'vehicleCompatibility.engine.model.make',
+            'vehicleCompatibility.chassis.model.make',
         ]);
 
         // ProductLine Filter
