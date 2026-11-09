@@ -600,6 +600,38 @@ class ProductService
                 'all_chassis' => true,
             ]);
         }
+
+        // Carro principal: el que indica la pantalla o, si no, se conserva / se toma el más antiguo.
+        ProductVehicleCompatibility::ensureDefault(
+            (int) $product->id,
+            $this->resolveDefaultCompatibilityId($product, $compatibility['default'] ?? null),
+        );
+    }
+
+    /**
+     * El principal llega como {id} (registro ya guardado) o {model_id, engine_id} (vehículo exacto).
+     */
+    private function resolveDefaultCompatibilityId(Product $product, mixed $default): ?int
+    {
+        if (! is_array($default)) {
+            return null;
+        }
+
+        if (! empty($default['id'])) {
+            return (int) $default['id'];
+        }
+
+        if (! empty($default['model_id']) && ! empty($default['engine_id'])) {
+            $id = $product->vehicleCompatibility()
+                ->where('scope_type', 'vehicle')
+                ->where('model_id', (int) $default['model_id'])
+                ->where('engine_id', (int) $default['engine_id'])
+                ->value('id');
+
+            return $id ? (int) $id : null;
+        }
+
+        return null;
     }
 
     private function normalizePercentValue(mixed $value): ?int

@@ -214,6 +214,10 @@ class UpdateProductRequest extends FormRequest
             'vehicle_compatibility.vehicles.*.engine_id' => 'required|integer|exists:vehicle_engines,id',
             'vehicle_compatibility.keep_ids' => 'nullable|array',
             'vehicle_compatibility.keep_ids.*' => 'integer',
+            'vehicle_compatibility.default' => 'nullable|array',
+            'vehicle_compatibility.default.id' => 'nullable|integer',
+            'vehicle_compatibility.default.model_id' => 'nullable|integer',
+            'vehicle_compatibility.default.engine_id' => 'nullable|integer',
 
             // Pricing (all optional for update)
             'pricing' => 'sometimes|array',

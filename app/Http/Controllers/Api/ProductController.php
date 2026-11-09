@@ -967,6 +967,8 @@ class ProductController extends Controller
         // Get compatibility records with chassis data
         $compatibility = ProductVehicleCompatibility::where('product_id', $product->id)
             ->with(['make', 'model.make', 'engine.model.make', 'chassis.model.make'])
+            ->orderByDesc('is_default')
+            ->orderBy('id')
             ->get()
             ->map(function ($comp) {
                 $makeName = $comp->make?->name
@@ -989,6 +991,7 @@ class ProductController extends Controller
                     'chassis' => null,
                     'all_engines' => (bool) $comp->all_engines,
                     'all_chassis' => (bool) $comp->all_chassis,
+                    'is_default' => (bool) $comp->is_default,
                     'notes' => $comp->notes,
                 ];
 

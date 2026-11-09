@@ -240,7 +240,10 @@ class Product extends Model
      */
     public function vehicleCompatibility(): HasMany
     {
-        return $this->hasMany(ProductVehicleCompatibility::class);
+        // El carro principal siempre primero; el resto en el orden en que se agregaron.
+        return $this->hasMany(ProductVehicleCompatibility::class)
+            ->orderByDesc('is_default')
+            ->orderBy('id');
     }
 
     /**

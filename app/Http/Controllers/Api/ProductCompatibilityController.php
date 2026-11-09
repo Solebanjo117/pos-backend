@@ -28,6 +28,8 @@ class ProductCompatibilityController extends Controller
     {
         $compatibility = ProductVehicleCompatibility::where('product_id', $productId)
             ->with(['make', 'model.make', 'engine.model.make', 'chassis.model.make'])
+            ->orderByDesc('is_default')
+            ->orderBy('id')
             ->get();
 
         return response()->json(['data' => $compatibility]);

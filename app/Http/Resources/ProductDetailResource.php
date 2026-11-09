@@ -218,6 +218,7 @@ class ProductDetailResource extends JsonResource
                     ] : null,
                     'all_engines' => (bool) $comp->all_engines,
                     'all_chassis' => (bool) $comp->all_chassis,
+                    'is_default' => (bool) $comp->is_default,
                     'notes' => $comp->notes,
                 ])
             ),

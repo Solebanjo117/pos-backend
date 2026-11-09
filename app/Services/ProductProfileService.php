@@ -479,6 +479,7 @@ class ProductProfileService
                 ] : null,
                 'all_engines' => (bool) $compatibility->all_engines,
                 'all_chassis' => (bool) $compatibility->all_chassis,
+                'is_default' => (bool) $compatibility->is_default,
                 'notes' => $compatibility->notes,
             ])
             ->values();
