@@ -1,6 +1,8 @@
 <?php
 
 use App\Models\Brand;
+use App\Models\Product;
+use App\Models\ProductVariant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -64,4 +66,21 @@ it('changes the tier when the brand is updated without touching other fields', f
     expect($brand->tier)->toBe('premium')
         ->and($brand->website)->toBe('https://ejemplo.com')
         ->and($brand->logo_url)->toBe('https://ejemplo.com/logo.png');
+});
+
+it('includes the brand tier in the product variants list', function (): void {
+    $brand = Brand::query()->create(['name' => 'Marca Variante', 'tier' => 'premium']);
+    $product = Product::query()->create(['name' => 'Producto Gama', 'sku_base' => 'GAMA-1', 'status' => 'active']);
+    $variant = ProductVariant::query()->create([
+        'product_id' => $product->id,
+        'brand_id' => $brand->id,
+        'sku' => 'GAMA-1-V',
+        'status' => 'active',
+    ]);
+
+    $this->getJson("/api/v1/products/{$product->id}/variants")
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $variant->id)
+        ->assertJsonPath('data.0.brand.name', 'Marca Variante')
+        ->assertJsonPath('data.0.brand.tier', 'premium');
 });

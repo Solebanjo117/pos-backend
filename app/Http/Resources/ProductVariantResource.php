@@ -36,6 +36,8 @@ class ProductVariantResource extends JsonResource
                 'id' => $this->brand?->id,
                 'name' => $this->brand?->name,
                 'logo_url' => $this->brand?->logo_url ?? null,
+                // Gama de la marca (standard | premium); null si la marca se cargó sin esa columna.
+                'tier' => $this->brand?->getAttributes()['tier'] ?? null,
             ],
 
             'status' => $this->status,
