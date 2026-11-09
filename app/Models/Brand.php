@@ -12,10 +12,18 @@ class Brand extends Model
 {
     use HasFactory;
 
+    /** Gamas posibles de una marca: cada marca es una sola de las dos. */
+    public const TIER_STANDARD = 'standard';
+
+    public const TIER_PREMIUM = 'premium';
+
+    public const TIERS = [self::TIER_STANDARD, self::TIER_PREMIUM];
+
     protected $fillable = [
         'name',
         'normalized_name',
         'description',
+        'tier',
         'logo_url',
         'website',
         'status',
@@ -33,8 +41,13 @@ class Brand extends Model
         return Str::lower((string) preg_replace('/\s+/u', ' ', trim($name)));
     }
 
+    protected $attributes = [
+        'tier' => self::TIER_STANDARD,
+    ];
+
     protected $casts = [
         'status' => 'string',
+        'tier' => 'string',
     ];
 
     /**

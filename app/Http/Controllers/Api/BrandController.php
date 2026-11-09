@@ -61,7 +61,7 @@ class BrandController extends Controller
     public function all(): JsonResponse
     {
         $brands = Brand::orderBy('name')
-            ->get(['id', 'name', 'logo_url']);
+            ->get(['id', 'name', 'logo_url', 'tier']);
 
         return response()->json(['data' => $brands]);
     }
