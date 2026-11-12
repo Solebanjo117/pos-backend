@@ -232,15 +232,18 @@ class ProductMergeService
         // Vehículos compatibles: se agregan los que falten. El carro por defecto del producto repetido
         // solo se conserva si el producto conservado no tiene uno.
         $compatibilityKey = fn ($row): string => json_encode(array_map(fn ($column) => $row->{$column} ?? null, self::COMPATIBILITY_KEY));
+        // (is_default no existe en bases sin la migración del carro por defecto).
+        $hasDefaultColumn = Schema::hasColumn('product_vehicle_compatibility', 'is_default');
         $survivorVehicles = DB::table('product_vehicle_compatibility')->where('product_id', $survivorId)->get();
-        $survivorHasDefaultVehicle = $survivorVehicles->contains(fn ($row) => (bool) $row->is_default);
+        $survivorHasDefaultVehicle = $survivorVehicles->contains(fn ($row) => (bool) ($row->is_default ?? false));
         $survivorKeys = $survivorVehicles->map($compatibilityKey)->all();
         DB::table('product_vehicle_compatibility')->where('product_id', $duplicateId)->get()
             ->reject(fn ($row) => in_array($compatibilityKey($row), $survivorKeys, true))
-            ->each(function ($row) use ($survivorId, &$survivorHasDefaultVehicle): void {
-                $isDefault = (bool) $row->is_default && ! $survivorHasDefaultVehicle;
+            ->each(function ($row) use ($survivorId, $hasDefaultColumn, &$survivorHasDefaultVehicle): void {
+                $isDefault = (bool) ($row->is_default ?? false) && ! $survivorHasDefaultVehicle;
                 $survivorHasDefaultVehicle = $survivorHasDefaultVehicle || $isDefault;
-                DB::table('product_vehicle_compatibility')->where('id', $row->id)->update(['product_id' => $survivorId, 'is_default' => $isDefault]);
+                DB::table('product_vehicle_compatibility')->where('id', $row->id)
+                    ->update(['product_id' => $survivorId, ...($hasDefaultColumn ? ['is_default' => $isDefault] : [])]);
             });
 
         $survivorCategory = Product::query()->whereKey($survivorId)->value('category_id');
