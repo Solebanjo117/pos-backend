@@ -182,12 +182,57 @@ class ProductMergeService
         });
     }
 
-    private function moveVariants(int $survivorId, int $duplicateId): int
+    /**
+     * Mueve marcas puntuales (variantes) a otro producto, con su existencia, precios e historial.
+     * Sirve para corregir una marca cargada en el producto equivocado.
+     *
+     * @param  array<int, int>  $variantIds
+     */
+    public function moveVariantsTo(int $targetProductId, array $variantIds): int
+    {
+        return DB::transaction(function () use ($targetProductId, $variantIds): int {
+            $target = Product::query()->lockForUpdate()->findOrFail($targetProductId);
+            $variants = ProductVariant::query()->with('brand:id,name')->whereIn('id', $variantIds)->lockForUpdate()->get();
+            if ($variants->count() !== count(array_unique($variantIds))) {
+                throw new \RuntimeException('Alguna de las marcas indicadas no existe o está eliminada.');
+            }
+
+            $targetBrands = ProductVariant::withTrashed()->where('product_id', $targetProductId)->pluck('brand_id')->map(fn ($id) => (string) $id)->all();
+            $clash = $variants->filter(fn (ProductVariant $variant) => in_array((string) $variant->brand_id, $targetBrands, true));
+            if ($clash->isNotEmpty()) {
+                throw new \RuntimeException('El producto destino ya tiene la marca '.$clash->map(fn ($variant) => $variant->brand?->name)->implode(', ').'.');
+            }
+
+            $moved = 0;
+            foreach ($variants->groupBy('product_id') as $sourceProductId => $sourceVariants) {
+                $moved += $this->moveVariants($targetProductId, (int) $sourceProductId, $sourceVariants->pluck('id')->all());
+            }
+
+            activity()
+                ->performedOn($target)
+                ->withProperties(['moved_variants' => $variants->map(fn ($variant) => [
+                    'id' => $variant->id,
+                    'from_product_id' => $variant->product_id,
+                    'brand' => $variant->brand?->name,
+                    'sku' => $variant->sku,
+                ])->values()->all()])
+                ->log('Marcas movidas a este producto');
+
+            return $moved;
+        });
+    }
+
+    /**
+     * @param  array<int, int>|null  $onlyVariantIds
+     */
+    private function moveVariants(int $survivorId, int $duplicateId, ?array $onlyVariantIds = null): int
     {
         $survivorHasDefault = ProductVariant::query()->where('product_id', $survivorId)->where('is_default', true)->exists();
         $survivorBrands = ProductVariant::withTrashed()->where('product_id', $survivorId)->pluck('brand_id')->map(fn ($id) => (string) $id)->all();
 
-        $variants = ProductVariant::withTrashed()->where('product_id', $duplicateId)->get();
+        $variants = ProductVariant::withTrashed()->where('product_id', $duplicateId)
+            ->when($onlyVariantIds !== null, fn ($query) => $query->whereIn('id', $onlyVariantIds))
+            ->get();
         $moved = 0;
         foreach ($variants as $variant) {
             // Solo una variante ya eliminada puede chocar aquí (las activas se validaron antes): queda en el producto repetido.
