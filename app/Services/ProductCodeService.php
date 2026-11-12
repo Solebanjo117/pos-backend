@@ -128,9 +128,32 @@ class ProductCodeService
      */
     private function sync(Product $product, ?ProductVariant $variant, array $codes): void
     {
+        // Número de parte compartido: si el producto tiene varias marcas (variantes) que comparten su
+        // número de parte (sku_base), ese código es del PRODUCTO. Ninguna variante se lo apropia, así
+        // las marcas no chocan entre sí, y cada variante conserva su SKU.
+        $inheritedCode = null;
+        $sharedPartNumber = $variant ? $this->sharedPartNumber($product) : '';
+        if ($sharedPartNumber !== '') {
+            $codes = collect($codes)
+                ->reject(function (array $item) use ($sharedPartNumber, &$inheritedCode): bool {
+                    $isShared = $this->normalizer->normalize((string) ($item['code'] ?? '')) === $sharedPartNumber;
+                    if ($isShared) {
+                        $inheritedCode = trim((string) $item['code']);
+                    }
+
+                    return $isShared;
+                })
+                ->values()
+                ->all();
+        }
+
         $normalizedCodes = $this->normalizePayload($codes);
 
-        DB::transaction(function () use ($product, $variant, $normalizedCodes): void {
+        DB::transaction(function () use ($product, $variant, $normalizedCodes, $inheritedCode): void {
+            if ($inheritedCode !== null) {
+                $this->ensureProductLevelCode($product, $inheritedCode);
+            }
+
             $ownerQuery = ProductCode::query()
                 ->active()
                 ->where('product_id', $product->id)
@@ -209,27 +232,73 @@ class ProductCodeService
                 throw $exception;
             }
 
-            $this->syncLegacyAliases($product, $variant, $normalizedCodes);
+            $this->syncLegacyAliases($product, $variant, $normalizedCodes, $inheritedCode);
         });
+    }
+
+    /**
+     * Número de parte del producto (normalizado) cuando lo comparten sus marcas: el producto tiene
+     * más de una variante y su sku_base no está vacío. Cadena vacía si no aplica.
+     */
+    private function sharedPartNumber(Product $product): string
+    {
+        $partNumber = $this->normalizer->normalize((string) $product->sku_base);
+        if ($partNumber === '') {
+            return '';
+        }
+
+        return $product->variants()->count() > 1 ? $partNumber : '';
+    }
+
+    /**
+     * Registra el número de parte como código del producto (sin variante) si todavía no existe un
+     * código activo igual. Si lo tiene otro producto (posible duplicado), no se toca: la búsqueda
+     * sigue encontrándolo por el sku_base.
+     */
+    private function ensureProductLevelCode(Product $product, string $code): void
+    {
+        $normalized = $this->normalizer->normalize($code);
+        if (ProductCode::query()->active()->where('normalized_code', $normalized)->exists()) {
+            return;
+        }
+
+        $hasPrimary = ProductCode::query()
+            ->active()
+            ->where('product_id', $product->id)
+            ->whereNull('variant_id')
+            ->where('is_primary', true)
+            ->exists();
+
+        ProductCode::query()->create([
+            'product_id' => $product->id,
+            'variant_id' => null,
+            'code' => $code,
+            'normalized_code' => $normalized,
+            'type' => 'sku',
+            'status' => 'active',
+            'is_primary' => ! $hasPrimary,
+            'metadata' => ['shared_part_number' => true],
+        ]);
     }
 
     /**
      * @param  array<int, array<string, mixed>>  $codes
      */
-    private function syncLegacyAliases(Product $product, ?ProductVariant $variant, array $codes): void
+    private function syncLegacyAliases(Product $product, ?ProductVariant $variant, array $codes, ?string $inheritedCode = null): void
     {
         $primary = collect($codes)->firstWhere('is_primary', true);
         $upc = collect($codes)->firstWhere('type', 'upc');
 
         if ($variant) {
+            // Con número de parte compartido, el SKU de la variante sigue siendo ese número.
             $variant->forceFill([
-                'sku' => $primary['code'] ?? null,
+                'sku' => $inheritedCode ?? $primary['code'] ?? null,
                 'upc' => $upc['code'] ?? null,
             ])->save();
 
             if ($variant->is_default) {
                 $product->forceFill([
-                    'sku_base' => $primary['code'] ?? null,
+                    'sku_base' => $inheritedCode ?? $primary['code'] ?? null,
                 ])->save();
             }
 
