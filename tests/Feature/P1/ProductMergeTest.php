@@ -141,3 +141,30 @@ it('only reports in dry run and merges with --apply, leaving conflicting groups 
     expect(Product::pluck('id')->sort()->values()->all())->toBe([$kept->id, $clashA->id, $clashB->id])
         ->and($kept->variants()->count())->toBe(3);
 });
+
+it('moves brands loaded in the wrong product to the right one, with their stock', function () {
+    $wrong = mergePart('Terminal Accent', '56540-22000', ['CTR', 'ENDO', 'JPN']);
+    $right = mergePart('Terminal Accent', '56540-25000', ['555']);
+    $endo = $wrong->variants()->where('brand_id', $this->brands['ENDO']->id)->first();
+    $jpn = $wrong->variants()->where('brand_id', $this->brands['JPN']->id)->first();
+    ProductInventory::create(['product_id' => $wrong->id, 'variant_id' => $endo->id, 'warehouse_id' => $this->warehouse->id, 'quantity_available' => 3]);
+
+    $moved = app(ProductMergeService::class)->moveVariantsTo($right->id, [$endo->id, $jpn->id]);
+
+    expect($moved)->toBe(2)
+        ->and($endo->fresh()->product_id)->toBe($right->id)
+        ->and($jpn->fresh()->product_id)->toBe($right->id)
+        ->and(ProductInventory::where('variant_id', $endo->id)->value('product_id'))->toBe($right->id)
+        ->and($wrong->variants()->count())->toBe(1)
+        ->and($right->variants()->count())->toBe(3);
+});
+
+it('refuses to move a brand into a product that already has it', function () {
+    $wrong = mergePart('Terminal Accent', '56540-22000', ['CTR', 'ENDO']);
+    $right = mergePart('Terminal Accent', '56540-25000', ['CTR']);
+    $ctr = $wrong->variants()->where('brand_id', $this->brands['CTR']->id)->first();
+
+    expect(fn () => app(ProductMergeService::class)->moveVariantsTo($right->id, [$ctr->id]))
+        ->toThrow(RuntimeException::class, 'CTR');
+    expect($ctr->fresh()->product_id)->toBe($wrong->id);
+});
