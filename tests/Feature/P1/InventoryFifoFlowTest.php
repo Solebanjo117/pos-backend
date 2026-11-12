@@ -569,6 +569,29 @@ it('manual absolute inventory adjustment down consumes fifo by delta', function 
             ->where('reference_type', 'manual_adjustment'))->sum('quantity'))->toBe(3);
 });
 
+it('records the reason and note given for a manual inventory adjustment', function () {
+    $context = fifoCatalogContext();
+    $this->actingAs($context['user']);
+
+    receiveFifoPurchase($context, 5, 3.25, 0, 0);
+
+    $this->putJson("/api/v1/inventory/products/{$context['product']->id}/warehouses/{$context['warehouse']->id}", [
+        'variant_id' => $context['variant']->id,
+        'stock_available' => 4,
+        'reason' => 'Daño',
+        'notes' => 'Caja mojada',
+    ])->assertOk()->assertJsonPath('data.quantity_available', 4);
+
+    $movement = \App\Models\InventoryMovement::where('variant_id', $context['variant']->id)
+        ->where('reference_type', 'manual_adjustment')
+        ->firstOrFail();
+
+    expect($movement->movement_type)->toBe('out')
+        ->and($movement->reason)->toBe('Daño')
+        ->and($movement->notes)->toBe('Caja mojada')
+        ->and((int) $movement->quantity)->toBe(1);
+});
+
 it('supply list pre-applied stock creates an inbound fifo lot', function () {
     $context = fifoCatalogContext();
     $this->actingAs($context['user']);
