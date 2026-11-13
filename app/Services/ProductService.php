@@ -668,6 +668,12 @@ class ProductService
 
             $product->extraCategories()->sync($extraCategoryIds);
 
+            // Los números de parte son del producto; la marca por defecto (si viene) los usa como SKU.
+            $this->productCodeService->syncForProduct(
+                $product,
+                $this->productCodeService->productCodesFromPayload($data)
+            );
+
             // Create default variant with brand (only if brand_id is provided)
             $variant = null;
             if (! empty($data['brand_id'])) {
@@ -710,11 +716,6 @@ class ProductService
                         );
                     }
                 }
-            } else {
-                $this->productCodeService->syncForProduct(
-                    $product,
-                    $this->productCodeService->productCodesFromPayload($data)
-                );
             }
 
             // Assign attributes at product level, regardless of default variant presence.
@@ -927,23 +928,14 @@ class ProductService
                 $product->update($updatePayload);
             }
 
+            // Los números de parte ("Código y estado") son del producto, tenga una marca o varias.
             if (array_key_exists('codes', $data)) {
-                $product->loadMissing('defaultVariant');
-                if ($product->defaultVariant) {
-                    $this->productCodeService->syncForVariant($product->defaultVariant, $data['codes'] ?? []);
-                } else {
-                    $this->productCodeService->syncForProduct($product, $data['codes'] ?? []);
-                }
+                $this->productCodeService->syncForProduct($product, $data['codes'] ?? []);
             } elseif (array_key_exists('sku_base', $data)) {
-                $product->loadMissing('defaultVariant');
-                $legacyCodes = $this->productCodeService->productCodesFromPayload([
-                    'sku_base' => $product->sku_base,
-                ]);
-                if ($product->defaultVariant) {
-                    $this->productCodeService->syncForVariant($product->defaultVariant, $legacyCodes);
-                } else {
-                    $this->productCodeService->syncForProduct($product, $legacyCodes);
-                }
+                $this->productCodeService->syncForProduct(
+                    $product,
+                    $this->productCodeService->productCodesFromPayload(['sku_base' => $product->sku_base]),
+                );
             }
 
             $currentCategoryId = array_key_exists('category_id', $data)
