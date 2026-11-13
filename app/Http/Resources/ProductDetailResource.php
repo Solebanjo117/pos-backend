@@ -17,9 +17,10 @@ class ProductDetailResource extends JsonResource
     {
         // Get default variant or first variant
         $defaultVariant = $this->defaultVariant ?? $this->variants?->first();
-        $effectiveCodes = $defaultVariant?->relationLoaded('codes')
-            ? $defaultVariant->codes
-            : ($this->relationLoaded('codes') ? $this->codes : collect());
+        // Números de parte del producto (sin marca). Los códigos propios de cada marca van en su variante.
+        $effectiveCodes = $this->relationLoaded('codes')
+            ? $this->codes->whereNull('variant_id')->values()
+            : collect();
         $pricing = $this->relationLoaded('pricing') ? $this->pricing : null;
         $saleTaxRate = (float) ($pricing?->sale_tax_rate ?? $pricing?->tax_rate ?? 0);
         $costTaxRate = (float) ($pricing?->cost_tax_rate ?? $pricing?->tax_rate ?? $saleTaxRate);

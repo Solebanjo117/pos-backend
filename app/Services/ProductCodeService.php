@@ -128,20 +128,29 @@ class ProductCodeService
      */
     private function sync(Product $product, ?ProductVariant $variant, array $codes): void
     {
-        // Número de parte compartido: si el producto tiene varias marcas (variantes) que comparten su
-        // número de parte (sku_base), ese código es del PRODUCTO. Ninguna variante se lo apropia, así
-        // las marcas no chocan entre sí, y cada variante conserva su SKU.
+        // Los números de parte son del PRODUCTO (sku_base y sus códigos sin variante), tenga una marca
+        // o varias. Una marca (variante) nunca se los apropia: en su lista solo quedan sus códigos
+        // propios, y su SKU sigue siendo el número de parte si lo usa.
         $inheritedCode = null;
-        $sharedPartNumber = $variant ? $this->sharedPartNumber($product) : '';
-        if ($sharedPartNumber !== '') {
+        if ($variant) {
+            $partNumber = $this->normalizer->normalize((string) $product->sku_base);
+            $productOwned = ProductCode::query()
+                ->active()
+                ->where('product_id', $product->id)
+                ->whereNull('variant_id')
+                ->pluck('normalized_code')
+                ->push($partNumber)
+                ->filter()
+                ->all();
+
             $codes = collect($codes)
-                ->reject(function (array $item) use ($sharedPartNumber, &$inheritedCode): bool {
-                    $isShared = $this->normalizer->normalize((string) ($item['code'] ?? '')) === $sharedPartNumber;
-                    if ($isShared) {
+                ->reject(function (array $item) use ($partNumber, $productOwned, &$inheritedCode): bool {
+                    $normalized = $this->normalizer->normalize((string) ($item['code'] ?? ''));
+                    if ($normalized !== '' && $normalized === $partNumber) {
                         $inheritedCode = trim((string) $item['code']);
                     }
 
-                    return $isShared;
+                    return $normalized !== '' && in_array($normalized, $productOwned, true);
                 })
                 ->values()
                 ->all();
@@ -164,11 +173,12 @@ class ProductCodeService
 
             (clone $ownerQuery)->whereNotIn('normalized_code', $incomingNormalized->all())->delete();
 
-            if ($variant && $incomingNormalized->isNotEmpty()) {
+            // Un código que se registra como del producto deja de ser de sus marcas (pasa al producto).
+            if (! $variant && $incomingNormalized->isNotEmpty()) {
                 ProductCode::query()
                     ->active()
                     ->where('product_id', $product->id)
-                    ->whereNull('variant_id')
+                    ->whereNotNull('variant_id')
                     ->whereIn('normalized_code', $incomingNormalized->all())
                     ->lockForUpdate()
                     ->delete();
@@ -237,37 +247,29 @@ class ProductCodeService
     }
 
     /**
-     * Número de parte del producto (normalizado) cuando lo comparten sus marcas: el producto tiene
-     * más de una variante y su sku_base no está vacío. Cadena vacía si no aplica.
-     */
-    private function sharedPartNumber(Product $product): string
-    {
-        $partNumber = $this->normalizer->normalize((string) $product->sku_base);
-        if ($partNumber === '') {
-            return '';
-        }
-
-        return $product->variants()->count() > 1 ? $partNumber : '';
-    }
-
-    /**
      * Registra el número de parte como código del producto (sin variante) si todavía no existe un
-     * código activo igual. Si lo tiene otro producto (posible duplicado), no se toca: la búsqueda
-     * sigue encontrándolo por el sku_base.
+     * código activo igual. Si lo tiene una marca del mismo producto (datos guardados antes), pasa al
+     * producto. Si lo tiene otro producto (posible duplicado), no se toca: la búsqueda sigue
+     * encontrándolo por el sku_base.
      */
     private function ensureProductLevelCode(Product $product, string $code): void
     {
         $normalized = $this->normalizer->normalize($code);
-        if (ProductCode::query()->active()->where('normalized_code', $normalized)->exists()) {
-            return;
-        }
-
         $hasPrimary = ProductCode::query()
             ->active()
             ->where('product_id', $product->id)
             ->whereNull('variant_id')
             ->where('is_primary', true)
             ->exists();
+
+        $existing = ProductCode::query()->active()->where('normalized_code', $normalized)->first();
+        if ($existing) {
+            if ($existing->product_id === $product->id && $existing->variant_id !== null) {
+                $existing->update(['variant_id' => null, 'is_primary' => ! $hasPrimary]);
+            }
+
+            return;
+        }
 
         ProductCode::query()->create([
             'product_id' => $product->id,
@@ -290,23 +292,28 @@ class ProductCodeService
         $upc = collect($codes)->firstWhere('type', 'upc');
 
         if ($variant) {
-            // Con número de parte compartido, el SKU de la variante sigue siendo ese número.
+            // Si la marca usa el número de parte del producto, su SKU sigue siendo ese número. Los
+            // códigos de una marca nunca cambian el número de parte del producto.
             $variant->forceFill([
                 'sku' => $inheritedCode ?? $primary['code'] ?? null,
                 'upc' => $upc['code'] ?? null,
             ])->save();
 
-            if ($variant->is_default) {
-                $product->forceFill([
-                    'sku_base' => $inheritedCode ?? $primary['code'] ?? null,
-                ])->save();
-            }
-
             return;
         }
 
+        // Si cambia el número de parte, las marcas que lo usaban como SKU pasan al número nuevo.
+        $previousPartNumber = $this->normalizer->normalize((string) $product->sku_base);
+        $newPartNumber = $primary['code'] ?? null;
+        if ($previousPartNumber !== '' && $newPartNumber !== null && $this->normalizer->normalize($newPartNumber) !== $previousPartNumber) {
+            $product->variants()
+                ->get(['id', 'sku'])
+                ->filter(fn (ProductVariant $brandVariant) => $this->normalizer->normalize((string) $brandVariant->sku) === $previousPartNumber)
+                ->each(fn (ProductVariant $brandVariant) => $brandVariant->forceFill(['sku' => $newPartNumber])->save());
+        }
+
         $product->forceFill([
-            'sku_base' => $primary['code'] ?? null,
+            'sku_base' => $newPartNumber,
         ])->save();
     }
 

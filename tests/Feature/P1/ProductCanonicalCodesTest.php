@@ -3,6 +3,7 @@
 use App\Models\Brand;
 use App\Models\Product;
 use App\Models\ProductCode;
+use App\Models\ProductVariant;
 use App\Models\User;
 use App\Models\Warehouse;
 use App\Services\ProductCodeNormalizer;
@@ -50,7 +51,7 @@ it('creates a product without inventing a commercial code', function () {
         ->and($product->codes()->count())->toBe(0);
 });
 
-it('stores multiple codes on the sellable variant with one primary', function () {
+it('stores the product codes on the product, not on its brand, with one primary', function () {
     $brand = Brand::factory()->create();
 
     $response = $this->postJson('/api/v1/products', [
@@ -67,9 +68,12 @@ it('stores multiple codes on the sellable variant with one primary', function ()
         ->assertJsonPath('data.primary_code', '45503-19155')
         ->assertJsonCount(3, 'data.codes');
 
+    $productId = $response->json('data.id');
     $variantId = $response->json('data.default_variant.id');
-    expect(ProductCode::query()->where('variant_id', $variantId)->count())->toBe(3)
-        ->and(ProductCode::query()->where('variant_id', $variantId)->where('is_primary', true)->count())->toBe(1);
+    expect(ProductCode::query()->where('product_id', $productId)->whereNull('variant_id')->count())->toBe(3)
+        ->and(ProductCode::query()->where('product_id', $productId)->whereNull('variant_id')->where('is_primary', true)->count())->toBe(1)
+        ->and(ProductCode::query()->where('variant_id', $variantId)->count())->toBe(0)
+        ->and(ProductVariant::find($variantId)->sku)->toBe('45503-19155');
 });
 
 it('blocks an equivalent code on another product', function () {
