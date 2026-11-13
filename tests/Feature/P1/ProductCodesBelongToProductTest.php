@@ -144,3 +144,32 @@ it('still flags a code that belongs to another product while editing a brand', f
         ->assertOk()
         ->assertJsonPath('data.0.id', $other->id);
 });
+
+it('gives a new brand the product part number as its SKU when no code is sent', function () {
+    $brand = Brand::create(['name' => 'CTR', 'status' => 'active']);
+
+    $this->postJson("/api/v1/products/{$this->product->id}/variants", [
+        'brand_id' => $brand->id,
+        'sku' => '',
+        'status' => 'active',
+        'pricing' => ['base_price' => 10, 'cost' => 5],
+    ])->assertSuccessful();
+
+    $variant = ProductVariant::query()->where('brand_id', $brand->id)->sole();
+    expect($variant->sku)->toBe('11206-864Y')
+        ->and(brandCodes($variant))->toBe([]);
+});
+
+it('keeps the brand SKU and codes when the brand is saved without codes (prices only)', function () {
+    $this->variant->forceFill(['sku' => 'SR-1234'])->save();
+    ProductCode::create(['product_id' => $this->product->id, 'variant_id' => $this->variant->id, 'code' => 'SR-1234', 'normalized_code' => 'SR1234', 'type' => 'manual', 'status' => 'active', 'is_primary' => true]);
+
+    $this->putJson("/api/v1/products/{$this->product->id}/variants/{$this->variant->id}", [
+        'brand_id' => $this->variant->brand_id,
+        'status' => 'active',
+        'pricing' => ['base_price' => 12, 'cost' => 6],
+    ])->assertOk();
+
+    expect($this->variant->fresh()->sku)->toBe('SR-1234')
+        ->and(brandCodes($this->variant))->toBe(['SR-1234']);
+});

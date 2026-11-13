@@ -292,10 +292,11 @@ class ProductCodeService
         $upc = collect($codes)->firstWhere('type', 'upc');
 
         if ($variant) {
-            // Si la marca usa el número de parte del producto, su SKU sigue siendo ese número. Los
-            // códigos de una marca nunca cambian el número de parte del producto.
+            // Si la marca usa el número de parte del producto (o no tiene código propio), su SKU es ese
+            // número. Los códigos de una marca nunca cambian el número de parte del producto.
             $variant->forceFill([
-                'sku' => $inheritedCode ?? $primary['code'] ?? null,
+                'sku' => $inheritedCode ?? $primary['code']
+                    ?? ($this->normalizer->normalize((string) $product->sku_base) !== '' ? $product->sku_base : null),
                 'upc' => $upc['code'] ?? null,
             ])->save();
 
