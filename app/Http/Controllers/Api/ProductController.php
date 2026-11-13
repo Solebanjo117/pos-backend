@@ -14,6 +14,7 @@ use App\Http\Resources\ProductDetailResource;
 use App\Http\Resources\ProductResource;
 use App\Models\Product;
 use App\Models\ProductPricing;
+use App\Models\ProductVariant;
 use App\Models\ProductVehicleCompatibility;
 use App\Services\InventoryFifoService;
 use App\Services\ProductCodeService;
@@ -374,6 +375,11 @@ class ProductController extends Controller
         }
 
         if (($validated['exclude_variant_id'] ?? null) === $match->variant_id) {
+            return response()->json(['data' => []]);
+        }
+        // Una marca puede usar los números de parte de su propio producto: no es un duplicado.
+        if ($match->variant_id === null && isset($validated['exclude_variant_id'])
+            && (int) ProductVariant::query()->whereKey((int) $validated['exclude_variant_id'])->value('product_id') === (int) $match->product_id) {
             return response()->json(['data' => []]);
         }
         if (($validated['exclude_product_id'] ?? null) === $match->product_id) {
