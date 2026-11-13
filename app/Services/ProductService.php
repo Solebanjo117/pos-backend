@@ -994,6 +994,18 @@ class ProductService
                 }
             }
 
+            // A blank name means "generate it", same as when creating.
+            $regenerateName = false;
+            if (array_key_exists('name', $updatePayload)) {
+                $name = is_string($updatePayload['name']) ? trim($updatePayload['name']) : null;
+                if ($name === null || $name === '') {
+                    unset($updatePayload['name']);
+                    $regenerateName = true;
+                } else {
+                    $updatePayload['name'] = $name;
+                }
+            }
+
             if (! empty($updatePayload)) {
                 $product->update($updatePayload);
             }
@@ -1105,6 +1117,10 @@ class ProductService
 
             if (array_key_exists('vehicle_compatibility', $data)) {
                 $this->syncVehicleCompatibility($product, $data['vehicle_compatibility'] ?? []);
+            }
+
+            if ($regenerateName) {
+                $this->updateProductNameWithVehicles($product);
             }
 
             DB::commit();

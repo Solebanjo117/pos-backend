@@ -157,7 +157,8 @@ class UpdateProductRequest extends FormRequest
             'extra_category_ids' => 'sometimes|array',
             'extra_category_ids.*' => 'integer|distinct|exists:categories,id',
             'engine_id' => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
-            'name' => 'sometimes|string|max:255',
+            // Optional: a blank name is regenerated from category + vehicles.
+            'name' => 'sometimes|nullable|string|max:255',
             'description' => 'nullable|string',
             'status' => 'sometimes|in:active,discontinued',
             'is_universal' => 'sometimes|boolean',
