@@ -3,6 +3,7 @@
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\ProductCode;
 use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -58,7 +59,6 @@ it('matches product and variant codes while ignoring sku dashes', function (stri
 
     $matchingProduct = Product::create([
         'sku_base' => '53010-S04-000',
-        'alternate_code' => 'ALT-53010-S04-000',
         'name' => 'Base motor Honda Civic',
         'status' => 'active',
         'system_id' => 'SYS-53010-S04-000',
@@ -71,6 +71,17 @@ it('matches product and variant codes while ignoring sku dashes', function (stri
         'status' => 'active',
         'system_id' => 'VAR-53010-S04-000',
         'is_default' => true,
+    ]);
+
+    // Código secundario del producto (antes products.alternate_code).
+    ProductCode::create([
+        'product_id' => $matchingProduct->id,
+        'variant_id' => null,
+        'code' => 'ALT-53010-S04-000',
+        'normalized_code' => 'ALT53010S04000',
+        'type' => 'alternate',
+        'status' => 'active',
+        'is_primary' => false,
     ]);
 
     $matchingProduct->oemReferences()->create([

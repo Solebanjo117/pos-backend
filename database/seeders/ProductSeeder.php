@@ -258,7 +258,6 @@ class ProductSeeder extends Seeder
         return [
             [
                 'sku_base' => 'ALT-12V-90A',
-                'alternate_code' => 'ALT90A-12V',
                 'name' => 'Alternador 12V 90A',
                 'description' => 'Alternador para camionetas y utilitarios con polea multicanal y regulador integrado.',
                 'category' => $categories['alternadores-arrancadores'],
@@ -314,7 +313,6 @@ class ProductSeeder extends Seeder
             ],
             [
                 'sku_base' => 'BRK-PAD-F-CER',
-                'alternate_code' => 'PAD-FR-CER',
                 'name' => 'Pastillas de freno delanteras ceramicas',
                 'description' => 'Juego de pastillas delanteras de bajo ruido con compuesto ceramico.',
                 'category' => $categories['pastillas-freno'],
@@ -363,7 +361,6 @@ class ProductSeeder extends Seeder
             ],
             [
                 'sku_base' => 'SPK-IR-4PK',
-                'alternate_code' => 'IRIDIUM-4',
                 'name' => 'Bujias iridium set de 4',
                 'description' => 'Set de cuatro bujias de iridio para mayor estabilidad de chispa y vida util.',
                 'category' => $categories['bujias'],
@@ -411,7 +408,6 @@ class ProductSeeder extends Seeder
             ],
             [
                 'sku_base' => 'FIL-OIL-SYN',
-                'alternate_code' => 'OIL-FLTR-SYN',
                 'name' => 'Filtro de aceite sintetico',
                 'description' => 'Filtro de aceite de alta eficiencia para intervalos extendidos.',
                 'category' => $categories['filtros-aceite'],
@@ -459,7 +455,6 @@ class ProductSeeder extends Seeder
             ],
             [
                 'sku_base' => 'BAT-AGM-75AH',
-                'alternate_code' => 'AGM75-12V',
                 'name' => 'Bateria AGM 12V 75Ah',
                 'description' => 'Bateria AGM libre de mantenimiento para vehiculos con demanda electrica alta.',
                 'category' => $categories['baterias'],
@@ -507,7 +502,6 @@ class ProductSeeder extends Seeder
             ],
             [
                 'sku_base' => 'SHK-GAS-FRT',
-                'alternate_code' => 'AMORT-GAS-F',
                 'name' => 'Amortiguador delantero a gas',
                 'description' => 'Amortiguador delantero presurizado para mejor control en carretera.',
                 'category' => $categories['amortiguadores'],
@@ -562,7 +556,6 @@ class ProductSeeder extends Seeder
         $product = Product::query()->updateOrCreate(
             ['sku_base' => $definition['sku_base']],
             [
-                'alternate_code' => $definition['alternate_code'],
                 'category_id' => $definition['category']?->id,
                 'product_line_id' => $definition['line']?->id,
                 'name' => $definition['name'],

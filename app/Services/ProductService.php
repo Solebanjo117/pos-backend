@@ -725,7 +725,6 @@ class ProductService
             $product = Product::create([
                 'system_id' => $systemId,
                 'sku_base' => $skuBase,
-                'alternate_code' => $data['alternate_code'] ?? null,
                 'pricing_formula' => $data['pricing_formula'] ?? null,
                 'product_line_id' => $data['product_line_id'] ?? null,
                 'category_id' => $primaryCategoryId,
@@ -985,7 +984,6 @@ class ProductService
                     'category_id',
                     'is_universal',
                     'sku_base',
-                    'alternate_code',
                     'pricing_formula',
                 ] as $field
             ) {
@@ -1017,11 +1015,10 @@ class ProductService
                 } else {
                     $this->productCodeService->syncForProduct($product, $data['codes'] ?? []);
                 }
-            } elseif (array_key_exists('sku_base', $data) || array_key_exists('alternate_code', $data)) {
+            } elseif (array_key_exists('sku_base', $data)) {
                 $product->loadMissing('defaultVariant');
                 $legacyCodes = $this->productCodeService->productCodesFromPayload([
                     'sku_base' => $product->sku_base,
-                    'alternate_code' => $product->alternate_code,
                 ]);
                 if ($product->defaultVariant) {
                     $this->productCodeService->syncForVariant($product->defaultVariant, $legacyCodes);

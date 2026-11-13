@@ -18,7 +18,6 @@ class Product extends Model
 
     protected $fillable = [
         'sku_base',
-        'alternate_code',
         'pricing_formula',
         'product_line_id',
         'category_id',
@@ -304,7 +303,7 @@ class Product extends Model
             $q->whereHas('codes', fn ($codeQuery) => $codeQuery->where('normalized_code', $normalizedTerm))
                 ->orWhereHas('variants.codes', fn ($codeQuery) => $codeQuery->where('normalized_code', $normalizedTerm))
                 ->orWhere(function ($legacyCodeQuery) use ($normalizedTerm): void {
-                    static::whereExactNormalizedCodes($legacyCodeQuery, ['sku_base', 'alternate_code'], $normalizedTerm);
+                    static::whereExactNormalizedCodes($legacyCodeQuery, ['sku_base'], $normalizedTerm);
                     $legacyCodeQuery->orWhereHas('variants', function ($variantQuery) use ($normalizedTerm): void {
                         static::whereExactNormalizedCodes($variantQuery, ['sku', 'upc'], $normalizedTerm);
                     });

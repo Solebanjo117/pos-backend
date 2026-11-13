@@ -19,7 +19,6 @@ class ProductFactory extends Factory
     {
         return [
             'sku_base' => null,
-            'alternate_code' => null,
             'name' => fake()->words(3, true),
             'description' => fake()->optional()->sentence(),
             'status' => 'active',
