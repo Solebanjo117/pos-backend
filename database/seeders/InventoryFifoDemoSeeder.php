@@ -134,7 +134,6 @@ class InventoryFifoDemoSeeder extends Seeder
         $product = Product::withTrashed()->updateOrCreate(
             ['sku_base' => 'ALT-12V-90A'],
             [
-                'alternate_code' => 'ALT90A-12V',
                 'name' => 'Alternador 12V 90A',
                 'description' => 'Alternador demo con trazabilidad FIFO completa.',
                 'status' => 'active',

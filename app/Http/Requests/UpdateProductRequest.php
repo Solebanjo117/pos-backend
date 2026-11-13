@@ -142,7 +142,6 @@ class UpdateProductRequest extends FormRequest
     {
         return [
             'sku_base' => 'nullable|string|max:50',
-            'alternate_code' => 'nullable|string|max:100',
             'codes' => 'sometimes|array|max:25',
             'codes.*.id' => 'nullable|integer',
             'codes.*.code' => 'required|string|max:255',

@@ -90,7 +90,6 @@ class ProductCodeService
 
         return $this->legacyCodes([
             ['code' => $data['sku_base'] ?? null, 'type' => 'sku', 'is_primary' => true],
-            ['code' => $data['alternate_code'] ?? null, 'type' => 'alternate', 'is_primary' => false],
         ]);
     }
 
@@ -221,7 +220,6 @@ class ProductCodeService
     {
         $primary = collect($codes)->firstWhere('is_primary', true);
         $upc = collect($codes)->firstWhere('type', 'upc');
-        $alternate = collect($codes)->first(fn (array $code) => ! $code['is_primary']);
 
         if ($variant) {
             $variant->forceFill([
@@ -232,7 +230,6 @@ class ProductCodeService
             if ($variant->is_default) {
                 $product->forceFill([
                     'sku_base' => $primary['code'] ?? null,
-                    'alternate_code' => $alternate['code'] ?? null,
                 ])->save();
             }
 
@@ -241,7 +238,6 @@ class ProductCodeService
 
         $product->forceFill([
             'sku_base' => $primary['code'] ?? null,
-            'alternate_code' => $alternate['code'] ?? null,
         ])->save();
     }
 

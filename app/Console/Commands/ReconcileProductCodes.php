@@ -63,7 +63,7 @@ class ReconcileProductCodes extends Command
             'same_owner_duplicates' => $sameOwnerDuplicates->count(),
             'cross_owner_conflicts' => $conflicted->count(),
             'legacy_generated' => $candidates->where('type', 'legacy_generated')->count(),
-            'products_without_codes' => Product::query()->whereNull('sku_base')->whereNull('alternate_code')->count(),
+            'products_without_codes' => Product::query()->whereNull('sku_base')->count(),
             'variants_without_codes' => ProductVariant::query()->whereNull('sku')->whereNull('upc')->count(),
         ];
 
@@ -167,7 +167,6 @@ class ReconcileProductCodes extends Command
             foreach ($products as $product) {
                 $variantId = $product->defaultVariant?->id;
                 $this->appendCandidate($candidates, $normalizer, $product, $variantId, $product->sku_base, 'sku_base', true);
-                $this->appendCandidate($candidates, $normalizer, $product, $variantId, $product->alternate_code, 'alternate_code', false);
             }
         });
 
@@ -199,7 +198,6 @@ class ReconcileProductCodes extends Command
 
         $type = match ($source) {
             'variant_upc' => 'upc',
-            'alternate_code' => 'alternate',
             default => preg_match('/^[\pL]{3}[^\pL\pN]*\d{4}$/u', (string) $code) ? 'legacy_generated' : 'sku',
         };
 

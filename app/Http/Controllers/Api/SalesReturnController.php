@@ -103,7 +103,7 @@ class SalesReturnController extends Controller
                 'customer:id,name,code',
                 'payments',
                 'returns',
-                'items.product:id,sku_base,alternate_code,system_id,name',
+                'items.product:id,sku_base,system_id,name',
                 'items.variant:id,sku,upc,system_id',
                 'items.seller:id,name',
             ])
@@ -119,7 +119,6 @@ class SalesReturnController extends Controller
                         ->orWhereHas('items.product', fn ($query) => $query
                             ->where('name', $operator, $like)
                             ->orWhere('sku_base', $operator, $like)
-                            ->orWhere('alternate_code', $operator, $like)
                             ->orWhere('system_id', $operator, $like))
                         ->orWhereHas('items.variant', fn ($query) => $query
                             ->where('sku', $operator, $like)

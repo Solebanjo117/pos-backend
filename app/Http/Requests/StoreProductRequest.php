@@ -126,7 +126,6 @@ class StoreProductRequest extends FormRequest
         return [
             // Base Product
             'sku_base' => 'nullable|string|max:50',
-            'alternate_code' => 'nullable|string|max:100',
             'pricing_formula' => 'nullable|string|max:255',
             'name' => 'nullable|string|max:255',
             'description' => 'nullable|string',

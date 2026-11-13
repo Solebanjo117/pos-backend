@@ -28,7 +28,6 @@ class ProductResource extends JsonResource
             'search_match_system_id' => $this->search_match_system_id ?? null,
             'search_match_variant_id' => $this->search_match_variant_id ?? null,
             'sku_base' => $this->sku_base,
-            'alternate_code' => $this->alternate_code,
             'primary_code' => $effectiveCodes->firstWhere('is_primary', true)?->code ?? $this->sku_base,
             'codes' => $effectiveCodes->map(fn ($code) => [
                 'id' => $code->id,

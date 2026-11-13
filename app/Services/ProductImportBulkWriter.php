@@ -46,7 +46,6 @@ class ProductImportBulkWriter
                 $productRows[] = [
                     'system_id' => $systemId,
                     'sku_base' => $product['sku_base'],
-                    'alternate_code' => null,
                     'pricing_formula' => null,
                     'product_line_id' => null,
                     'category_id' => $product['category_id'],

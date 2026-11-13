@@ -87,7 +87,6 @@ function createSourceProductForDuplication(Warehouse $warehouse): array
         'category_id' => $category->id,
         'product_line_id' => $line->id,
         'pricing_formula' => 'costo * 1.5',
-        'alternate_code' => 'ALT-001',
         'is_universal' => false,
     ]);
 

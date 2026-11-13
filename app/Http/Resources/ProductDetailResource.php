@@ -30,7 +30,6 @@ class ProductDetailResource extends JsonResource
             'id' => $this->id,
             'system_id' => $this->system_id,
             'sku_base' => $this->sku_base,
-            'alternate_code' => $this->alternate_code,
             'primary_code' => $effectiveCodes->firstWhere('is_primary', true)?->code ?? $this->sku_base,
             'codes' => $effectiveCodes->map(fn ($code) => [
                 'id' => $code->id,
