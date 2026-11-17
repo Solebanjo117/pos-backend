@@ -302,6 +302,11 @@ class Product extends Model
             // For normal searches, EVERY word must match EITHER product info OR vehicle info
             $q->whereHas('codes', fn ($codeQuery) => $codeQuery->where('normalized_code', $normalizedTerm))
                 ->orWhereHas('variants.codes', fn ($codeQuery) => $codeQuery->where('normalized_code', $normalizedTerm))
+                // Código con que un proveedor conoce la pieza (Vendor ID), p. ej. al recibir su factura.
+                ->orWhereExists(fn ($supplierQuery) => $supplierQuery->selectRaw('1')
+                    ->from('product_suppliers')
+                    ->whereColumn('product_suppliers.product_id', 'products.id')
+                    ->where('product_suppliers.supplier_code_normalized', $normalizedTerm !== '' ? $normalizedTerm : '__sin_codigo__'))
                 ->orWhere(function ($legacyCodeQuery) use ($normalizedTerm): void {
                     static::whereExactNormalizedCodes($legacyCodeQuery, ['sku_base'], $normalizedTerm);
                     $legacyCodeQuery->orWhereHas('variants', function ($variantQuery) use ($normalizedTerm): void {

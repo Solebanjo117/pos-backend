@@ -14,6 +14,7 @@ use App\Models\ProductVariant;
 use App\Models\Supplier;
 use App\Services\SupplierProfileService;
 use App\Services\SupplierService;
+use App\Services\VariantSupplierService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Http\JsonResponse;
@@ -296,26 +297,13 @@ class SupplierController extends Controller
         if (! empty($validated['variant_id'])) {
             $variant = ProductVariant::with('brand')->findOrFail($validated['variant_id']);
 
-            if ($validated['is_preferred'] ?? false) {
-                ProductSupplier::query()
-                    ->where('variant_id', $variant->id)
-                    ->where('supplier_id', '!=', $supplier->id)
-                    ->update(['is_preferred' => false]);
-            }
-
-            ProductSupplier::query()->updateOrCreate(
-                [
-                    'variant_id' => $variant->id,
-                    'supplier_id' => $supplier->id,
-                ],
-                [
-                    'product_id' => $variant->product_id,
-                    'supplier_cost' => $validated['supplier_cost'],
-                    'lead_time_days' => $validated['lead_time_days'] ?? $supplier->lead_time_days ?? 0,
-                    'minimum_order_quantity' => $validated['minimum_order_quantity'] ?? 1,
-                    'is_preferred' => $validated['is_preferred'] ?? false,
-                ]
-            );
+            // El proveedor por defecto (is_preferred) lo calcula el sistema: el más barato.
+            app(VariantSupplierService::class)->upsert($variant, $supplier->id, [
+                ...array_intersect_key($validated, array_flip(['supplier_code'])),
+                'supplier_cost' => $validated['supplier_cost'],
+                'lead_time_days' => $validated['lead_time_days'] ?? $supplier->lead_time_days ?? 0,
+                'minimum_order_quantity' => $validated['minimum_order_quantity'] ?? 1,
+            ]);
 
             if ($variant->brand_id) {
                 $supplier->brands()->syncWithoutDetaching([$variant->brand_id]);
@@ -354,19 +342,15 @@ class SupplierController extends Controller
         $supplier = Supplier::findOrFail($id);
         $validated = $request->safe()->except(['variant_id', 'product_id']);
 
-        $productSupplier = ProductSupplier::query()
+        // Solo se edita un vínculo que ya existe (404 si no).
+        ProductSupplier::query()
             ->where('supplier_id', $supplier->id)
             ->where('variant_id', $variantId)
             ->firstOrFail();
 
-        if ($validated['is_preferred'] ?? false) {
-            ProductSupplier::query()
-                ->where('variant_id', $variantId)
-                ->where('supplier_id', '!=', $supplier->id)
-                ->update(['is_preferred' => false]);
-        }
-
-        $productSupplier->update($validated);
+        // El proveedor por defecto (is_preferred) lo calcula el sistema: el más barato.
+        unset($validated['is_preferred']);
+        app(VariantSupplierService::class)->upsert(ProductVariant::findOrFail($variantId), $supplier->id, $validated);
 
         return response()->json([
             'message' => 'Variante suministrada actualizada exitosamente',
@@ -378,10 +362,7 @@ class SupplierController extends Controller
     {
         $supplier = Supplier::findOrFail($id);
 
-        ProductSupplier::query()
-            ->where('supplier_id', $supplier->id)
-            ->where('variant_id', $variantId)
-            ->delete();
+        app(VariantSupplierService::class)->remove(ProductVariant::findOrFail($variantId), $supplier->id);
 
         return response()->json([
             'message' => 'Variante desasociada del proveedor exitosamente',
@@ -414,6 +395,7 @@ class SupplierController extends Controller
             'product_name' => $ps->product?->name ?? 'Producto',
             'product_sku' => $ps->product?->sku_base,
             'variant_sku' => $ps->variant?->sku,
+            'supplier_code' => $ps->supplier_code,
             'brand_name' => $ps->variant?->brand?->name,
             'supplier_cost' => (float) $ps->supplier_cost,
             'lead_time_days' => $ps->lead_time_days,

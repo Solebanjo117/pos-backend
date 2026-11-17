@@ -49,7 +49,8 @@ class InventoryFifoService
                 'product_batch_id' => $data['product_batch_id'] ?? null,
             ]);
 
-            $this->createLotForInboundMovement($movement, $data);
+            $lot = $this->createLotForInboundMovement($movement, $data);
+            $this->recordSupplierPurchase($lot);
             $this->addAggregateStock(
                 (int) $data['product_id'],
                 $data['variant_id'] ?? null,
@@ -74,6 +75,7 @@ class InventoryFifoService
             'product_id' => $movement->product_id,
             'variant_id' => $movement->variant_id,
             'warehouse_id' => $movement->warehouse_id,
+            'supplier_id' => $data['supplier_id'] ?? $movement->supplier_id,
             'source_type' => $data['source_type'] ?? $movement->reference_type ?? 'manual_inbound',
             'source_id' => $data['source_id'] ?? $movement->reference_id,
             'source_movement_id' => $movement->id,
@@ -87,6 +89,25 @@ class InventoryFifoService
             'sale_price' => $salePrice,
             'received_at' => $data['received_at'] ?? now(),
         ]);
+    }
+
+    /**
+     * Una compra recibida (orden de compra, compra rápida o lista de abastecimiento) deja como costo
+     * de ese proveedor lo que se pagó por unidad, y recalcula el proveedor más barato de la marca.
+     */
+    private function recordSupplierPurchase(InventoryLot $lot): void
+    {
+        if (! $lot->supplier_id || ! $lot->variant_id || ! in_array($lot->source_type, ['purchase_order', 'supply_list'], true)) {
+            return;
+        }
+
+        app(VariantSupplierService::class)->recordPurchase(
+            (int) $lot->product_id,
+            (int) $lot->variant_id,
+            (int) $lot->supplier_id,
+            (float) $lot->unit_cost_base,
+            $lot->received_at,
+        );
     }
 
     public function consumeStock(array $data): array

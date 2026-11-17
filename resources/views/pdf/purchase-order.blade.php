@@ -286,6 +286,12 @@
         $supplier = $purchaseOrder->supplier;
         $warehouse = $purchaseOrder->warehouse;
         $itemColumnCount = ($isWorksheet ? 7 : 11) + ($supplier ? 0 : 1);
+        // Código con que cada proveedor conoce la pieza (Vendor ID); si no tiene, nuestro número de parte.
+        $supplierCodes = \App\Models\ProductSupplier::query()
+            ->whereIn('variant_id', $purchaseOrder->items->pluck('variant_id')->filter()->unique())
+            ->whereNotNull('supplier_code')
+            ->get(['variant_id', 'supplier_id', 'supplier_code'])
+            ->keyBy(fn ($link) => $link->variant_id.'-'.$link->supplier_id);
     @endphp
 
     <div class="header">
@@ -366,7 +372,7 @@
                     <th style="width: 24px;" class="text-center">OK</th>
                 @endif
                 <th style="width: 28px;" class="text-center">#</th>
-                <th style="width: 82px;">SKU base</th>
+                <th style="width: 82px;">Código</th>
                 <th style="width: 70px;">Marca</th>
                 @if(! $supplier)
                     <th style="width: 95px;">Proveedor</th>
@@ -399,7 +405,15 @@
                         <td class="text-center"><span class="checkbox"></span></td>
                     @endif
                     <td class="text-center">{{ $index + 1 }}</td>
-                    <td class="mono">{{ $product?->sku_base ?: '-' }}</td>
+                    @php
+                        $vendorCode = $supplierCodes->get($item->variant_id.'-'.($item->supplier_id ?? $purchaseOrder->supplier_id))?->supplier_code;
+                    @endphp
+                    <td class="mono">
+                        {{ $vendorCode ?: ($product?->sku_base ?: '-') }}
+                        @if($vendorCode && $product?->sku_base && $vendorCode !== $product->sku_base)
+                            <div class="product-meta">Nuestro: {{ $product->sku_base }}</div>
+                        @endif
+                    </td>
                     <td>{{ $brandName ?: '-' }}</td>
                     @if(! $supplier)
                         <td>{{ $item->supplier?->name ?? '-' }}</td>

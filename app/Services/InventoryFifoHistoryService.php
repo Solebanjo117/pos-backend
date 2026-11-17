@@ -32,7 +32,7 @@ class InventoryFifoHistoryService
         $perPage = (int) ($filters['per_page'] ?? 25);
 
         $lots = InventoryLot::query()
-            ->with(['warehouse', 'sourceMovement'])
+            ->with(['warehouse', 'sourceMovement', 'supplier:id,name'])
             ->where('product_id', $product->id)
             ->where('variant_id', $variant->id)
             ->where('warehouse_id', $warehouseId)

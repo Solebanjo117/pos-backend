@@ -13,6 +13,7 @@ use App\Models\InventoryLot;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Services\InventoryFifoHistoryService;
+use App\Services\InventoryLotSupplierService;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -203,6 +204,8 @@ class ProductVariantController extends Controller
             'source_type' => $lot->source_type,
             'source_id' => $lot->source_id,
             'source_movement_id' => $lot->source_movement_id,
+            'supplier' => $lot->supplier ? ['id' => $lot->supplier->id, 'name' => $lot->supplier->name] : null,
+            'supplier_editable' => InventoryLotSupplierService::canAssign($lot),
             'batch_number' => $lot->batch_number,
             'received_quantity' => (int) $lot->received_quantity,
             'quantity_available' => (int) $lot->quantity_available,

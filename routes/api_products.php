@@ -44,6 +44,11 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     Route::put('/{product}/variants/{variant}', [App\Http\Controllers\Api\ProductVariantController::class, 'update'])->middleware('role:admin,manager,buyer');
     Route::delete('/{product}/variants/{variant}', [App\Http\Controllers\Api\ProductVariantController::class, 'destroy'])->middleware('role:admin,manager,buyer');
 
+    // --> Proveedores de una marca (código del proveedor, costo de la última compra, el más barato por defecto)
+    Route::get('/{product}/variants/{variant}/suppliers', [App\Http\Controllers\Api\VariantSupplierController::class, 'index'])->middleware('role:admin,manager,buyer');
+    Route::put('/{product}/variants/{variant}/suppliers/{supplier}', [App\Http\Controllers\Api\VariantSupplierController::class, 'upsert'])->middleware('role:admin,manager,buyer');
+    Route::delete('/{product}/variants/{variant}/suppliers/{supplier}', [App\Http\Controllers\Api\VariantSupplierController::class, 'destroy'])->middleware('role:admin,manager,buyer');
+
     // --> OEM References
     Route::get('/{product}/oem-references', [ProductController::class, 'oemReferences']);
     Route::post('/{product}/oem-references', [ProductController::class, 'addOemReference'])->middleware('role:admin,manager,buyer');
