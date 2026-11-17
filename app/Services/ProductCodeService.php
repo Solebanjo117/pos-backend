@@ -292,25 +292,22 @@ class ProductCodeService
         $upc = collect($codes)->firstWhere('type', 'upc');
 
         if ($variant) {
-            // Si la marca usa el número de parte del producto (o no tiene código propio), su SKU es ese
-            // número. Los códigos de una marca nunca cambian el número de parte del producto.
+            // Las marcas no tienen código propio (2026-11-17): su SKU es el número principal del
+            // producto. Solo si el producto no tiene número se usa el de la marca. Los códigos de una
+            // marca nunca cambian el número de parte del producto.
+            $principal = $this->normalizer->normalize((string) $product->sku_base) !== '' ? trim((string) $product->sku_base) : null;
             $variant->forceFill([
-                'sku' => $inheritedCode ?? $primary['code']
-                    ?? ($this->normalizer->normalize((string) $product->sku_base) !== '' ? $product->sku_base : null),
+                'sku' => $principal ?? $inheritedCode ?? $primary['code'] ?? null,
                 'upc' => $upc['code'] ?? null,
             ])->save();
 
             return;
         }
 
-        // Si cambia el número de parte, las marcas que lo usaban como SKU pasan al número nuevo.
-        $previousPartNumber = $this->normalizer->normalize((string) $product->sku_base);
+        // Todas las marcas usan el número principal del producto como SKU.
         $newPartNumber = $primary['code'] ?? null;
-        if ($previousPartNumber !== '' && $newPartNumber !== null && $this->normalizer->normalize($newPartNumber) !== $previousPartNumber) {
-            $product->variants()
-                ->get(['id', 'sku'])
-                ->filter(fn (ProductVariant $brandVariant) => $this->normalizer->normalize((string) $brandVariant->sku) === $previousPartNumber)
-                ->each(fn (ProductVariant $brandVariant) => $brandVariant->forceFill(['sku' => $newPartNumber])->save());
+        if ($newPartNumber !== null) {
+            $product->variants()->update(['sku' => $newPartNumber]);
         }
 
         $product->forceFill([

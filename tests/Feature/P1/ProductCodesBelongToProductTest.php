@@ -99,7 +99,7 @@ it('moves a part number saved on the brand (older data) back to the product', fu
         ->and(brandCodes($this->variant))->toBe([]);
 });
 
-it('updates the SKU of the brands that used the old part number when it changes', function () {
+it('gives every brand the new part number as SKU when the product number changes', function () {
     $other = ProductVariant::create([
         'product_id' => $this->product->id,
         'brand_id' => Brand::create(['name' => 'CTR', 'status' => 'active'])->id,
@@ -114,7 +114,7 @@ it('updates the SKU of the brands that used the old part number when it changes'
 
     expect($this->product->fresh()->sku_base)->toBe('11206-864Z')
         ->and($this->variant->fresh()->sku)->toBe('11206-864Z')
-        ->and($other->fresh()->sku)->toBe('CTR-OWN');
+        ->and($other->fresh()->sku)->toBe('11206-864Z');
 });
 
 it('shows the product codes in the product detail, not the brand ones', function () {

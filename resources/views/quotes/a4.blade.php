@@ -103,7 +103,7 @@
                                 @if(isset($mode) && $mode === 'blind')
                                     {{ $item->variant->name ?? '' }} (ID: {{ $item->variant->id }})
                                 @else
-                                    {{ $item->variant->sku ?? $item->variant->name ?? '' }}
+                                    {{ ($item->product?->sku_base ?: null) ?? $item->variant->sku ?? $item->variant->name ?? '' }}
                                 @endif
                             </span>
                         @endif
