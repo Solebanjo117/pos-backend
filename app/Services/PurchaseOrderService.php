@@ -211,12 +211,8 @@ class PurchaseOrderService
             ->whereIn('id', $variantIds)
             ->get(['id', 'product_id', 'brand_id']);
 
-        $supplierBrandIds = Supplier::query()
-            ->find($supplierId)
-            ?->brands()
-            ->pluck('brands.id')
-            ->map(fn ($id) => (int) $id)
-            ?? collect();
+        // Marcas del proveedor: por sus piezas o marcadas a mano.
+        $supplierBrandIds = app(SupplierBrandService::class)->brandIdsForSupplier($supplierId);
 
         $directVariantIds = ProductSupplier::query()
             ->where('supplier_id', $supplierId)

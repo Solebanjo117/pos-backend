@@ -12,6 +12,7 @@ use App\Models\Product;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\Supplier;
+use App\Services\SupplierBrandService;
 use App\Services\SupplierProfileService;
 use App\Services\SupplierService;
 use App\Services\VariantSupplierService;
@@ -215,9 +216,9 @@ class SupplierController extends Controller
     public function brands(int $id): JsonResponse
     {
         $supplier = Supplier::findOrFail($id);
-        $brands = $supplier->brands()->orderBy('brands.name')->get(['brands.id', 'brands.name']);
 
-        return response()->json(['data' => $brands]);
+        // Marcas por sus piezas (calculado) y marcadas a mano, en una sola lista.
+        return response()->json(['data' => app(SupplierBrandService::class)->forSupplier($supplier)]);
     }
 
     /**
@@ -236,7 +237,7 @@ class SupplierController extends Controller
 
         return response()->json([
             'message' => 'Marca asociada al proveedor exitosamente',
-            'data' => $supplier->fresh()->load('brands:id,name'),
+            'data' => app(SupplierBrandService::class)->forSupplier($supplier),
         ]);
     }
 
@@ -251,7 +252,7 @@ class SupplierController extends Controller
 
         return response()->json([
             'message' => 'Marca desasociada del proveedor exitosamente',
-            'data' => $supplier->fresh()->load('brands:id,name'),
+            'data' => app(SupplierBrandService::class)->forSupplier($supplier),
         ]);
     }
 
@@ -304,10 +305,6 @@ class SupplierController extends Controller
                 'lead_time_days' => $validated['lead_time_days'] ?? $supplier->lead_time_days ?? 0,
                 'minimum_order_quantity' => $validated['minimum_order_quantity'] ?? 1,
             ]);
-
-            if ($variant->brand_id) {
-                $supplier->brands()->syncWithoutDetaching([$variant->brand_id]);
-            }
 
             return response()->json([
                 'message' => 'Variante asociada al proveedor exitosamente',
