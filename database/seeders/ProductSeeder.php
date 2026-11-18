@@ -5,10 +5,9 @@ namespace Database\Seeders;
 use App\Models\AttributeDefinition;
 use App\Models\Brand;
 use App\Models\Category;
-use App\Models\OemReference;
 use App\Models\Product;
 use App\Models\ProductAttribute;
-use App\Models\ProductBatch;
+use App\Models\ProductCode;
 use App\Models\ProductInventory;
 use App\Models\ProductLine;
 use App\Models\ProductMedia;
@@ -263,7 +262,6 @@ class ProductSeeder extends Seeder
                 'category' => $categories['alternadores-arrancadores'],
                 'extra_categories' => [$categories['baterias']],
                 'line' => $lines['bosch-premium'],
-                'batch_tracking' => true,
                 'is_universal' => false,
                 'attributes' => [
                     ['name' => 'Voltaje', 'value' => '12', 'unit' => 'V'],
@@ -304,9 +302,6 @@ class ProductSeeder extends Seeder
                     ['category' => 'photo', 'file' => 'products/demo/alt-12v-90a.jpg', 'name' => 'alt-12v-90a.jpg', 'order' => 1],
                     ['category' => 'technical_sheet', 'file' => 'products/demo/alt-12v-90a-ficha.pdf', 'name' => 'alt-12v-90a-ficha.pdf', 'order' => 2],
                 ],
-                'batches' => [
-                    ['batch_number' => 'ALT-2026-01', 'cost' => 2220, 'notes' => 'Primer lote demo'],
-                ],
                 'vins' => [
                     ['vin' => '1FTFW1EG5JFA00001', 'notes' => 'F-150 demo'],
                 ],
@@ -318,7 +313,6 @@ class ProductSeeder extends Seeder
                 'category' => $categories['pastillas-freno'],
                 'extra_categories' => [$categories['discos-freno']],
                 'line' => $lines['brembo-oe'],
-                'batch_tracking' => false,
                 'is_universal' => false,
                 'attributes' => [
                     ['name' => 'Material', 'value' => 'Ceramica', 'unit' => null],
@@ -366,7 +360,6 @@ class ProductSeeder extends Seeder
                 'category' => $categories['bujias'],
                 'extra_categories' => [$categories['bobinas-encendido']],
                 'line' => $lines['bosch-standard'],
-                'batch_tracking' => true,
                 'is_universal' => false,
                 'attributes' => [
                     ['name' => 'Material', 'value' => 'Iridio', 'unit' => null],
@@ -402,9 +395,6 @@ class ProductSeeder extends Seeder
                 'media' => [
                     ['category' => 'photo', 'file' => 'products/demo/spk-ir-4pk.jpg', 'name' => 'spk-ir-4pk.jpg', 'order' => 1],
                 ],
-                'batches' => [
-                    ['batch_number' => 'SPK-2026-02', 'cost' => 523, 'notes' => 'Empaque de 4 piezas'],
-                ],
             ],
             [
                 'sku_base' => 'FIL-OIL-SYN',
@@ -413,7 +403,6 @@ class ProductSeeder extends Seeder
                 'category' => $categories['filtros-aceite'],
                 'extra_categories' => [],
                 'line' => null,
-                'batch_tracking' => false,
                 'is_universal' => true,
                 'attributes' => [
                     ['name' => 'Material', 'value' => 'Celulosa sintetica', 'unit' => null],
@@ -460,7 +449,6 @@ class ProductSeeder extends Seeder
                 'category' => $categories['baterias'],
                 'extra_categories' => [$categories['alternadores-arrancadores']],
                 'line' => $lines['bosch-premium'],
-                'batch_tracking' => true,
                 'is_universal' => true,
                 'attributes' => [
                     ['name' => 'Voltaje', 'value' => '12', 'unit' => 'V'],
@@ -496,9 +484,6 @@ class ProductSeeder extends Seeder
                 'media' => [
                     ['category' => 'photo', 'file' => 'products/demo/bat-agm-75ah.jpg', 'name' => 'bat-agm-75ah.jpg', 'order' => 1],
                 ],
-                'batches' => [
-                    ['batch_number' => 'BAT-2026-01', 'cost' => 1745, 'notes' => 'Lote con garantia de 18 meses'],
-                ],
             ],
             [
                 'sku_base' => 'SHK-GAS-FRT',
@@ -507,7 +492,6 @@ class ProductSeeder extends Seeder
                 'category' => $categories['amortiguadores'],
                 'extra_categories' => [],
                 'line' => $lines['monroe-oespectrum'],
-                'batch_tracking' => false,
                 'is_universal' => false,
                 'attributes' => [
                     ['name' => 'Posicion', 'value' => 'Delantera', 'unit' => null],
@@ -561,7 +545,6 @@ class ProductSeeder extends Seeder
                 'name' => $definition['name'],
                 'description' => $definition['description'],
                 'status' => 'active',
-                'batch_tracking' => $definition['batch_tracking'],
                 'is_universal' => $definition['is_universal'],
                 'image_url' => collect($definition['media'] ?? [])->first()['file'] ?? null,
             ]
@@ -572,10 +555,9 @@ class ProductSeeder extends Seeder
         );
 
         $this->replaceProductAttributes($product, $definition['attributes'] ?? []);
-        $this->replaceOemReferences($product, $definition['oem'] ?? []);
+        $this->addEquivalentNumbers($product, $definition['oem'] ?? []);
         $this->replaceMedia($product, $definition['media'] ?? []);
         $this->replaceCompatibility($product, $definition['compatibility'] ?? []);
-        $this->replaceBatches($product, $definition['batches'] ?? [], $suppliers->first());
         $this->replaceVins($product, $definition['vins'] ?? []);
 
         foreach ($definition['variants'] as $variantDefinition) {
@@ -718,12 +700,31 @@ class ProductSeeder extends Seeder
         }
     }
 
-    private function replaceOemReferences(Product $product, array $references): void
+    /**
+     * Números equivalentes (antes "referencias OEM") como números de parte adicionales del producto.
+     *
+     * @param  array<int, array{oem_code: string, manufacturer?: ?string}>  $references
+     */
+    private function addEquivalentNumbers(Product $product, array $references): void
     {
-        OemReference::query()->where('product_id', $product->id)->delete();
+        $normalizer = app(\App\Services\ProductCodeNormalizer::class);
 
         foreach ($references as $reference) {
-            $product->oemReferences()->create($reference);
+            $normalized = $normalizer->normalize($reference['oem_code']);
+            if ($normalized === '' || ProductCode::query()->active()->where('normalized_code', $normalized)->exists()) {
+                continue;
+            }
+
+            ProductCode::query()->create([
+                'product_id' => $product->id,
+                'variant_id' => null,
+                'code' => $reference['oem_code'],
+                'normalized_code' => $normalized,
+                'type' => 'alternate',
+                'status' => 'active',
+                'is_primary' => false,
+                'metadata' => ['manufacturer' => $reference['manufacturer'] ?? null],
+            ]);
         }
     }
 
@@ -755,23 +756,6 @@ class ProductSeeder extends Seeder
                 'notes' => $record['notes'],
                 'all_engines' => $record['engine'] === null,
                 'all_chassis' => false,
-            ]);
-        }
-    }
-
-    private function replaceBatches(Product $product, array $batches, ?Supplier $supplier): void
-    {
-        ProductBatch::withTrashed()->where('product_id', $product->id)->forceDelete();
-
-        foreach ($batches as $batch) {
-            ProductBatch::query()->create([
-                'product_id' => $product->id,
-                'batch_number' => $batch['batch_number'],
-                'manufacturing_date' => now()->subMonths(2)->toDateString(),
-                'expiry_date' => now()->addYears(2)->toDateString(),
-                'cost' => $batch['cost'],
-                'supplier_id' => $supplier?->id,
-                'notes' => $batch['notes'],
             ]);
         }
     }

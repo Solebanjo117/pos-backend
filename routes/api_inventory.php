@@ -14,9 +14,6 @@ Route::prefix('inventory')->group(function () {
     // Get batch inventory list (New)
     Route::get('/batches', [App\Http\Controllers\Api\BatchInventoryController::class, 'index']);
 
-    // Update batch notes
-    Route::put('/batches/{batch_number}/notes', [App\Http\Controllers\Api\BatchInventoryController::class, 'updateNotes']);
-
     // Update available inventory lot date and costs
     Route::patch('/lots/{lot}', [InventoryController::class, 'updateLot']);
 

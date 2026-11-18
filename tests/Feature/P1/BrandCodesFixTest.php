@@ -139,3 +139,61 @@ it('keeps the brand SKU equal to the product number even if a brand is saved wit
 
     expect($variant->fresh()->sku)->toBe('48521-JG00A');
 });
+
+it('has no separate OEM references: an equivalent number is a product number and is found in any format', function () {
+    expect(\Illuminate\Support\Facades\Schema::hasTable('oem_references'))->toBeFalse();
+
+    $warehouse = Warehouse::create(['code' => 'W-OEM', 'name' => 'Almacén']);
+    $user = User::factory()->create(['role' => 'admin', 'current_warehouse_id' => $warehouse->id, 'is_active' => true]);
+    $user->warehouses()->attach($warehouse->id);
+    $this->actingAs($user);
+    $product = brandProduct('48521-JG00A', [['CTR', '48521-JG00A']]);
+    ProductCode::create(['product_id' => $product->id, 'variant_id' => null, 'code' => 'SR-N380', 'normalized_code' => 'SRN380', 'type' => 'alternate', 'status' => 'active', 'is_primary' => false]);
+
+    $ids = collect($this->getJson('/api/v1/products?search=srn 380')->assertOk()->json('data'))->pluck('id')->all();
+
+    expect($ids)->toBe([$product->id]);
+});
+
+it('creates the missing zero stock record of a brand, only once', function () {
+    $warehouse = Warehouse::create(['code' => 'W-INV', 'name' => 'Almacén Principal']);
+    $product = brandProduct('48521-JG00A', [['CTR', '48521-JG00A'], ['WBS', '48521-JG00A']]);
+    [$ctr, $wbs] = [$product->variants[0], $product->variants[1]];
+    \App\Models\ProductInventory::create(['product_id' => $product->id, 'variant_id' => $ctr->id, 'warehouse_id' => $warehouse->id, 'quantity_available' => 3, 'quantity_reserved' => 0, 'reorder_point' => 2, 'reorder_quantity' => 5]);
+
+    $this->artisan('catalog:ensure-brand-inventory')->expectsOutputToContain('Se crearían 1 registros')->assertSuccessful();
+    $this->artisan('catalog:ensure-brand-inventory --apply')->assertSuccessful();
+    $this->artisan('catalog:ensure-brand-inventory --apply')->expectsOutputToContain('Todas las marcas ya tienen')->assertSuccessful();
+
+    $rows = \App\Models\ProductInventory::where('product_id', $product->id)->get()->keyBy('variant_id');
+    expect($rows)->toHaveCount(2)
+        ->and((int) $rows[$wbs->id]->quantity_available)->toBe(0)
+        ->and((int) $rows[$wbs->id]->reorder_point)->toBe(0)
+        ->and((int) $rows[$ctr->id]->quantity_available)->toBe(3);
+});
+
+it('no longer has the legacy production batches', function () {
+    expect(\Illuminate\Support\Facades\Schema::hasTable('product_batches'))->toBeFalse()
+        ->and(\Illuminate\Support\Facades\Schema::hasTable('warehouse_batches'))->toBeFalse()
+        ->and(\Illuminate\Support\Facades\Schema::hasColumn('products', 'batch_tracking'))->toBeFalse()
+        ->and(\Illuminate\Support\Facades\Schema::hasColumn('inventory_movements', 'product_batch_id'))->toBeFalse();
+});
+
+it('moves OEM references to product numbers, or to an alternative product when the number belongs to another product', function () {
+    $migration = require base_path('database/migrations/2026_11_18_154531_move_oem_references_to_product_codes.php');
+    $migration->down();
+
+    $terminal = brandProduct('TER-0001', [['555', 'TER-0001']]);
+    $other = brandProduct('45503-19155', [['555', '45503-19155']]);
+    \Illuminate\Support\Facades\DB::table('oem_references')->insert([
+        ['product_id' => $terminal->id, 'oem_code' => 'SR-7950', 'manufacturer' => 'OEM', 'created_at' => now(), 'updated_at' => now()],
+        ['product_id' => $terminal->id, 'oem_code' => '45503-19155', 'manufacturer' => '555', 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    $migration->up();
+
+    expect(\Illuminate\Support\Facades\Schema::hasTable('oem_references'))->toBeFalse()
+        ->and(productNumbers($terminal))->toBe(['TER-0001', 'SR-7950'])
+        ->and(productNumbers($other))->toBe(['45503-19155'])
+        ->and(\Illuminate\Support\Facades\DB::table('alternative_products')->where('primary_product_id', $terminal->id)->where('alternative_product_id', $other->id)->value('relationship_type'))->toBe('compatible');
+});

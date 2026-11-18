@@ -1,7 +1,6 @@
 <?php
 
 use App\Models\Brand;
-use App\Models\OemReference;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductCode;
@@ -66,7 +65,6 @@ it('moves the brands with their stock, prices and history into the kept product'
     ProductVehicleCompatibility::create(['product_id' => $kept->id, 'engine_id' => $this->engineA->id, 'all_engines' => false, 'all_chassis' => false, 'is_default' => true]);
     ProductVehicleCompatibility::create(['product_id' => $duplicate->id, 'engine_id' => $this->engineA->id, 'all_engines' => false, 'all_chassis' => false, 'is_default' => true]);
     ProductVehicleCompatibility::create(['product_id' => $duplicate->id, 'engine_id' => $this->engineB->id, 'all_engines' => false, 'all_chassis' => false]);
-    OemReference::create(['product_id' => $duplicate->id, 'oem_code' => 'SR-7950', 'manufacturer' => 'OEM']);
 
     $result = app(ProductMergeService::class)->merge($kept->id, [$duplicate->id]);
 
@@ -82,8 +80,7 @@ it('moves the brands with their stock, prices and history into the kept product'
         ->and((float) ProductInventory::where('variant_id', $ctr->id)->value('quantity_available'))->toBe(4.0)
         ->and(ProductPricing::where('variant_id', $ctr->id)->value('product_id'))->toBe($kept->id)
         ->and(ProductCode::where('variant_id', $ctr->id)->value('product_id'))->toBe($kept->id)
-        ->and(ProductMedia::where('file_path', 'p/ctr.jpg')->value('product_id'))->toBe($kept->id)
-        ->and(OemReference::where('oem_code', 'SR-7950')->value('product_id'))->toBe($kept->id);
+        ->and(ProductMedia::where('file_path', 'p/ctr.jpg')->value('product_id'))->toBe($kept->id);
 
     // El código del producto repetido pasa como secundario; el principal sigue siendo el del conservado.
     expect(ProductCode::where('product_id', $kept->id)->whereNull('variant_id')->where('is_primary', true)->pluck('code')->all())->toBe(['4410A173T'])

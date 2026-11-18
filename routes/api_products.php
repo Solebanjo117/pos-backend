@@ -33,9 +33,6 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     // --> Vehicle Compatibility (Fitment) - Nested
     Route::get('/{product}/compatibility', [ProductCompatibilityController::class, 'index']);
 
-    // Batch Management
-    Route::get('/{product}/batches', [ProductController::class, 'getBatches']);
-
     // --> Product Variants (Brands)
     Route::get('/{product}/variants', [App\Http\Controllers\Api\ProductVariantController::class, 'index']);
     Route::post('/{product}/variants', [App\Http\Controllers\Api\ProductVariantController::class, 'store'])->middleware('role:admin,manager,buyer');
@@ -48,11 +45,6 @@ Route::middleware([\App\Http\Middleware\EnforceWarehouseContext::class])->prefix
     Route::get('/{product}/variants/{variant}/suppliers', [App\Http\Controllers\Api\VariantSupplierController::class, 'index'])->middleware('role:admin,manager,buyer');
     Route::put('/{product}/variants/{variant}/suppliers/{supplier}', [App\Http\Controllers\Api\VariantSupplierController::class, 'upsert'])->middleware('role:admin,manager,buyer');
     Route::delete('/{product}/variants/{variant}/suppliers/{supplier}', [App\Http\Controllers\Api\VariantSupplierController::class, 'destroy'])->middleware('role:admin,manager,buyer');
-
-    // --> OEM References
-    Route::get('/{product}/oem-references', [ProductController::class, 'oemReferences']);
-    Route::post('/{product}/oem-references', [ProductController::class, 'addOemReference'])->middleware('role:admin,manager,buyer');
-    Route::delete('/{product}/oem-references/{referenceId}', [ProductController::class, 'removeOemReference'])->middleware('role:admin,manager,buyer');
 
     // --> Alternatives (Interchange)
     Route::get('/{product}/alternatives', [ProductController::class, 'alternatives']);

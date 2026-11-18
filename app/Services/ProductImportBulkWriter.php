@@ -53,7 +53,6 @@ class ProductImportBulkWriter
                     'description' => $product['description'] ?: $product['name'],
                     'image_url' => $product['image_url'],
                     'status' => 'active',
-                    'batch_tracking' => false,
                     'is_universal' => false,
                     'created_at' => $now,
                     'updated_at' => $now,
@@ -239,7 +238,6 @@ class ProductImportBulkWriter
                 'notes' => 'Saldo inicial FIFO',
                 'user_id' => Auth::id(),
                 'supplier_id' => null,
-                'product_batch_id' => null,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);

@@ -152,14 +152,6 @@ class ProductController extends Controller
             ? $this->productCodeService->findActive((string) $searchTerm)
             : null;
 
-        // OEM Code Filter
-        if ($request->has('oem_code')) {
-            $oemCode = $request->get('oem_code');
-            $query->whereHas('oemReferences', function ($q) use ($oemCode) {
-                $q->where('oem_code', $oemCode);
-            });
-        }
-
         // Attribute Filter (format: "Value" or "Name:Value")
         if ($request->has('attribute_value')) {
             $attrValue = $request->get('attribute_value');
@@ -649,41 +641,6 @@ class ProductController extends Controller
     }
 
     /**
-     * Add OEM reference.
-     */
-    public function addOemReference(Request $request, Product $product): JsonResponse
-    {
-        $validated = $request->validate([
-            'oem_code' => 'required|string|max:50',
-            'manufacturer' => 'nullable|string|max:100',
-        ]);
-
-        $product->oemReferences()->create($validated);
-
-        return response()->json([
-            'message' => 'Referencia OEM agregada',
-        ], 201);
-    }
-
-    /**
-     * Remove OEM reference.
-     */
-    public function removeOemReference(Product $product, int $referenceId): JsonResponse
-    {
-        $deleted = $product->oemReferences()->where('id', $referenceId)->delete();
-
-        if (! $deleted) {
-            return response()->json([
-                'message' => 'Referencia no encontrada',
-            ], 404);
-        }
-
-        return response()->json([
-            'message' => 'Referencia OEM eliminada',
-        ]);
-    }
-
-    /**
      * Add alternative product.
      */
     public function addAlternative(Request $request, Product $product): JsonResponse
@@ -713,39 +670,6 @@ class ProductController extends Controller
 
         return response()->json([
             'message' => 'Producto alternativo eliminado',
-        ]);
-    }
-
-    /**
-     * Get batches for a product.
-     */
-    public function getBatches(Request $request, Product $product)
-    {
-        $warehouseId = $request->input('warehouse_id');
-
-        $batches = $product->batches()
-            ->when($warehouseId, function ($query) use ($warehouseId) {
-                $query->whereHas('warehouseBatches', function ($q) use ($warehouseId) {
-                    $q->where('warehouse_id', $warehouseId)
-                        ->where('quantity', '>', 0);
-                });
-            })
-            ->with(['warehouseBatches' => function ($query) use ($warehouseId) {
-                if ($warehouseId) {
-                    $query->where('warehouse_id', $warehouseId);
-                }
-            }])
-            ->get();
-
-        return response()->json([
-            'data' => $batches->map(function ($batch) {
-                return [
-                    'id' => $batch->id,
-                    'batch_number' => $batch->batch_number,
-                    'expiry_date' => $batch->expiry_date,
-                    'quantity' => $batch->warehouseBatches->sum('quantity'),
-                ];
-            }),
         ]);
     }
 
@@ -869,16 +793,6 @@ class ProductController extends Controller
     }
 
     // ==================== REFERENCES & ALTERNATIVES ====================
-
-    /**
-     * GET /api/v1/products/{id}/oem-references
-     */
-    public function oemReferences(Product $product): JsonResponse
-    {
-        return response()->json([
-            'data' => $product->oemReferences()->get(),
-        ]);
-    }
 
     /**
      * GET /api/v1/products/{id}/alternatives

@@ -125,7 +125,6 @@ class InventoryMovementController extends Controller
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.warehouse_id' => 'required|exists:warehouses,id',
             'items.*.quantity' => 'required|numeric|min:0.01',
-            'items.*.product_batch_id' => 'nullable|exists:product_batches,id',
         ]);
 
         try {

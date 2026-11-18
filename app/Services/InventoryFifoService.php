@@ -46,7 +46,6 @@ class InventoryFifoService
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? Auth::id(),
                 'supplier_id' => $data['supplier_id'] ?? null,
-                'product_batch_id' => $data['product_batch_id'] ?? null,
             ]);
 
             $lot = $this->createLotForInboundMovement($movement, $data);
@@ -151,7 +150,6 @@ class InventoryFifoService
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? Auth::id(),
-                'product_batch_id' => $data['product_batch_id'] ?? null,
             ]);
 
             $remaining = $quantityToConsume;

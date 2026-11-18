@@ -137,7 +137,6 @@ class InventoryFifoDemoSeeder extends Seeder
                 'name' => 'Alternador 12V 90A',
                 'description' => 'Alternador demo con trazabilidad FIFO completa.',
                 'status' => 'active',
-                'batch_tracking' => true,
                 'is_universal' => false,
             ]
         );

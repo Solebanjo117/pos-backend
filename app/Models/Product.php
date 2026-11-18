@@ -26,7 +26,6 @@ class Product extends Model
         'description',
         'image_url',
         'status',
-        'batch_tracking',
         'is_universal',
         'system_id',
     ];
@@ -36,7 +35,6 @@ class Product extends Model
         'category_id' => 'integer',
         'engine_id' => 'integer',
         'status' => 'string',
-        'batch_tracking' => 'boolean',
         'is_universal' => 'boolean',
     ];
 
@@ -217,14 +215,6 @@ class Product extends Model
     }
 
     /**
-     * Get the OEM references for the product.
-     */
-    public function oemReferences(): HasMany
-    {
-        return $this->hasMany(OemReference::class);
-    }
-
-    /**
      * Get the alternative products (where this is the primary).
      */
     public function alternatives(): BelongsToMany
@@ -352,11 +342,6 @@ class Product extends Model
                                                 ->orWhere('system_id', $operator, $wordBoundary)
                                                 ->orWhere('system_id', $word);
                                         })
-                                        ->orWhereHas('oemReferences', function ($oq) use ($word, $prefix, $wordBoundary, $operator) {
-                                            $oq->where('oem_code', $word)
-                                                ->orWhere('oem_code', $operator, $prefix)
-                                                ->orWhere('oem_code', $operator, $wordBoundary);
-                                        })
                                         ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary, $operator) {
                                             $aq->whereNull('variant_id')
                                                 ->where(function ($aqq) use ($word, $prefix, $wordBoundary, $operator) {
@@ -393,9 +378,6 @@ class Product extends Model
                                         ->orWhereHas('variants', function ($vq) use ($w, $operator) {
                                             $vq->where('system_id', $operator, $w);
                                         })
-                                        ->orWhereHas('oemReferences', function ($oq) use ($w, $operator) {
-                                            $oq->where('oem_code', $operator, $w);
-                                        })
                                         ->orWhereHas('attributes', function ($aq) use ($w, $operator) {
                                             $aq->whereNull('variant_id')
                                                 ->where(function ($aqq) use ($w, $operator) {
@@ -422,9 +404,6 @@ class Product extends Model
                                     static::orWhereNormalizedCodes($productInfo, ['system_id'], $codeNeedle);
                                     $productInfo->orWhereHas('variants', function ($vq) use ($codeNeedle) {
                                         static::whereNormalizedCodes($vq, ['system_id'], $codeNeedle);
-                                    });
-                                    $productInfo->orWhereHas('oemReferences', function ($oq) use ($codeNeedle) {
-                                        static::whereNormalizedCodes($oq, ['oem_code'], $codeNeedle);
                                     });
                                 }
 
@@ -780,13 +759,5 @@ class Product extends Model
         }
 
         return $this->inventory()->sum('quantity_available');
-    }
-
-    /**
-     * Get the batches for the product.
-     */
-    public function batches(): HasMany
-    {
-        return $this->hasMany(ProductBatch::class);
     }
 }

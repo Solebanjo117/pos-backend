@@ -231,8 +231,6 @@ class StoreProductRequest extends FormRequest
             'vins.*' => 'string|min:1|max:40',
 
             // OEM / Cross References
-            'oem_references' => 'nullable|array',
-            'oem_references.*' => 'string|min:1|max:100',
         ];
     }
 
@@ -276,8 +274,6 @@ class StoreProductRequest extends FormRequest
             'initial_inventory.*.stock_available.min' => 'El stock debe ser mayor o igual a 0',
             'vins.*.min' => 'El VIN debe tener al menos 1 carácter',
             'vins.*.max' => 'El VIN no puede tener más de 40 caracteres',
-            'oem_references.*.min' => 'La referencia debe tener al menos 1 carácter',
-            'oem_references.*.max' => 'La referencia no puede exceder 100 caracteres',
             'codes.*.code.required' => 'Cada código debe tener un valor.',
             'codes.*.type.in' => 'El tipo de código seleccionado no es válido.',
         ];
