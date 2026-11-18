@@ -197,3 +197,40 @@ it('prints the supplier code on the purchase order, with our part number below',
     expect($html)->toContain('726HAIQ7271')
         ->and($html)->toContain('Nuestro: D8521-3RA1A');
 });
+
+it('creates a brand with its suppliers and the supplier of the initial stock', function () {
+    $ctr = Brand::create(['name' => 'CTR', 'status' => 'active']);
+
+    $response = $this->postJson("/api/v1/products/{$this->product->id}/variants", [
+        'brand_id' => $ctr->id,
+        'status' => 'active',
+        'pricing' => ['base_price' => 17, 'cost' => 9.54, 'cost_base' => 9.54],
+        'suppliers' => [
+            ['supplier_id' => $this->nikomoto->id, 'supplier_code' => '726HAIQ7271', 'supplier_cost' => 9.54],
+        ],
+        'initial_inventory' => [
+            ['warehouse_id' => $this->warehouse->id, 'stock_available' => 3, 'supplier_id' => $this->japan->id],
+        ],
+    ])->assertCreated();
+
+    $variantId = $response->json('data.id');
+    $links = ProductSupplier::where('variant_id', $variantId)->get()->keyBy('supplier_id');
+
+    expect($links)->toHaveCount(2)
+        ->and($links[$this->nikomoto->id]->supplier_code)->toBe('726HAIQ7271')
+        ->and((float) $links[$this->nikomoto->id]->supplier_cost)->toBe(9.54)
+        ->and($links[$this->nikomoto->id]->is_preferred)->toBeTrue()
+        ->and(InventoryLot::where('variant_id', $variantId)->sole()->supplier_id)->toBe($this->japan->id);
+});
+
+it('creates a brand without suppliers as before', function () {
+    $ctr = Brand::create(['name' => 'CTR', 'status' => 'active']);
+
+    $variantId = $this->postJson("/api/v1/products/{$this->product->id}/variants", [
+        'brand_id' => $ctr->id,
+        'initial_inventory' => [['warehouse_id' => $this->warehouse->id, 'stock_available' => 2]],
+    ])->assertCreated()->json('data.id');
+
+    expect(ProductSupplier::where('variant_id', $variantId)->count())->toBe(0)
+        ->and(InventoryLot::where('variant_id', $variantId)->sole()->supplier_id)->toBeNull();
+});

@@ -883,6 +883,14 @@ class ProductService
                 $pricing->save();
             }
 
+            // Proveedores indicados al crear la marca (código y costo de cada uno).
+            foreach ($data['suppliers'] ?? [] as $supplierData) {
+                app(VariantSupplierService::class)->upsert($variant, (int) $supplierData['supplier_id'], [
+                    'supplier_code' => $supplierData['supplier_code'] ?? null,
+                    'supplier_cost' => $supplierData['supplier_cost'],
+                ]);
+            }
+
             $inventoryRows = $data['initial_inventory'] ?? [];
             if (empty($inventoryRows)) {
                 $defaultWarehouse = DB::table('warehouses')->first();
@@ -912,13 +920,19 @@ class ProductService
                 ]);
 
                 if ($quantityAvailable > 0) {
-                    app(InventoryFifoService::class)->ensureOpeningLotForInventory(
+                    $openingLot = app(InventoryFifoService::class)->ensureOpeningLotForInventory(
                         $product->id,
                         $variant->id,
                         (int) $inventory->warehouse_id,
                         $quantityAvailable,
                         (float) ($variant->pricing?->cost_total ?? 0)
                     );
+
+                    // De qué proveedor vino la existencia inicial (si se indicó). Si la marca aún no tiene
+                    // ese proveedor, se agrega con el costo del lote.
+                    if ($openingLot && ! empty($inventoryData['supplier_id'])) {
+                        app(InventoryLotSupplierService::class)->assign($openingLot, (int) $inventoryData['supplier_id'], auth()->user());
+                    }
                 }
             }
 
