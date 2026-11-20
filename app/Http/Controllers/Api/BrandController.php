@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreBrandRequest;
 use App\Http\Requests\UpdateBrandRequest;
 use App\Models\Brand;
+use App\Services\SupplierBrandService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -61,7 +62,7 @@ class BrandController extends Controller
     public function all(): JsonResponse
     {
         $brands = Brand::orderBy('name')
-            ->get(['id', 'name', 'logo_url']);
+            ->get(['id', 'name', 'logo_url', 'tier']);
 
         return response()->json(['data' => $brands]);
     }
@@ -226,6 +227,8 @@ class BrandController extends Controller
             'contact_name' => $s->contact_name,
             'phone' => $s->phone,
         ])->values()->all();
+        // Proveedores por sus piezas (calculado) y marcados a mano, en una sola lista.
+        $data['supplier_links'] = app(SupplierBrandService::class)->forBrand($brand)->all();
 
         return $data;
     }

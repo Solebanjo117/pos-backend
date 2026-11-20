@@ -68,6 +68,9 @@ class ProductResource extends JsonResource
                     'name' => $category->name,
                 ])->values()
                 : [],
+            'vehicles' => $this->relationLoaded('vehicleCompatibility')
+                ? $this->compatibleVehicles()
+                : [],
 
             // Default variant info (for backwards compatibility)
             'default_variant' => $this->when($defaultVariant, [
@@ -151,6 +154,48 @@ class ProductResource extends JsonResource
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
         ];
+    }
+
+    /**
+     * Vehículos compatibles resumidos para listados: "Marca Modelo Años" más motor o chasis.
+     *
+     * @return array<int, array{label: string, detail: string|null}>
+     */
+    private function compatibleVehicles(): array
+    {
+        return $this->vehicleCompatibility
+            ->map(function ($compatibility): ?array {
+                if ($compatibility->scope_type === 'raw') {
+                    $text = trim((string) $compatibility->raw_vehicle_text);
+
+                    return $text === '' ? null : ['label' => $text, 'detail' => null];
+                }
+
+                $model = $compatibility->model
+                    ?? $compatibility->engine?->model
+                    ?? $compatibility->chassis?->model;
+                $make = $compatibility->make ?? $model?->make;
+                $years = implode('-', array_filter([$model?->year_from, $model?->year_to]));
+                $label = trim(implode(' ', array_filter([
+                    $make?->name,
+                    $model?->name,
+                    $model?->generation,
+                    $years,
+                ])));
+
+                if ($label === '') {
+                    return null;
+                }
+
+                $detail = $compatibility->engine?->full_description
+                    ?: ($compatibility->chassis?->code ?: null);
+
+                return ['label' => $label, 'detail' => $detail];
+            })
+            ->filter()
+            ->unique(fn (array $vehicle): string => $vehicle['label'].'|'.$vehicle['detail'])
+            ->values()
+            ->all();
     }
 
     /**

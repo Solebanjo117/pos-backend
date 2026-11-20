@@ -78,11 +78,6 @@ it('syncs deferred product metadata when the final update request is submitted',
         'value' => 'Acero',
     ]);
 
-    $product->oemReferences()->create([
-        'oem_code' => 'OEM-OLD',
-        'manufacturer' => 'Marca vieja',
-    ]);
-
     $product->alternatives()->attach($oldAlternative->id, [
         'relationship_type' => 'compatible',
     ]);
@@ -98,12 +93,6 @@ it('syncs deferred product metadata when the final update request is submitted',
                 'name' => 'Voltaje',
                 'value' => '12',
                 'unit' => 'V',
-            ],
-        ],
-        'oem_references' => [
-            [
-                'oem_code' => 'OEM-NEW',
-                'manufacturer' => 'Marca nueva',
             ],
         ],
         'alternatives' => [
@@ -140,15 +129,6 @@ it('syncs deferred product metadata when the final update request is submitted',
         'name' => 'Voltaje',
         'value' => '12',
         'unit' => 'V',
-    ]);
-    $this->assertDatabaseMissing('oem_references', [
-        'product_id' => $product->id,
-        'oem_code' => 'OEM-OLD',
-    ]);
-    $this->assertDatabaseHas('oem_references', [
-        'product_id' => $product->id,
-        'oem_code' => 'OEM-NEW',
-        'manufacturer' => 'Marca nueva',
     ]);
     $this->assertDatabaseMissing('alternative_products', [
         'primary_product_id' => $product->id,
@@ -191,11 +171,6 @@ it('does not delete omitted deferred metadata blocks on product update', functio
         'value' => 'Negro',
     ]);
 
-    $product->oemReferences()->create([
-        'oem_code' => 'OEM-KEEP',
-        'manufacturer' => 'Marca conservada',
-    ]);
-
     $product->alternatives()->attach($alternative->id, [
         'relationship_type' => 'substitute',
     ]);
@@ -213,10 +188,6 @@ it('does not delete omitted deferred metadata blocks on product update', functio
         'variant_id' => null,
         'name' => 'Color',
         'value' => 'Negro',
-    ]);
-    $this->assertDatabaseHas('oem_references', [
-        'product_id' => $product->id,
-        'oem_code' => 'OEM-KEEP',
     ]);
     $this->assertDatabaseHas('alternative_products', [
         'primary_product_id' => $product->id,

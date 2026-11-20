@@ -8,6 +8,8 @@ use App\Models\ProductVariant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
+use function Pest\Laravel\actingAs;
+
 uses(RefreshDatabase::class);
 
 function createProductWithStatus(string $status, string $name = 'Test Product'): Product

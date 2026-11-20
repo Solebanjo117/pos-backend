@@ -84,9 +84,15 @@ it('matches product and variant codes while ignoring sku dashes', function (stri
         'is_primary' => false,
     ]);
 
-    $matchingProduct->oemReferences()->create([
-        'oem_code' => 'OEM-53010-S04-000',
-        'manufacturer' => 'Honda',
+    // Número equivalente (antes "referencia OEM"): ahora es un número de parte del producto.
+    ProductCode::create([
+        'product_id' => $matchingProduct->id,
+        'variant_id' => null,
+        'code' => 'OEM-53010-S04-000',
+        'normalized_code' => 'OEM53010S04000',
+        'type' => 'alternate',
+        'status' => 'active',
+        'is_primary' => false,
     ]);
 
     Product::create([

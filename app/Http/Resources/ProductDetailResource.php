@@ -42,7 +42,6 @@ class ProductDetailResource extends JsonResource
             'name' => $this->name,
             'description' => $this->description,
             'status' => $this->status,
-            'batch_tracking' => $this->batch_tracking,
             'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
             'product_line_id' => $this->product_line_id,
@@ -156,15 +155,6 @@ class ProductDetailResource extends JsonResource
                 ])
             ),
 
-            'oem_references' => $this->when(
-                $this->relationLoaded('oemReferences'),
-                fn () => $this->oemReferences->map(fn ($ref) => [
-                    'id' => $ref->id,
-                    'oem_code' => $ref->oem_code,
-                    'manufacturer' => $ref->manufacturer,
-                ])
-            ),
-
             'alternatives' => $this->when(
                 $this->relationLoaded('alternatives'),
                 fn () => $this->alternatives->map(fn ($alt) => [
@@ -205,6 +195,9 @@ class ProductDetailResource extends JsonResource
                     'chassis_id' => $comp->chassis_id,
                     'make' => $comp->make?->name ?? $comp->model?->make?->name ?? $comp->engine?->model?->make?->name ?? ($comp->chassis?->model?->make?->name ?? null),
                     'model' => $comp->model?->name ?? $comp->engine?->model?->name ?? ($comp->chassis?->model?->name ?? null),
+                    'generation' => $comp->model?->generation ?? $comp->engine?->model?->generation ?? null,
+                    'engine_code' => $comp->engine?->engine_code,
+                    'raw_vehicle_text' => $comp->raw_vehicle_text,
                     'year_range' => $comp->model?->year_range ?? $comp->engine?->model?->year_range ?? ($comp->chassis?->model?->year_range ?? null),
                     'engine' => $comp->engine?->full_description,
                     'chassis' => $comp->chassis ? [
@@ -215,6 +208,7 @@ class ProductDetailResource extends JsonResource
                     ] : null,
                     'all_engines' => (bool) $comp->all_engines,
                     'all_chassis' => (bool) $comp->all_chassis,
+                    'is_default' => (bool) $comp->is_default,
                     'notes' => $comp->notes,
                 ])
             ),

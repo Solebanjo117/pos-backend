@@ -2,7 +2,6 @@
 
 use App\Models\Brand;
 use App\Models\Category;
-use App\Models\OemReference;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductInventory;
@@ -207,12 +206,6 @@ function createSourceProductForDuplication(Warehouse $warehouse): array
         'all_chassis' => false,
     ]);
 
-    OemReference::create([
-        'product_id' => $source->id,
-        'oem_code' => 'OEM-DUP-001',
-        'manufacturer' => 'OEM Co',
-    ]);
-
     ProductMedia::create([
         'product_id' => $source->id,
         'media_type' => 'image',
@@ -277,7 +270,6 @@ it('duplicates product preserving core setup and excluding inventory, vins and a
         'attributes',
         'productSuppliers',
         'vehicleCompatibility',
-        'oemReferences',
         'media',
         'variants.suppliers',
         'variants.pricing',
@@ -303,7 +295,6 @@ it('duplicates product preserving core setup and excluding inventory, vins and a
 
     expect($duplicated->productSuppliers)->toHaveCount(1);
     expect($duplicated->vehicleCompatibility)->toHaveCount(1);
-    expect($duplicated->oemReferences)->toHaveCount(1);
     expect($duplicated->media)->toHaveCount(1);
 
     expect($duplicated->inventory)->toHaveCount(0);

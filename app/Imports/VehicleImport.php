@@ -27,7 +27,11 @@ class VehicleImport extends BaseImport
             ['key' => 'generation', 'label' => 'Generacion', 'type' => 'text'],
             ['key' => 'code', 'label' => 'Chasis (CODE, opcional)', 'type' => 'text'],
             ['key' => 'engine', 'label' => 'Motor (ENGINE)', 'type' => 'text'],
+            ['key' => 'nickname', 'label' => 'Apodo del motor', 'type' => 'text'],
             ['key' => 'displacement', 'label' => 'Cilindrada', 'type' => 'text'],
+            ['key' => 'valves', 'label' => 'Valvulas (VALVE)', 'type' => 'text'],
+            ['key' => 'cam_type', 'label' => 'Arbol de levas (CAM)', 'type' => 'text'],
+            ['key' => 'cylinders', 'label' => 'Cilindros (CYLINDER)', 'type' => 'text'],
             ['key' => 'fuel_type', 'label' => 'Combustible', 'type' => 'text'],
             ['key' => 'aspiration', 'label' => 'Aspiracion', 'type' => 'text'],
             ['key' => 'vin', 'label' => 'VIN', 'type' => 'text'],
@@ -43,7 +47,11 @@ class VehicleImport extends BaseImport
             'generation' => 'P10',
             'code' => 'P10',
             'engine' => '1NZFE',
+            'nickname' => '',
             'displacement' => '1.5L',
+            'valves' => '16V',
+            'cam_type' => 'DOHC',
+            'cylinders' => '4',
             'fuel_type' => 'Gasoline',
             'aspiration' => 'Naturally Aspirated',
             'vin' => 'MR2BT9F3101124478',
@@ -67,7 +75,11 @@ class VehicleImport extends BaseImport
             'code', 'codigo', 'chassis', 'chassis_code' => 'code',
             'engine', 'motor', 'engine_code' => 'engine',
             'engine_specs', 'engine_spec', 'especificaciones_motor', 'specs' => 'engine_specs',
-            'displacement', 'cilindrada' => 'displacement',
+            'displacement', 'cilindrada', 'liter', 'liters', 'litros' => 'displacement',
+            'valves', 'valve', 'valvulas' => 'valves',
+            'cam', 'cam_type', 'arbol_levas', 'arbol_de_levas' => 'cam_type',
+            'cylinders', 'cylinder', 'cilindros' => 'cylinders',
+            'nickname', 'apodo', 'apodo_motor' => 'nickname',
             'fuel_type', 'combustible', 'tipo_combustible' => 'fuel_type',
             'aspiration', 'aspiracion' => 'aspiration',
             'vin', 'numero_vin', 'vin_number' => 'vin',
@@ -113,6 +125,18 @@ class VehicleImport extends BaseImport
             $errors[] = $e->getMessage();
         }
 
+        $specs = $this->engineSpecValues($this->withEngineSpecs($row));
+        if ($specs['valves'] !== null && preg_match('/^\d{1,2}V$/', $specs['valves']) !== 1) {
+            $errors[] = 'Las valvulas deben indicarse como numero, por ejemplo 16 o 16V.';
+        }
+        if ($specs['cam_type'] !== null && ! in_array($specs['cam_type'], ['SOHC', 'DOHC', 'OHV'], true)) {
+            $errors[] = 'El arbol de levas debe ser SOHC, DOHC u OHV.';
+        }
+        $cylinders = $this->nullIfEmpty($row['cylinders'] ?? null);
+        if ($cylinders !== null && (filter_var($cylinders, FILTER_VALIDATE_INT) === false || (int) $cylinders < 1 || (int) $cylinders > 16)) {
+            $errors[] = 'El numero de cilindros debe estar entre 1 y 16.';
+        }
+
         return $errors;
     }
 
@@ -127,7 +151,7 @@ class VehicleImport extends BaseImport
         $makeId = $this->resolveIdOrCreateByName(VehicleMake::class, 'name', $row['make']);
         [$yearFrom, $yearTo] = $this->parseYearRangeFromRow($row);
 
-        $modelName = trim($row['model']);
+        $modelName = (string) preg_replace('/\s+/u', ' ', mb_strtoupper(trim($row['model'])));
         $generation = $this->nullIfEmpty($row['generation'] ?? null) ?? $this->nullIfEmpty($row['code'] ?? null);
         $model = VehicleModel::query()
             ->where('make_id', $makeId)
@@ -177,20 +201,27 @@ class VehicleImport extends BaseImport
         $engineCode = $this->normalizeEngineCode($row['engine'] ?? null);
         $engine = null;
         if ($engineCode) {
-            $engine = VehicleEngine::query()
+            $specs = $this->engineSpecValues($row);
+            $candidates = VehicleEngine::query()
                 ->where(function ($query) use ($makeId) {
                     $query->where('make_id', $makeId)
                         ->orWhereHas('model', fn ($modelQuery) => $modelQuery->where('make_id', $makeId))
                         ->orWhereHas('models', fn ($modelsQuery) => $modelsQuery->where('make_id', $makeId));
                 })
                 ->whereRaw('LOWER(TRIM(engine_code)) = ?', [mb_strtolower($engineCode)])
-                ->first();
+                ->orderBy('id')
+                ->get();
+            $engine = $this->matchEngineVersion($candidates, $specs);
 
             $engineData = [
                 'make_id' => $makeId,
                 'model_id' => $model->id,
                 'engine_code' => $engineCode,
-                'displacement' => $this->nullIfEmpty($row['displacement'] ?? null),
+                'nickname' => $specs['nickname'],
+                'displacement' => $specs['displacement'],
+                'valves' => $specs['valves'],
+                'cam_type' => $specs['cam_type'],
+                'cylinders' => $specs['cylinders'],
                 'fuel_type' => $this->normalizeFuelType($row['fuel_type'] ?? null),
                 'aspiration' => $this->nullIfEmpty($row['aspiration'] ?? null),
             ];
@@ -238,6 +269,16 @@ class VehicleImport extends BaseImport
             $row['displacement'] = str_replace(',', '.', $matches[1]).'L';
         }
 
+        if ($this->nullIfEmpty($row['valves'] ?? null) === null
+            && preg_match('/\b(\d{1,2})\s*V\b/i', $specs, $matches) === 1) {
+            $row['valves'] = $matches[1].'V';
+        }
+
+        if ($this->nullIfEmpty($row['cam_type'] ?? null) === null
+            && preg_match('/\b(SOHC|DOHC|OHV)\b/i', $specs, $matches) === 1) {
+            $row['cam_type'] = strtoupper($matches[1]);
+        }
+
         if ($this->nullIfEmpty($row['aspiration'] ?? null) === null) {
             $row['aspiration'] = match (true) {
                 preg_match('/\bturbo\b/i', $specs) === 1 => 'Turbo',
@@ -257,6 +298,74 @@ class VehicleImport extends BaseImport
         }
 
         return $row;
+    }
+
+    /**
+     * Ficha del motor normalizada desde la fila: "16" -> "16V", "dohc" -> "DOHC".
+     *
+     * @param  array<string, mixed>  $row
+     * @return array{nickname: ?string, displacement: ?string, valves: ?string, cam_type: ?string, cylinders: ?int}
+     */
+    private function engineSpecValues(array $row): array
+    {
+        $valves = $this->nullIfEmpty($row['valves'] ?? null);
+        $valves = $valves === null ? null : mb_strtoupper(str_replace(' ', '', $valves));
+        if ($valves !== null && ! str_ends_with($valves, 'V')) {
+            $valves .= 'V';
+        }
+
+        $camType = $this->nullIfEmpty($row['cam_type'] ?? null);
+        $nickname = $this->nullIfEmpty($row['nickname'] ?? null);
+        $cylinders = $this->nullIfEmpty($row['cylinders'] ?? null);
+
+        return [
+            'nickname' => $nickname === null ? null : mb_strtoupper($nickname),
+            'displacement' => $this->nullIfEmpty($row['displacement'] ?? null),
+            'valves' => $valves,
+            'cam_type' => $camType === null ? null : mb_strtoupper($camType),
+            'cylinders' => filter_var($cylinders, FILTER_VALIDATE_INT) === false ? null : (int) $cylinders,
+        ];
+    }
+
+    /**
+     * Elige la versión del motor que corresponde a la ficha de la fila.
+     *
+     * Coincide si cada dato de la ficha (cilindrada, válvulas, árbol de levas) es igual o falta en
+     * alguno de los dos lados. Si ninguna versión es compatible se devuelve null y se crea otra
+     * versión del mismo código (p. ej. 6G72 12V y 6G72 24V).
+     *
+     * @param  \Illuminate\Support\Collection<int, VehicleEngine>  $candidates
+     * @param  array{displacement: ?string, valves: ?string, cam_type: ?string}  $specs
+     */
+    private function matchEngineVersion($candidates, array $specs): ?VehicleEngine
+    {
+        $key = fn (mixed $value): ?string => $value === null || trim((string) $value) === ''
+            ? null
+            : mb_strtoupper(str_replace(' ', '', (string) $value));
+
+        $compatible = $candidates->filter(function (VehicleEngine $engine) use ($specs, $key): bool {
+            foreach (['displacement', 'valves', 'cam_type'] as $field) {
+                $existing = $key($engine->{$field});
+                $incoming = $key($specs[$field] ?? null);
+                if ($existing !== null && $incoming !== null && $existing !== $incoming) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+        $exact = $compatible->first(function (VehicleEngine $engine) use ($specs, $key): bool {
+            foreach (['displacement', 'valves', 'cam_type'] as $field) {
+                if ($key($engine->{$field}) !== $key($specs[$field] ?? null)) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+        return $exact ?? $compatible->first();
     }
 
     private function parseYearRangeFromRow(array $row): array

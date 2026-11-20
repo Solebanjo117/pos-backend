@@ -16,6 +16,7 @@ use App\Models\Product;
 use App\Models\ProductPricing;
 use App\Models\ProductVariant;
 use App\Models\ProductVehicleCompatibility;
+use App\Services\InventoryFifoService;
 use App\Services\ProductCodeService;
 use App\Services\ProductProfileService;
 use App\Services\ProductService;
@@ -92,6 +93,7 @@ class ProductController extends Controller
 
         // For archived products, variants are also soft-deleted — must withTrashed
         $query->with([
+            'defaultVariant.brand',
             'variants' => function ($q) use ($archived) {
                 if ($archived === 'true' || $archived === 'all') {
                     $q->withTrashed();
@@ -106,12 +108,17 @@ class ProductController extends Controller
                     $q->where('warehouse_id', $warehouseId);
                 }
             },
+            'variants.inventory.warehouse',
             'inventory' => function ($q) use ($warehouseId) {
                 if ($warehouseId) {
                     $q->where('warehouse_id', $warehouseId);
                 }
             },
             'codes',
+            'vehicleCompatibility.make',
+            'vehicleCompatibility.model.make',
+            'vehicleCompatibility.engine.model.make',
+            'vehicleCompatibility.chassis.model.make',
         ]);
 
         // ProductLine Filter
@@ -145,14 +152,6 @@ class ProductController extends Controller
             ? $this->productCodeService->findActive((string) $searchTerm)
             : null;
 
-        // OEM Code Filter
-        if ($request->has('oem_code')) {
-            $oemCode = $request->get('oem_code');
-            $query->whereHas('oemReferences', function ($q) use ($oemCode) {
-                $q->where('oem_code', $oemCode);
-            });
-        }
-
         // Attribute Filter (format: "Value" or "Name:Value")
         if ($request->has('attribute_value')) {
             $attrValue = $request->get('attribute_value');
@@ -174,13 +173,24 @@ class ProductController extends Controller
         // Vehicle Context Filter
         $engineId = $request->has('vehicle_engine_id') ? (int) $request->get('vehicle_engine_id') : null;
         $chassisId = $request->has('vehicle_chassis_id') ? (int) $request->get('vehicle_chassis_id') : null;
+        $vehicleModelId = $request->filled('vehicle_model_id') ? (int) $request->get('vehicle_model_id') : null;
+
+        // Coincidencia por motor: un vehículo exacto (modelo + motor) solo cuenta si el modelo también coincide.
+        $matchesEngine = function ($q) use ($engineId, $vehicleModelId): void {
+            $q->where('engine_id', $engineId);
+            if ($vehicleModelId) {
+                $q->where(function ($scope) use ($vehicleModelId): void {
+                    $scope->whereNull('scope_type')
+                        ->orWhere('scope_type', '!=', 'vehicle')
+                        ->orWhere('model_id', $vehicleModelId);
+                });
+            }
+        };
 
         if ($engineId || $chassisId) {
             // Mark exact fit by context (engine and/or chassis).
             if ($engineId) {
-                $query->withExists(['compatibleEngines as is_exact_fit_engine' => function ($q) use ($engineId) {
-                    $q->where('vehicle_engines.id', $engineId);
-                }]);
+                $query->withExists(['vehicleCompatibility as is_exact_fit_engine' => $matchesEngine]);
             }
 
             if ($chassisId) {
@@ -195,11 +205,9 @@ class ProductController extends Controller
             // Strict filter (default true): exact fit OR universal.
             $strictFitment = $request->boolean('strict_fitment', true);
             if ($strictFitment) {
-                $query->where(function ($q) use ($engineId, $chassisId) {
+                $query->where(function ($q) use ($engineId, $chassisId, $matchesEngine) {
                     if ($engineId) {
-                        $q->whereHas('compatibleEngines', function ($sub) use ($engineId) {
-                            $sub->where('vehicle_engines.id', $engineId);
-                        });
+                        $q->whereHas('vehicleCompatibility', $matchesEngine);
                     }
 
                     if ($chassisId) {
@@ -322,6 +330,24 @@ class ProductController extends Controller
 
             return $product;
         });
+
+        // Costo y precio FIFO de todas las variantes de la página en lote (antes: 2 consultas por variante).
+        $fifoItems = collect($products->items())->flatMap(
+            fn (Product $product) => $product->variants->flatMap(
+                fn ($variant) => $variant->relationLoaded('inventory')
+                    ? $variant->inventory->map(fn ($inventory): array => [
+                        'product_id' => (int) $variant->product_id,
+                        'variant_id' => (int) $variant->id,
+                        'warehouse_id' => (int) $inventory->warehouse_id,
+                    ])
+                    : []
+            )
+        );
+        // Se guarda en la petición base: el Form Request es otra instancia y el Resource recibe la base.
+        app('request')->attributes->set(
+            InventoryFifoService::PRICING_MAP_ATTRIBUTE,
+            app(InventoryFifoService::class)->currentFifoPricingMany($fifoItems),
+        );
 
         return ProductResource::collection($products);
     }
@@ -615,41 +641,6 @@ class ProductController extends Controller
     }
 
     /**
-     * Add OEM reference.
-     */
-    public function addOemReference(Request $request, Product $product): JsonResponse
-    {
-        $validated = $request->validate([
-            'oem_code' => 'required|string|max:50',
-            'manufacturer' => 'nullable|string|max:100',
-        ]);
-
-        $product->oemReferences()->create($validated);
-
-        return response()->json([
-            'message' => 'Referencia OEM agregada',
-        ], 201);
-    }
-
-    /**
-     * Remove OEM reference.
-     */
-    public function removeOemReference(Product $product, int $referenceId): JsonResponse
-    {
-        $deleted = $product->oemReferences()->where('id', $referenceId)->delete();
-
-        if (! $deleted) {
-            return response()->json([
-                'message' => 'Referencia no encontrada',
-            ], 404);
-        }
-
-        return response()->json([
-            'message' => 'Referencia OEM eliminada',
-        ]);
-    }
-
-    /**
      * Add alternative product.
      */
     public function addAlternative(Request $request, Product $product): JsonResponse
@@ -679,39 +670,6 @@ class ProductController extends Controller
 
         return response()->json([
             'message' => 'Producto alternativo eliminado',
-        ]);
-    }
-
-    /**
-     * Get batches for a product.
-     */
-    public function getBatches(Request $request, Product $product)
-    {
-        $warehouseId = $request->input('warehouse_id');
-
-        $batches = $product->batches()
-            ->when($warehouseId, function ($query) use ($warehouseId) {
-                $query->whereHas('warehouseBatches', function ($q) use ($warehouseId) {
-                    $q->where('warehouse_id', $warehouseId)
-                        ->where('quantity', '>', 0);
-                });
-            })
-            ->with(['warehouseBatches' => function ($query) use ($warehouseId) {
-                if ($warehouseId) {
-                    $query->where('warehouse_id', $warehouseId);
-                }
-            }])
-            ->get();
-
-        return response()->json([
-            'data' => $batches->map(function ($batch) {
-                return [
-                    'id' => $batch->id,
-                    'batch_number' => $batch->batch_number,
-                    'expiry_date' => $batch->expiry_date,
-                    'quantity' => $batch->warehouseBatches->sum('quantity'),
-                ];
-            }),
         ]);
     }
 
@@ -837,16 +795,6 @@ class ProductController extends Controller
     // ==================== REFERENCES & ALTERNATIVES ====================
 
     /**
-     * GET /api/v1/products/{id}/oem-references
-     */
-    public function oemReferences(Product $product): JsonResponse
-    {
-        return response()->json([
-            'data' => $product->oemReferences()->get(),
-        ]);
-    }
-
-    /**
      * GET /api/v1/products/{id}/alternatives
      *
      * Returns upsale products (compatible, substitute, upgrade).
@@ -939,6 +887,8 @@ class ProductController extends Controller
         // Get compatibility records with chassis data
         $compatibility = ProductVehicleCompatibility::where('product_id', $product->id)
             ->with(['make', 'model.make', 'engine.model.make', 'chassis.model.make'])
+            ->orderByDesc('is_default')
+            ->orderBy('id')
             ->get()
             ->map(function ($comp) {
                 $makeName = $comp->make?->name
@@ -961,6 +911,7 @@ class ProductController extends Controller
                     'chassis' => null,
                     'all_engines' => (bool) $comp->all_engines,
                     'all_chassis' => (bool) $comp->all_chassis,
+                    'is_default' => (bool) $comp->is_default,
                     'notes' => $comp->notes,
                 ];
 

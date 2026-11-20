@@ -15,7 +15,7 @@ class VehicleCatalogExport implements FromCollection, ShouldAutoSize, WithHeadin
 
     public function headings(): array
     {
-        return ['MAKE', 'MODEL', 'YEAR', 'GENERATION', 'CODE', 'ENGINE', 'DISPLACEMENT', 'FUEL_TYPE', 'ASPIRATION', 'VIN'];
+        return ['MAKE', 'MODEL', 'YEAR', 'GENERATION', 'CODE', 'ENGINE', 'NICKNAME', 'DISPLACEMENT', 'VALVES', 'CAM_TYPE', 'CYLINDERS', 'FUEL_TYPE', 'ASPIRATION', 'VIN'];
     }
 
     public function collection(): Collection
@@ -36,6 +36,10 @@ class VehicleCatalogExport implements FromCollection, ShouldAutoSize, WithHeadin
                 'vehicle_engines.displacement',
                 'vehicle_engines.fuel_type',
                 'vehicle_engines.aspiration',
+                'vehicle_engines.nickname',
+                'vehicle_engines.valves',
+                'vehicle_engines.cam_type',
+                'vehicle_engines.cylinders',
             ])
             ->orderBy('vehicle_makes.name')
             ->orderBy('vehicle_models.name')
@@ -62,7 +66,11 @@ class VehicleCatalogExport implements FromCollection, ShouldAutoSize, WithHeadin
                 $row->generation,
                 $row->generation,
                 $row->engine_code,
+                $row->nickname,
                 $row->displacement,
+                $row->valves,
+                $row->cam_type,
+                $row->cylinders,
                 $row->fuel_type,
                 $row->aspiration,
                 $pairVins->pluck('vin')->implode("\n"),

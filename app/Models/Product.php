@@ -26,7 +26,6 @@ class Product extends Model
         'description',
         'image_url',
         'status',
-        'batch_tracking',
         'is_universal',
         'system_id',
     ];
@@ -36,7 +35,6 @@ class Product extends Model
         'category_id' => 'integer',
         'engine_id' => 'integer',
         'status' => 'string',
-        'batch_tracking' => 'boolean',
         'is_universal' => 'boolean',
     ];
 
@@ -217,14 +215,6 @@ class Product extends Model
     }
 
     /**
-     * Get the OEM references for the product.
-     */
-    public function oemReferences(): HasMany
-    {
-        return $this->hasMany(OemReference::class);
-    }
-
-    /**
      * Get the alternative products (where this is the primary).
      */
     public function alternatives(): BelongsToMany
@@ -239,7 +229,10 @@ class Product extends Model
      */
     public function vehicleCompatibility(): HasMany
     {
-        return $this->hasMany(ProductVehicleCompatibility::class);
+        // El carro principal siempre primero; el resto en el orden en que se agregaron.
+        return $this->hasMany(ProductVehicleCompatibility::class)
+            ->orderByDesc('is_default')
+            ->orderBy('id');
     }
 
     /**
@@ -299,6 +292,11 @@ class Product extends Model
             // For normal searches, EVERY word must match EITHER product info OR vehicle info
             $q->whereHas('codes', fn ($codeQuery) => $codeQuery->where('normalized_code', $normalizedTerm))
                 ->orWhereHas('variants.codes', fn ($codeQuery) => $codeQuery->where('normalized_code', $normalizedTerm))
+                // Código con que un proveedor conoce la pieza (Vendor ID), p. ej. al recibir su factura.
+                ->orWhereExists(fn ($supplierQuery) => $supplierQuery->selectRaw('1')
+                    ->from('product_suppliers')
+                    ->whereColumn('product_suppliers.product_id', 'products.id')
+                    ->where('product_suppliers.supplier_code_normalized', $normalizedTerm !== '' ? $normalizedTerm : '__sin_codigo__'))
                 ->orWhere(function ($legacyCodeQuery) use ($normalizedTerm): void {
                     static::whereExactNormalizedCodes($legacyCodeQuery, ['sku_base'], $normalizedTerm);
                     $legacyCodeQuery->orWhereHas('variants', function ($variantQuery) use ($normalizedTerm): void {
@@ -344,11 +342,6 @@ class Product extends Model
                                                 ->orWhere('system_id', $operator, $wordBoundary)
                                                 ->orWhere('system_id', $word);
                                         })
-                                        ->orWhereHas('oemReferences', function ($oq) use ($word, $prefix, $wordBoundary, $operator) {
-                                            $oq->where('oem_code', $word)
-                                                ->orWhere('oem_code', $operator, $prefix)
-                                                ->orWhere('oem_code', $operator, $wordBoundary);
-                                        })
                                         ->orWhereHas('attributes', function ($aq) use ($word, $prefix, $wordBoundary, $operator) {
                                             $aq->whereNull('variant_id')
                                                 ->where(function ($aqq) use ($word, $prefix, $wordBoundary, $operator) {
@@ -385,9 +378,6 @@ class Product extends Model
                                         ->orWhereHas('variants', function ($vq) use ($w, $operator) {
                                             $vq->where('system_id', $operator, $w);
                                         })
-                                        ->orWhereHas('oemReferences', function ($oq) use ($w, $operator) {
-                                            $oq->where('oem_code', $operator, $w);
-                                        })
                                         ->orWhereHas('attributes', function ($aq) use ($w, $operator) {
                                             $aq->whereNull('variant_id')
                                                 ->where(function ($aqq) use ($w, $operator) {
@@ -414,9 +404,6 @@ class Product extends Model
                                     static::orWhereNormalizedCodes($productInfo, ['system_id'], $codeNeedle);
                                     $productInfo->orWhereHas('variants', function ($vq) use ($codeNeedle) {
                                         static::whereNormalizedCodes($vq, ['system_id'], $codeNeedle);
-                                    });
-                                    $productInfo->orWhereHas('oemReferences', function ($oq) use ($codeNeedle) {
-                                        static::whereNormalizedCodes($oq, ['oem_code'], $codeNeedle);
                                     });
                                 }
 
@@ -474,6 +461,18 @@ class Product extends Model
                                 $eq->where('engine_code', $operator, $w)
                                     ->orWhereHas('model', function ($mq) use ($w, $operator) {
                                         $mq->where('name', $operator, $w)
+                                            ->orWhereHas('make', function ($mkq) use ($w, $operator) {
+                                                $mkq->where('name', $operator, $w);
+                                            });
+                                    });
+                            });
+
+                            // 2a. OR Matches an exact vehicle (model + engine) by its model, generation or make
+                            $wordMatchQuery->orWhereHas('vehicleCompatibility', function ($vq) use ($w, $operator) {
+                                $vq->where('scope_type', 'vehicle')
+                                    ->whereHas('model', function ($mq) use ($w, $operator) {
+                                        $mq->where('name', $operator, $w)
+                                            ->orWhere('generation', $operator, $w)
                                             ->orWhereHas('make', function ($mkq) use ($w, $operator) {
                                                 $mkq->where('name', $operator, $w);
                                             });
@@ -760,13 +759,5 @@ class Product extends Model
         }
 
         return $this->inventory()->sum('quantity_available');
-    }
-
-    /**
-     * Get the batches for the product.
-     */
-    public function batches(): HasMany
-    {
-        return $this->hasMany(ProductBatch::class);
     }
 }

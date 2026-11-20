@@ -95,7 +95,8 @@
                     @else
                         {{ $item->product->name ?? 'Producto' }}
                         @if($item->variant)
-                            <br><span class="small">{{ $item->variant->sku }}</span>
+                            {{-- Número principal del producto (las marcas no tienen código propio) --}}
+                            <br><span class="small">{{ $item->product?->sku_base ?: $item->variant->sku }}</span>
                         @endif
                     @endif
                 </td>

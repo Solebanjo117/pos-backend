@@ -33,12 +33,4 @@ class Warehouse extends Model
     {
         return $this->hasMany(Inventory::class);
     }
-
-    /**
-     * Get the batch inventory records for the warehouse.
-     */
-    public function warehouseBatches(): HasMany
-    {
-        return $this->hasMany(WarehouseBatch::class);
-    }
 }

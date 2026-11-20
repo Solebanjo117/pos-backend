@@ -36,6 +36,8 @@ class ProductVariantResource extends JsonResource
                 'id' => $this->brand?->id,
                 'name' => $this->brand?->name,
                 'logo_url' => $this->brand?->logo_url ?? null,
+                // Gama de la marca (standard | premium); null si la marca se cargó sin esa columna.
+                'tier' => $this->brand?->getAttributes()['tier'] ?? null,
             ],
 
             'status' => $this->status,
@@ -73,8 +75,14 @@ class ProductVariantResource extends JsonResource
 
             'inventory' => $this->when(
                 $this->relationLoaded('inventory'),
-                fn () => $this->inventory->map(function ($inv) {
-                    $activePricing = app(\App\Services\InventoryFifoService::class)->currentFifoPricing(
+                fn () => $this->inventory->map(function ($inv) use ($request) {
+                    // En listados el costo FIFO viene precalculado en lote; si no, se calcula aquí.
+                    $pricingMap = $request->attributes->get(\App\Services\InventoryFifoService::PRICING_MAP_ATTRIBUTE, []);
+                    $activePricing = $pricingMap[\App\Services\InventoryFifoService::pricingKey(
+                        (int) $this->product_id,
+                        (int) $this->id,
+                        (int) $inv->warehouse_id
+                    )] ?? app(\App\Services\InventoryFifoService::class)->currentFifoPricing(
                         (int) $this->product_id,
                         (int) $this->id,
                         (int) $inv->warehouse_id

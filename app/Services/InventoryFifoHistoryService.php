@@ -32,7 +32,7 @@ class InventoryFifoHistoryService
         $perPage = (int) ($filters['per_page'] ?? 25);
 
         $lots = InventoryLot::query()
-            ->with(['warehouse', 'sourceMovement'])
+            ->with(['warehouse', 'sourceMovement', 'supplier:id,name'])
             ->where('product_id', $product->id)
             ->where('variant_id', $variant->id)
             ->where('warehouse_id', $warehouseId)
@@ -73,7 +73,7 @@ class InventoryFifoHistoryService
     private function movementsQuery(Product $product, ProductVariant $variant, int $warehouseId, array $filters): Builder
     {
         return InventoryMovement::query()
-            ->with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'productBatch', 'supplier', 'lotAllocations.lot', 'sourceLots'])
+            ->with(['product', 'variant', 'warehouse', 'destinationWarehouse', 'user', 'supplier', 'lotAllocations.lot', 'sourceLots'])
             ->where('product_id', $product->id)
             ->where('variant_id', $variant->id)
             ->where(function ($query) use ($warehouseId): void {

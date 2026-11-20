@@ -53,14 +53,6 @@ class InventoryMovementResource extends JsonResource
                     'name' => $this->supplier->name,
                 ] : null;
             }),
-            'product_batch_id' => $this->product_batch_id,
-            'product_batch' => $this->whenLoaded('productBatch', function () {
-                return [
-                    'id' => $this->productBatch->id,
-                    'batch_number' => $this->productBatch->batch_number,
-                    'expiry_date' => $this->productBatch->expiry_date?->toIso8601String(),
-                ];
-            }),
             'lot_allocations' => $this->whenLoaded('lotAllocations', fn () => $this->serializedLotAllocations()),
             'fifo_allocations' => $this->whenLoaded('lotAllocations', fn () => $this->serializedLotAllocations()),
             'source_lots' => $this->whenLoaded('sourceLots', fn () => $this->serializedSourceLots()),

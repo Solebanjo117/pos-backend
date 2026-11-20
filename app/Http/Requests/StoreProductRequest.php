@@ -3,7 +3,9 @@
 namespace App\Http\Requests;
 
 use App\Helpers\TaxRateHelper;
+use App\Services\VehicleCatalogService;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class StoreProductRequest extends FormRequest
 {
@@ -134,7 +136,7 @@ class StoreProductRequest extends FormRequest
             'extra_category_ids' => 'nullable|array',
             'extra_category_ids.*' => 'integer|distinct|exists:categories,id',
             'engine_id' => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
-            'status' => 'in:active,discontinued,pending',
+            'status' => 'in:active,discontinued',
             'attributes' => 'nullable|array',
             'attributes.*.name' => 'required_with:attributes|string|max:100',
             'attributes.*.value' => ['required_with:attributes', function (string $attribute, mixed $value, \Closure $fail) {
@@ -205,6 +207,15 @@ class StoreProductRequest extends FormRequest
             'vehicle_compatibility.all_engines' => 'nullable|boolean',
             'vehicle_compatibility.all_chassis' => 'nullable|boolean',
             'vehicle_compatibility.model_id' => 'nullable|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles' => 'nullable|array|max:500',
+            'vehicle_compatibility.vehicles.*.model_id' => 'required|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles.*.engine_id' => 'required|integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.keep_ids' => 'nullable|array',
+            'vehicle_compatibility.keep_ids.*' => 'integer',
+            'vehicle_compatibility.default' => 'nullable|array',
+            'vehicle_compatibility.default.id' => 'nullable|integer',
+            'vehicle_compatibility.default.model_id' => 'nullable|integer',
+            'vehicle_compatibility.default.engine_id' => 'nullable|integer',
             'vehicle_chassis' => 'nullable|array',
             'vehicle_chassis.*' => 'integer|exists:vehicle_chassis,id',
             'vehicle_makes' => 'nullable|array',
@@ -220,14 +231,31 @@ class StoreProductRequest extends FormRequest
             'vins.*' => 'string|min:1|max:40',
 
             // OEM / Cross References
-            'oem_references' => 'nullable|array',
-            'oem_references.*' => 'string|min:1|max:100',
         ];
     }
 
     /**
      * Custom error messages.
      */
+    public function after(): array
+    {
+        return [function (Validator $validator): void {
+            $catalog = app(VehicleCatalogService::class);
+
+            foreach ((array) $this->input('vehicle_compatibility.vehicles', []) as $index => $vehicle) {
+                $modelId = (int) ($vehicle['model_id'] ?? 0);
+                $engineId = (int) ($vehicle['engine_id'] ?? 0);
+
+                if ($modelId > 0 && $engineId > 0 && ! $catalog->configurationExists($modelId, $engineId)) {
+                    $validator->errors()->add(
+                        "vehicle_compatibility.vehicles.{$index}",
+                        'El vehículo seleccionado no está registrado en el catálogo (modelo y motor).',
+                    );
+                }
+            }
+        }];
+    }
+
     public function messages(): array
     {
         return [
@@ -239,15 +267,13 @@ class StoreProductRequest extends FormRequest
             'pricing.cost_tax_rate.between' => 'La tasa de impuesto de costo debe estar entre 0 y 100%',
             'category_id.exists' => 'La categoría seleccionada no existe',
             'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
-            'status.in' => 'El estado debe ser: activo, discontinuado o pendiente',
+            'status.in' => 'El estado debe ser: activo o discontinuado',
             'initial_inventory.*.warehouse_id.required' => 'El almacén es obligatorio',
             'initial_inventory.*.warehouse_id.exists' => 'El almacén seleccionado no existe',
             'initial_inventory.*.stock_available.required' => 'El stock disponible es obligatorio',
             'initial_inventory.*.stock_available.min' => 'El stock debe ser mayor o igual a 0',
             'vins.*.min' => 'El VIN debe tener al menos 1 carácter',
             'vins.*.max' => 'El VIN no puede tener más de 40 caracteres',
-            'oem_references.*.min' => 'La referencia debe tener al menos 1 carácter',
-            'oem_references.*.max' => 'La referencia no puede exceder 100 caracteres',
             'codes.*.code.required' => 'Cada código debe tener un valor.',
             'codes.*.type.in' => 'El tipo de código seleccionado no es válido.',
         ];

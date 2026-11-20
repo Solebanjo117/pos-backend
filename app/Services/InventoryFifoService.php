@@ -18,6 +18,9 @@ use Illuminate\Support\Str;
 
 class InventoryFifoService
 {
+    /** Atributo de la petición donde el listado deja los costos FIFO precalculados. */
+    public const PRICING_MAP_ATTRIBUTE = 'inventory_fifo_pricing_map';
+
     public function receiveStock(array $data): InventoryMovement
     {
         return DB::transaction(function () use ($data) {
@@ -43,10 +46,10 @@ class InventoryFifoService
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? Auth::id(),
                 'supplier_id' => $data['supplier_id'] ?? null,
-                'product_batch_id' => $data['product_batch_id'] ?? null,
             ]);
 
-            $this->createLotForInboundMovement($movement, $data);
+            $lot = $this->createLotForInboundMovement($movement, $data);
+            $this->recordSupplierPurchase($lot);
             $this->addAggregateStock(
                 (int) $data['product_id'],
                 $data['variant_id'] ?? null,
@@ -71,6 +74,7 @@ class InventoryFifoService
             'product_id' => $movement->product_id,
             'variant_id' => $movement->variant_id,
             'warehouse_id' => $movement->warehouse_id,
+            'supplier_id' => $data['supplier_id'] ?? $movement->supplier_id,
             'source_type' => $data['source_type'] ?? $movement->reference_type ?? 'manual_inbound',
             'source_id' => $data['source_id'] ?? $movement->reference_id,
             'source_movement_id' => $movement->id,
@@ -84,6 +88,25 @@ class InventoryFifoService
             'sale_price' => $salePrice,
             'received_at' => $data['received_at'] ?? now(),
         ]);
+    }
+
+    /**
+     * Una compra recibida (orden de compra, compra rápida o lista de abastecimiento) deja como costo
+     * de ese proveedor lo que se pagó por unidad, y recalcula el proveedor más barato de la marca.
+     */
+    private function recordSupplierPurchase(InventoryLot $lot): void
+    {
+        if (! $lot->supplier_id || ! $lot->variant_id || ! in_array($lot->source_type, ['purchase_order', 'supply_list'], true)) {
+            return;
+        }
+
+        app(VariantSupplierService::class)->recordPurchase(
+            (int) $lot->product_id,
+            (int) $lot->variant_id,
+            (int) $lot->supplier_id,
+            (float) $lot->unit_cost_base,
+            $lot->received_at,
+        );
     }
 
     public function consumeStock(array $data): array
@@ -127,7 +150,6 @@ class InventoryFifoService
                 'reference_id' => $data['reference_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
                 'user_id' => $data['user_id'] ?? Auth::id(),
-                'product_batch_id' => $data['product_batch_id'] ?? null,
             ]);
 
             $remaining = $quantityToConsume;
@@ -596,21 +618,110 @@ class InventoryFifoService
      */
     public function currentFifoPricing(int $productId, ?int $variantId, int $warehouseId): array
     {
-        $lot = $this->availableLotsQuery($productId, $variantId, $warehouseId)->first();
+        // Una sola consulta: el primer lote es el activo y la suma de todos da el valor del inventario.
+        $lots = $this->availableLotsQuery($productId, $variantId, $warehouseId)->get();
+        $lot = $lots->first();
 
         return [
             'active_lot_id' => $lot?->id,
             'current_cost' => $lot ? (float) $lot->landed_unit_cost : $this->resolveFallbackUnitCost($productId, $variantId),
             'current_sale_price' => $lot ? (float) $lot->sale_price : $this->resolveFallbackSalePrice($productId, $variantId),
-            'inventory_value' => round($this->availableStockValueForItem($productId, $variantId, $warehouseId), 2),
+            'inventory_value' => round($this->lotsStockValue($lots), 2),
         ];
     }
 
-    private function availableStockValueForItem(int $productId, ?int $variantId, int $warehouseId): float
+    /**
+     * Clave de currentFifoPricingMany(): "producto:variante:sucursal" (variante 0 = sin variante).
+     */
+    public static function pricingKey(int $productId, ?int $variantId, int $warehouseId): string
     {
-        return (float) $this->availableLotsQuery($productId, $variantId, $warehouseId)
-            ->get(['quantity_available', 'landed_unit_cost'])
-            ->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost);
+        return $productId.':'.($variantId ?? 0).':'.$warehouseId;
+    }
+
+    /**
+     * Igual que currentFifoPricing() para muchos ítems a la vez, con una consulta de lotes (más las de
+     * precio de respaldo solo para los ítems sin lotes). Evita el N+1 en listados.
+     *
+     * @param  iterable<array{product_id: int, variant_id: int|null, warehouse_id: int}>  $items
+     * @return array<string, array{active_lot_id: int|null, current_cost: float, current_sale_price: float, inventory_value: float}>
+     */
+    public function currentFifoPricingMany(iterable $items): array
+    {
+        $items = collect($items)
+            ->map(fn (array $item): array => [
+                'product_id' => (int) $item['product_id'],
+                'variant_id' => isset($item['variant_id']) && $item['variant_id'] ? (int) $item['variant_id'] : null,
+                'warehouse_id' => (int) $item['warehouse_id'],
+            ])
+            ->unique(fn (array $item): string => self::pricingKey($item['product_id'], $item['variant_id'], $item['warehouse_id']))
+            ->values();
+
+        if ($items->isEmpty()) {
+            return [];
+        }
+
+        $variantIds = $items->pluck('variant_id')->filter()->unique()->values()->all();
+        $productIdsWithoutVariant = $items->whereNull('variant_id')->pluck('product_id')->unique()->values()->all();
+
+        // Mismo filtro y orden que availableLotsQuery(), para todos los ítems juntos.
+        $lotsByItem = InventoryLot::query()
+            ->whereIn('warehouse_id', $items->pluck('warehouse_id')->unique()->values()->all())
+            ->where('quantity_available', '>', 0)
+            ->where(function ($query) use ($variantIds, $productIdsWithoutVariant): void {
+                $query->whereIn('variant_id', $variantIds ?: [0])
+                    ->orWhere(function ($withoutVariant) use ($productIdsWithoutVariant): void {
+                        $withoutVariant->whereNull('variant_id')->whereIn('product_id', $productIdsWithoutVariant ?: [0]);
+                    });
+            })
+            ->orderBy('received_at')
+            ->orderBy('id')
+            ->get()
+            ->groupBy(fn (InventoryLot $lot): string => $lot->variant_id
+                ? 'v:'.$lot->variant_id.':'.$lot->warehouse_id
+                : 'p:'.$lot->product_id.':'.$lot->warehouse_id);
+
+        $groupKey = fn (array $item): string => $item['variant_id']
+            ? 'v:'.$item['variant_id'].':'.$item['warehouse_id']
+            : 'p:'.$item['product_id'].':'.$item['warehouse_id'];
+
+        // Precios de respaldo (resolveFallback*) solo para los ítems sin lotes disponibles.
+        $withoutLots = $items->reject(fn (array $item): bool => $lotsByItem->has($groupKey($item)));
+        $variantPricing = ProductVariant::with('pricing')
+            ->whereIn('id', $withoutLots->pluck('variant_id')->filter()->unique()->values()->all() ?: [0])
+            ->get()
+            ->keyBy('id');
+        $productPricing = ProductPricing::query()
+            ->whereIn('product_id', $withoutLots->whereNull('variant_id')->pluck('product_id')->unique()->values()->all() ?: [0])
+            ->whereNull('variant_id')
+            ->get()
+            ->groupBy('product_id')
+            ->map(fn ($rows) => $rows->first());
+
+        $result = [];
+        foreach ($items as $item) {
+            $lots = $lotsByItem->get($groupKey($item), collect());
+            $lot = $lots->first();
+            $fallback = $item['variant_id']
+                ? $variantPricing->get($item['variant_id'])?->pricing
+                : $productPricing->get($item['product_id']);
+
+            $result[self::pricingKey($item['product_id'], $item['variant_id'], $item['warehouse_id'])] = [
+                'active_lot_id' => $lot?->id,
+                'current_cost' => $lot ? (float) $lot->landed_unit_cost : (float) ($fallback?->cost_total ?? 0),
+                'current_sale_price' => $lot ? (float) $lot->sale_price : (float) ($fallback?->base_price ?? 0),
+                'inventory_value' => round($this->lotsStockValue($lots), 2),
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, InventoryLot>  $lots
+     */
+    private function lotsStockValue($lots): float
+    {
+        return (float) $lots->sum(fn (InventoryLot $lot) => (int) $lot->quantity_available * (float) $lot->landed_unit_cost);
     }
 
     private function ensureOpeningLotForAggregate(int $productId, ?int $variantId, int $warehouseId): void

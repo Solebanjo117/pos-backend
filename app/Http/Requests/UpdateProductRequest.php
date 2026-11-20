@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Services\VehicleCatalogService;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class UpdateProductRequest extends FormRequest
 {
@@ -154,9 +156,10 @@ class UpdateProductRequest extends FormRequest
             'extra_category_ids' => 'sometimes|array',
             'extra_category_ids.*' => 'integer|distinct|exists:categories,id',
             'engine_id' => 'nullable|exists:vehicle_engines,id', // R21: motor as reusable entity
-            'name' => 'sometimes|string|max:255',
+            // Optional: a blank name is regenerated from category + vehicles.
+            'name' => 'sometimes|nullable|string|max:255',
             'description' => 'nullable|string',
-            'status' => 'sometimes|in:active,discontinued,pending',
+            'status' => 'sometimes|in:active,discontinued',
             'is_universal' => 'sometimes|boolean',
             'attributes' => 'sometimes|array',
             'attributes.*.name' => 'required_with:attributes|string|max:100',
@@ -184,9 +187,6 @@ class UpdateProductRequest extends FormRequest
             'attributes.*.unit' => 'nullable|string|max:50',
             'attributes.*.source' => 'nullable|string|in:custom,category',
             'attributes.*.source_category_id' => 'nullable|integer|exists:categories,id',
-            'oem_references' => 'sometimes|array',
-            'oem_references.*.oem_code' => 'required_with:oem_references|string|max:50',
-            'oem_references.*.manufacturer' => 'nullable|string|max:100',
             'alternatives' => 'sometimes|array',
             'alternatives.*.id' => 'nullable|integer|exists:products,id',
             'alternatives.*.alternative_product_id' => 'nullable|integer|exists:products,id',
@@ -206,6 +206,15 @@ class UpdateProductRequest extends FormRequest
             'vehicle_compatibility.all_engines' => 'sometimes|boolean',
             'vehicle_compatibility.all_chassis' => 'sometimes|boolean',
             'vehicle_compatibility.model_id' => 'sometimes|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles' => 'nullable|array|max:500',
+            'vehicle_compatibility.vehicles.*.model_id' => 'required|integer|exists:vehicle_models,id',
+            'vehicle_compatibility.vehicles.*.engine_id' => 'required|integer|exists:vehicle_engines,id',
+            'vehicle_compatibility.keep_ids' => 'nullable|array',
+            'vehicle_compatibility.keep_ids.*' => 'integer',
+            'vehicle_compatibility.default' => 'nullable|array',
+            'vehicle_compatibility.default.id' => 'nullable|integer',
+            'vehicle_compatibility.default.model_id' => 'nullable|integer',
+            'vehicle_compatibility.default.engine_id' => 'nullable|integer',
 
             // Pricing (all optional for update)
             'pricing' => 'sometimes|array',
@@ -225,12 +234,31 @@ class UpdateProductRequest extends FormRequest
     /**
      * Custom error messages.
      */
+    public function after(): array
+    {
+        return [function (Validator $validator): void {
+            $catalog = app(VehicleCatalogService::class);
+
+            foreach ((array) $this->input('vehicle_compatibility.vehicles', []) as $index => $vehicle) {
+                $modelId = (int) ($vehicle['model_id'] ?? 0);
+                $engineId = (int) ($vehicle['engine_id'] ?? 0);
+
+                if ($modelId > 0 && $engineId > 0 && ! $catalog->configurationExists($modelId, $engineId)) {
+                    $validator->errors()->add(
+                        "vehicle_compatibility.vehicles.{$index}",
+                        'El vehículo seleccionado no está registrado en el catálogo (modelo y motor).',
+                    );
+                }
+            }
+        }];
+    }
+
     public function messages(): array
     {
         return [
             'sku_base.unique' => 'El SKU ya está en uso por otro producto',
             'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
-            'status.in' => 'El estado debe ser: active, discontinued o pending',
+            'status.in' => 'El estado debe ser: activo o discontinuado',
             'codes.*.code.required' => 'Cada código debe tener un valor.',
         ];
     }

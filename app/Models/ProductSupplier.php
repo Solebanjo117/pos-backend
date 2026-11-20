@@ -14,10 +14,13 @@ class ProductSupplier extends Model
         'product_id',
         'variant_id',
         'supplier_id',
+        'supplier_code',
+        'supplier_code_normalized',
         'supplier_cost',
         'lead_time_days',
         'minimum_order_quantity',
         'is_preferred',
+        'last_purchased_at',
     ];
 
     protected $casts = [
@@ -28,6 +31,7 @@ class ProductSupplier extends Model
         'lead_time_days' => 'integer',
         'minimum_order_quantity' => 'integer',
         'is_preferred' => 'boolean',
+        'last_purchased_at' => 'datetime',
     ];
 
     /**

@@ -264,6 +264,8 @@ class InventoryController extends Controller
             'stock_available' => 'sometimes|integer|min:0',
             'reorder_point' => 'sometimes|integer|min:0',
             'reorder_quantity' => 'sometimes|integer|min:0',
+            'reason' => 'sometimes|nullable|string|max:255',
+            'notes' => 'sometimes|nullable|string|max:500',
         ]);
 
         $variant = \App\Models\ProductVariant::where('id', $variantId)
@@ -298,8 +300,8 @@ class InventoryController extends Controller
                 'quantity' => $validated['stock_available'],
                 'reference_type' => 'manual_adjustment',
                 'source_type' => 'manual_adjustment',
-                'reason' => 'Ajuste manual de inventario',
-                'notes' => 'Ajuste manual de inventario',
+                'reason' => filled($validated['reason'] ?? null) ? $validated['reason'] : 'Ajuste manual de inventario',
+                'notes' => filled($validated['notes'] ?? null) ? $validated['notes'] : 'Ajuste manual de inventario',
                 'user_id' => $request->user()?->id,
             ]);
 

@@ -171,7 +171,8 @@
                 if ($type === 'client') {
                     $displayCode = str_pad($item->product_id, 12, '0', STR_PAD_LEFT);
                 } else {
-                    $displayCode = $variant ? $variant->sku : ($product->sku_base ?? '#' . $item->product_id);
+                    // Número principal del producto (las marcas no tienen código propio).
+                    $displayCode = ($product->sku_base ?? null) ?: ($variant?->sku ?? '#' . $item->product_id);
                 }
 
                 // ── Sub-lines: sibling variants with brand name and price ──

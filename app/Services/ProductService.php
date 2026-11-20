@@ -355,31 +355,6 @@ class ProductService
         return (float) $value;
     }
 
-    private function syncOemReferences(Product $product, array $references): void
-    {
-        $normalized = collect($references)
-            ->map(function ($reference) {
-                $code = trim((string) ($reference['oem_code'] ?? ''));
-                $manufacturer = isset($reference['manufacturer'])
-                    ? trim((string) $reference['manufacturer'])
-                    : null;
-
-                return [
-                    'oem_code' => $code,
-                    'manufacturer' => $manufacturer !== '' ? $manufacturer : null,
-                ];
-            })
-            ->filter(fn (array $reference) => $reference['oem_code'] !== '')
-            ->unique(fn (array $reference) => mb_strtoupper($reference['oem_code']).'|'.mb_strtolower((string) $reference['manufacturer']))
-            ->values();
-
-        $product->oemReferences()->delete();
-
-        foreach ($normalized as $reference) {
-            $product->oemReferences()->create($reference);
-        }
-    }
-
     private function syncAlternatives(Product $product, array $alternatives): void
     {
         $syncPayload = collect($alternatives)
@@ -468,7 +443,44 @@ class ProductService
 
     private function syncVehicleCompatibility(Product $product, array $compatibility): void
     {
-        $product->vehicleCompatibility()->delete();
+        // Con keep_ids la pantalla indica qué registros existentes se conservan; el resto se borra.
+        // Sin keep_ids se mantiene el comportamiento anterior: se reemplaza todo.
+        $keepIds = $compatibility['keep_ids'] ?? null;
+        if (is_array($keepIds)) {
+            $product->vehicleCompatibility()
+                ->whereNotIn('id', collect($keepIds)->map(fn ($id): int => (int) $id)->all())
+                ->delete();
+        } else {
+            $product->vehicleCompatibility()->delete();
+        }
+
+        $vehiclePairs = collect($compatibility['vehicles'] ?? [])
+            ->map(fn ($vehicle): array => [
+                'model_id' => (int) ($vehicle['model_id'] ?? 0),
+                'engine_id' => (int) ($vehicle['engine_id'] ?? 0),
+            ])
+            ->filter(fn (array $pair): bool => $pair['model_id'] > 0 && $pair['engine_id'] > 0)
+            ->unique(fn (array $pair): string => $pair['model_id'].':'.$pair['engine_id'])
+            ->values();
+
+        foreach ($vehiclePairs as $pair) {
+            $alreadyAssigned = $product->vehicleCompatibility()
+                ->where('scope_type', 'vehicle')
+                ->where('model_id', $pair['model_id'])
+                ->where('engine_id', $pair['engine_id'])
+                ->exists();
+
+            if ($alreadyAssigned) {
+                continue;
+            }
+
+            $product->vehicleCompatibility()->create([
+                'scope_type' => 'vehicle',
+                'make_id' => VehicleModel::query()->whereKey($pair['model_id'])->value('make_id'),
+                'model_id' => $pair['model_id'],
+                'engine_id' => $pair['engine_id'],
+            ]);
+        }
 
         $makeIds = collect($compatibility['makes'] ?? [])
             ->pluck('make_id')
@@ -563,6 +575,38 @@ class ProductService
                 'all_chassis' => true,
             ]);
         }
+
+        // Carro principal: el que indica la pantalla o, si no, se conserva / se toma el más antiguo.
+        ProductVehicleCompatibility::ensureDefault(
+            (int) $product->id,
+            $this->resolveDefaultCompatibilityId($product, $compatibility['default'] ?? null),
+        );
+    }
+
+    /**
+     * El principal llega como {id} (registro ya guardado) o {model_id, engine_id} (vehículo exacto).
+     */
+    private function resolveDefaultCompatibilityId(Product $product, mixed $default): ?int
+    {
+        if (! is_array($default)) {
+            return null;
+        }
+
+        if (! empty($default['id'])) {
+            return (int) $default['id'];
+        }
+
+        if (! empty($default['model_id']) && ! empty($default['engine_id'])) {
+            $id = $product->vehicleCompatibility()
+                ->where('scope_type', 'vehicle')
+                ->where('model_id', (int) $default['model_id'])
+                ->where('engine_id', (int) $default['engine_id'])
+                ->value('id');
+
+            return $id ? (int) $id : null;
+        }
+
+        return null;
     }
 
     private function normalizePercentValue(mixed $value): ?int
@@ -745,15 +789,6 @@ class ProductService
                 }
             }
 
-            // Assign OEM / Cross References
-            if (! empty($data['oem_references'])) {
-                foreach ($data['oem_references'] as $refCode) {
-                    $product->oemReferences()->firstOrCreate([
-                        'oem_code' => trim($refCode),
-                    ]);
-                }
-            }
-
             // Append vehicle/VIN info only for backend auto-generated names.
             if ($nameWasAutoGenerated && ($compatibilityPayload !== [] || ! empty($data['vins']))) {
                 $this->updateProductNameWithVehicles($product);
@@ -848,6 +883,14 @@ class ProductService
                 $pricing->save();
             }
 
+            // Proveedores indicados al crear la marca (código y costo de cada uno).
+            foreach ($data['suppliers'] ?? [] as $supplierData) {
+                app(VariantSupplierService::class)->upsert($variant, (int) $supplierData['supplier_id'], [
+                    'supplier_code' => $supplierData['supplier_code'] ?? null,
+                    'supplier_cost' => $supplierData['supplier_cost'],
+                ]);
+            }
+
             $inventoryRows = $data['initial_inventory'] ?? [];
             if (empty($inventoryRows)) {
                 $defaultWarehouse = DB::table('warehouses')->first();
@@ -877,13 +920,19 @@ class ProductService
                 ]);
 
                 if ($quantityAvailable > 0) {
-                    app(InventoryFifoService::class)->ensureOpeningLotForInventory(
+                    $openingLot = app(InventoryFifoService::class)->ensureOpeningLotForInventory(
                         $product->id,
                         $variant->id,
                         (int) $inventory->warehouse_id,
                         $quantityAvailable,
                         (float) ($variant->pricing?->cost_total ?? 0)
                     );
+
+                    // De qué proveedor vino la existencia inicial (si se indicó). Si la marca aún no tiene
+                    // ese proveedor, se agrega con el costo del lote.
+                    if ($openingLot && ! empty($inventoryData['supplier_id'])) {
+                        app(InventoryLotSupplierService::class)->assign($openingLot, (int) $inventoryData['supplier_id'], auth()->user());
+                    }
                 }
             }
 
@@ -921,6 +970,18 @@ class ProductService
             ) {
                 if (array_key_exists($field, $data)) {
                     $updatePayload[$field] = $data[$field];
+                }
+            }
+
+            // A blank name means "generate it", same as when creating.
+            $regenerateName = false;
+            if (array_key_exists('name', $updatePayload)) {
+                $name = is_string($updatePayload['name']) ? trim($updatePayload['name']) : null;
+                if ($name === null || $name === '') {
+                    unset($updatePayload['name']);
+                    $regenerateName = true;
+                } else {
+                    $updatePayload['name'] = $name;
                 }
             }
 
@@ -1015,16 +1076,16 @@ class ProductService
                 );
             }
 
-            if (array_key_exists('oem_references', $data)) {
-                $this->syncOemReferences($product, $data['oem_references'] ?? []);
-            }
-
             if (array_key_exists('alternatives', $data)) {
                 $this->syncAlternatives($product, $data['alternatives'] ?? []);
             }
 
             if (array_key_exists('vehicle_compatibility', $data)) {
                 $this->syncVehicleCompatibility($product, $data['vehicle_compatibility'] ?? []);
+            }
+
+            if ($regenerateName) {
+                $this->updateProductNameWithVehicles($product);
             }
 
             DB::commit();
@@ -1193,11 +1254,8 @@ class ProductService
                 case 'media':
                     $query->with('media');
                     break;
-                case 'oem':
-                    $query->with('oemReferences');
-                    break;
                 case 'alternatives':
-                    $query->with(['alternatives', 'oemReferences']);
+                    $query->with('alternatives');
                     break;
                 case 'compatibility':
                     $query->with('vehicleCompatibility.make', 'vehicleCompatibility.model.make', 'vehicleCompatibility.engine.model.make', 'vehicleCompatibility.chassis.model.make');
@@ -1208,69 +1266,7 @@ class ProductService
             }
         }
 
-        $product = $query->find($productId);
-
-        // After loading, merge implicit OEM-based cross-references into alternatives
-        if ($product && in_array('alternatives', $includes)) {
-            $product = $this->mergeOemAlternatives($product);
-        }
-
-        return $product;
-    }
-
-    /**
-     * Merge OEM-based (implicit) alternatives into the product's alternatives collection.
-     * Products that share any OEM code with $product are treated as cross-references.
-     */
-    private function mergeOemAlternatives(Product $product): Product
-    {
-        // Collect all oem_codes for this product
-        $oemCodes = $product->oemReferences->pluck('oem_code')->filter()->unique()->values();
-
-        if ($oemCodes->isEmpty()) {
-            return $product;
-        }
-
-        // Find other products that have any of these oem_codes
-        $implicitAlternatives = Product::with(['defaultVariant.brand', 'pricing', 'oemReferences'])
-            ->where('id', '!=', $product->id)
-            ->whereHas('oemReferences', function ($q) use ($oemCodes) {
-                $q->whereIn('oem_code', $oemCodes);
-            })
-            ->get();
-
-        // Build the merged collection starting with manual alternatives
-        $existing = $product->alternatives ?? collect();
-
-        // IDs already in explicit alternatives
-        $existingIds = $existing->pluck('id')->toArray();
-
-        // Mark implicit ones with a synthetic pivot and merge
-        $implicitAlternatives->each(function (Product $alt) use ($oemCodes, &$existing, &$existingIds) {
-            if (in_array($alt->id, $existingIds)) {
-                return; // Already listed explicitly — skip duplicate
-            }
-
-            // Find matching OEM codes to build a human-readable source label
-            $sharedCodes = $alt->oemReferences
-                ->pluck('oem_code')
-                ->intersect($oemCodes)
-                ->values();
-
-            // Attach a synthetic pivot so the frontend sees it the same way
-            $alt->setRelation('pivot', (object) [
-                'relationship_type' => 'cross_reference',
-                'source' => 'oem',
-                'shared_codes' => $sharedCodes->implode(', '),
-            ]);
-
-            $existing->push($alt);
-            $existingIds[] = $alt->id;
-        });
-
-        $product->setRelation('alternatives', $existing);
-
-        return $product;
+        return $query->find($productId);
     }
 
     /**
@@ -1579,12 +1575,12 @@ class ProductService
         // 3. Collect vehicle labels from compatibility records
         $vehicleLabels = collect();
         $explicitVehicles = ProductVehicleCompatibility::where('product_id', $product->id)
-            ->with('engine.model.make')
+            ->with(['engine.model.make', 'model.make'])
             ->get();
 
         foreach ($explicitVehicles as $compat) {
             $engine = $compat->engine;
-            $model = $engine?->model;
+            $model = $compat->scope_type === 'vehicle' ? $compat->model : $engine?->model;
             $make = $model?->make;
 
             if (! $make || ! $model) {
@@ -1721,7 +1717,6 @@ class ProductService
                 'variants.pricing',
                 'variants.suppliers',
                 'vehicleCompatibility',
-                'oemReferences',
                 'media',
                 'extraCategories',
             ])->findOrFail($product->id);
@@ -1861,16 +1856,11 @@ class ProductService
                     'model_id' => $compatibility->model_id,
                     'engine_id' => $compatibility->engine_id,
                     'chassis_id' => $compatibility->chassis_id,
+                    'raw_vehicle_key' => $compatibility->raw_vehicle_key,
+                    'raw_vehicle_text' => $compatibility->raw_vehicle_text,
                     'notes' => $compatibility->notes,
                     'all_engines' => (bool) $compatibility->all_engines,
                     'all_chassis' => (bool) $compatibility->all_chassis,
-                ]);
-            }
-
-            foreach ($source->oemReferences as $oemReference) {
-                $duplicatedProduct->oemReferences()->create([
-                    'oem_code' => $oemReference->oem_code,
-                    'manufacturer' => $oemReference->manufacturer,
                 ]);
             }
 

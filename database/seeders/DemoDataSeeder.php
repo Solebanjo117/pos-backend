@@ -7,7 +7,6 @@ use App\Models\Customer;
 use App\Models\CustomerTransaction;
 use App\Models\InventoryMovement;
 use App\Models\PosSession;
-use App\Models\ProductBatch;
 use App\Models\ProductInventory;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
@@ -21,7 +20,6 @@ use App\Models\SalesQuoteItem;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
-use App\Models\WarehouseBatch;
 use App\Services\InventoryFifoService;
 use Illuminate\Database\Seeder;
 
@@ -111,49 +109,6 @@ class DemoDataSeeder extends Seeder
             }
         }
         $this->command->info('✅ Inventario distribuido en todos los almacenes');
-
-        // ── 5. INVENTORY BATCHES (LOTES) ──
-        $this->command->info('🏷️ Creando lotes de inventario...');
-        $batchCount = 0;
-        $batchProducts = $variants->random(min(8, $variants->count()));
-
-        foreach ($batchProducts as $variant) {
-            $numBatches = rand(2, 4);
-            for ($b = 0; $b < $numBatches; $b++) {
-                $mfgDate = now()->subMonths(rand(1, 12));
-                $expiryDate = $mfgDate->copy()->addMonths(rand(6, 24));
-                $batchNumber = 'LOT-'.strtoupper(substr($variant->sku, 0, 4)).'-'.$mfgDate->format('Ym').'-'.str_pad($b + 1, 2, '0', STR_PAD_LEFT);
-
-                $batch = ProductBatch::firstOrCreate(
-                    ['product_id' => $variant->product_id, 'batch_number' => $batchNumber],
-                    [
-                        'manufacturing_date' => $mfgDate,
-                        'expiry_date' => $expiryDate,
-                        'cost' => rand(5, 60),
-                        'supplier_id' => $suppliers->isNotEmpty() ? $suppliers->random()->id : null,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]
-                );
-
-                // Distribute batch across 1-3 warehouses
-                $batchWarehouses = $warehouses->random(min(rand(1, 3), $warehouses->count()));
-                foreach ($batchWarehouses as $wh) {
-                    $qty = rand(5, 40);
-                    WarehouseBatch::firstOrCreate(
-                        ['warehouse_id' => $wh->id, 'product_batch_id' => $batch->id],
-                        [
-                            'quantity' => $qty,
-                            'quantity_reserved' => 0,
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ]
-                    );
-                }
-                $batchCount++;
-            }
-        }
-        $this->command->info("✅ {$batchCount} lotes creados para ".$batchProducts->count().' productos');
 
         // ── 6. POS SESSIONS & SALES ORDERS (últimos 7 días, all warehouses) ──
         $this->command->info('🛒 Creando ventas y sesiones POS...');
@@ -486,8 +441,6 @@ class DemoDataSeeder extends Seeder
         $this->command->info('   Sesiones POS: '.PosSession::count());
         $this->command->info('   Cotizaciones: '.SalesQuote::count());
         $this->command->info('   Órdenes de compra: '.PurchaseOrder::count());
-        $this->command->info('   Lotes de inventario: '.ProductBatch::count());
-        $this->command->info('   Lotes en almacenes: '.WarehouseBatch::count());
         $this->command->info('   Movimientos inventario: '.InventoryMovement::count());
         $this->command->info('   Clientes con deuda: '.Customer::where('current_balance', '>', 0)->count());
         $this->command->info('');

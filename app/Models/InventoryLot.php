@@ -15,6 +15,7 @@ class InventoryLot extends Model
         'product_id',
         'variant_id',
         'warehouse_id',
+        'supplier_id',
         'source_type',
         'source_id',
         'source_movement_id',
@@ -35,6 +36,7 @@ class InventoryLot extends Model
             'product_id' => 'integer',
             'variant_id' => 'integer',
             'warehouse_id' => 'integer',
+            'supplier_id' => 'integer',
             'source_id' => 'integer',
             'source_movement_id' => 'integer',
             'received_quantity' => 'integer',
@@ -61,6 +63,11 @@ class InventoryLot extends Model
     public function warehouse(): BelongsTo
     {
         return $this->belongsTo(Warehouse::class);
+    }
+
+    public function supplier(): BelongsTo
+    {
+        return $this->belongsTo(Supplier::class);
     }
 
     public function sourceMovement(): BelongsTo

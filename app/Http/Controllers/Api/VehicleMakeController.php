@@ -7,6 +7,7 @@ use App\Models\VehicleMake;
 use App\Services\VehicleCatalogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class VehicleMakeController extends Controller
 {
@@ -62,9 +63,11 @@ class VehicleMakeController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        $request->merge(['name' => $this->normalizeMakeName($request->input('name'))]);
         $validated = $request->validate([
             'name' => 'required|string|max:100|unique:vehicle_makes,name',
         ]);
+        $this->ensureMakeIsUnique($validated['name']);
 
         $make = VehicleMake::create($validated);
 
@@ -93,9 +96,11 @@ class VehicleMakeController extends Controller
     {
         $make = VehicleMake::findOrFail($id);
 
+        $request->merge(['name' => $this->normalizeMakeName($request->input('name'))]);
         $validated = $request->validate([
             'name' => 'required|string|max:100|unique:vehicle_makes,name,'.$id,
         ]);
+        $this->ensureMakeIsUnique($validated['name'], (int) $id);
 
         $make->update($validated);
 
@@ -129,5 +134,30 @@ class VehicleMakeController extends Controller
             ->get();
 
         return response()->json(['data' => $makes]);
+    }
+
+    /**
+     * Nombre de marca en mayúsculas y con un solo espacio entre palabras.
+     */
+    private function normalizeMakeName(mixed $name): mixed
+    {
+        return is_string($name) ? preg_replace('/\s+/u', ' ', mb_strtoupper(trim($name))) : $name;
+    }
+
+    /**
+     * Impide marcas repetidas aunque difieran en mayúsculas (incluye registros antiguos en minúsculas).
+     */
+    private function ensureMakeIsUnique(string $name, ?int $ignoreMakeId = null): void
+    {
+        $duplicate = VehicleMake::query()
+            ->whereRaw('UPPER(TRIM(name)) = ?', [mb_strtoupper(trim($name))])
+            ->when($ignoreMakeId, fn ($query) => $query->whereKeyNot($ignoreMakeId))
+            ->exists();
+
+        if ($duplicate) {
+            throw ValidationException::withMessages([
+                'name' => ['Ya existe una marca con ese nombre.'],
+            ]);
+        }
     }
 }

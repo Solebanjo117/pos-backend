@@ -107,12 +107,18 @@ class VehicleModelController extends Controller
             'chassis_id' => 'nullable|integer|exists:vehicle_chassis,id',
         ]);
 
+        $validated['name'] = $this->normalizeModelName($validated['name']);
         $validated['generation'] = $this->normalizeGenerationCode($validated['generation'] ?? null);
 
         $chassisId = $validated['chassis_id'] ?? null;
         unset($validated['chassis_id']);
 
         $this->validateChassisConsistency($validated['generation'] ?? null, $chassisId, $validated);
+        $this->ensureModelIsUnique(
+            (int) $validated['make_id'],
+            $validated['name'],
+            $this->effectiveChassisCode($validated['generation'] ?? null, $chassisId),
+        );
 
         $model = VehicleModel::create($validated);
         $this->syncModelChassis($model, $validated['generation'] ?? null, $chassisId);
@@ -149,6 +155,10 @@ class VehicleModelController extends Controller
             'chassis_id' => 'nullable|integer|exists:vehicle_chassis,id',
         ]);
 
+        if (array_key_exists('name', $validated)) {
+            $validated['name'] = $this->normalizeModelName($validated['name']);
+        }
+
         if (array_key_exists('generation', $validated)) {
             $validated['generation'] = $this->normalizeGenerationCode($validated['generation']);
         }
@@ -156,9 +166,15 @@ class VehicleModelController extends Controller
         $chassisId = $validated['chassis_id'] ?? null;
         unset($validated['chassis_id']);
 
-        $generation = $validated['generation'] ?? $model->generation;
+        $generation = array_key_exists('generation', $validated) ? $validated['generation'] : $model->generation;
         $mergedForValidation = array_merge($model->toArray(), $validated);
         $this->validateChassisConsistency($generation, $chassisId, $mergedForValidation);
+        $this->ensureModelIsUnique(
+            (int) ($validated['make_id'] ?? $model->make_id),
+            $validated['name'] ?? $model->name,
+            $this->effectiveChassisCode($generation, $chassisId),
+            (int) $model->id,
+        );
 
         $targetMakeId = (int) ($validated['make_id'] ?? $model->make_id);
         if ($targetMakeId !== (int) $model->make_id) {
@@ -241,7 +257,8 @@ class VehicleModelController extends Controller
         }
 
         $modelId = (int) ($modelData['id'] ?? 0);
-        $chassis = $this->resolveChassisForModel($generation, $chassisId, $modelId ?: null);
+        $makeId = isset($modelData['make_id']) ? (int) $modelData['make_id'] : null;
+        $chassis = $this->resolveChassisForModel($generation, $chassisId, $modelId ?: null, $makeId);
 
         if ($chassis === null) {
             return; // Will be created fresh — no contradiction possible
@@ -270,7 +287,7 @@ class VehicleModelController extends Controller
      * Resolve a chassis record by explicit ID or generation code, using scoped lookup.
      * Both validateChassisConsistency() and syncModelChassis() use this to ensure consistency.
      */
-    private function resolveChassisForModel(?string $generation, ?int $chassisId, ?int $modelId): ?VehicleChassis
+    private function resolveChassisForModel(?string $generation, ?int $chassisId, ?int $modelId, ?int $makeId = null): ?VehicleChassis
     {
         if ($chassisId !== null) {
             return VehicleChassis::find($chassisId);
@@ -308,10 +325,61 @@ class VehicleModelController extends Controller
             return $chassis;
         }
 
-        // Priority 3: global fallback (backward compat — any chassis with this code)
+        // Priority 3: a chassis with this code from another model of the same make.
+        // Codes are only reused within the make (P15 in Nissan is not P15 in another make).
+        if ($makeId === null) {
+            return null;
+        }
+
         return $baseQuery()
+            ->where(function ($q) use ($makeId) {
+                $q->whereHas('model', fn ($sub) => $sub->where('make_id', $makeId))
+                    ->orWhereHas('models', fn ($sub) => $sub->where('make_id', $makeId));
+            })
             ->orderBy('id')
             ->first();
+    }
+
+    /**
+     * Nombre de modelo en mayúsculas y con un solo espacio entre palabras.
+     */
+    private function normalizeModelName(string $name): string
+    {
+        return (string) preg_replace('/\s+/u', ' ', mb_strtoupper(trim($name)));
+    }
+
+    /**
+     * Código de chasis que tendrá el modelo: el del chasis elegido o el código escrito.
+     */
+    private function effectiveChassisCode(?string $generation, ?int $chassisId): ?string
+    {
+        if ($chassisId !== null) {
+            $code = VehicleChassis::query()->whereKey($chassisId)->value('code');
+
+            return $code === null ? null : mb_strtoupper(trim($code));
+        }
+
+        return $generation === null || trim($generation) === '' ? null : mb_strtoupper(trim($generation));
+    }
+
+    /**
+     * Impide dos modelos con el mismo nombre y el mismo chasis en una marca, sin importar mayúsculas.
+     */
+    private function ensureModelIsUnique(int $makeId, string $name, ?string $chassisCode, ?int $ignoreModelId = null): void
+    {
+        $duplicate = VehicleModel::query()
+            ->where('make_id', $makeId)
+            ->whereRaw('UPPER(TRIM(name)) = ?', [mb_strtoupper(trim($name))])
+            ->whereRaw("UPPER(COALESCE(generation, '')) = ?", [$chassisCode ?? ''])
+            ->when($ignoreModelId, fn ($query) => $query->whereKeyNot($ignoreModelId))
+            ->exists();
+
+        if ($duplicate) {
+            $label = trim($name.' '.($chassisCode ?? ''));
+            throw ValidationException::withMessages([
+                'name' => ["Ya existe el modelo {$label} en esta marca."],
+            ]);
+        }
     }
 
     /**
@@ -319,7 +387,7 @@ class VehicleModelController extends Controller
      */
     private function syncModelChassis(VehicleModel $model, ?string $generation, ?int $chassisId): void
     {
-        $chassis = $this->resolveChassisForModel($generation, $chassisId, $model->id);
+        $chassis = $this->resolveChassisForModel($generation, $chassisId, $model->id, (int) $model->make_id);
 
         if ($chassis === null) {
             // No existing chassis found — create from generation

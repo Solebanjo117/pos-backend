@@ -21,7 +21,7 @@ class StoreProductVariantRequest extends FormRequest
             'brand_id' => 'required|exists:brands,id',
             'sku' => ['nullable', 'string', 'max:255'],
             'upc' => ['nullable', 'string', 'max:50'],
-            'status' => 'nullable|in:active,discontinued,pending',
+            'status' => 'nullable|in:active,discontinued',
             'codes' => 'nullable|array|max:25',
             'codes.*.id' => 'nullable|integer',
             'codes.*.code' => 'required|string|max:255',
@@ -45,6 +45,14 @@ class StoreProductVariantRequest extends FormRequest
             'initial_inventory.*.stock_available' => 'nullable|integer|min:0',
             'initial_inventory.*.reorder_point' => 'nullable|integer|min:0',
             'initial_inventory.*.reorder_quantity' => 'nullable|integer|min:0',
+            // Proveedor de la existencia inicial (2026-11-18): el lote inicial queda con ese proveedor.
+            'initial_inventory.*.supplier_id' => 'nullable|integer|exists:suppliers,id',
+
+            // Proveedores de la marca al crearla (2026-11-18): código y costo de cada uno.
+            'suppliers' => 'nullable|array|max:50',
+            'suppliers.*.supplier_id' => 'required_with:suppliers|integer|distinct|exists:suppliers,id',
+            'suppliers.*.supplier_code' => 'nullable|string|max:255',
+            'suppliers.*.supplier_cost' => 'required_with:suppliers|numeric|min:0',
 
             'attributes' => 'missing',
         ];

@@ -27,7 +27,6 @@ class InventoryMovement extends Model
         'notes',
         'user_id',
         'supplier_id',
-        'product_batch_id',
         'business_datetime',
     ];
 
@@ -36,7 +35,6 @@ class InventoryMovement extends Model
         'quantity_before' => 'integer',
         'quantity_after' => 'integer',
         'reference_id' => 'integer',
-        'product_batch_id' => 'integer',
         'business_datetime' => 'datetime',
     ];
 
@@ -107,14 +105,6 @@ class InventoryMovement extends Model
     public function isOutbound(): bool
     {
         return $this->movement_type === 'out';
-    }
-
-    /**
-     * Get the product batch for this movement
-     */
-    public function productBatch(): BelongsTo
-    {
-        return $this->belongsTo(ProductBatch::class);
     }
 
     public function lotAllocations(): HasMany

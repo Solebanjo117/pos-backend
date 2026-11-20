@@ -4,6 +4,7 @@ namespace App\Http\Requests;
 
 use App\Models\Brand;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
 class StoreBrandRequest extends FormRequest
@@ -28,8 +29,20 @@ class StoreBrandRequest extends FormRequest
             'status' => 'nullable|string|in:active,inactive',
             'website' => 'nullable|url|max:255',
             'description' => 'nullable|string|max:1000',
+            'tier' => ['sometimes', 'required', 'string', Rule::in(Brand::TIERS)],
             'supplier_ids' => 'sometimes|array',
             'supplier_ids.*' => 'integer|distinct|exists:suppliers,id',
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'tier.required' => 'Selecciona la gama de la marca: Standard o Premium.',
+            'tier.in' => 'La gama de la marca debe ser Standard o Premium.',
         ];
     }
 

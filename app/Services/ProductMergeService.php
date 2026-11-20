@@ -29,9 +29,7 @@ class ProductMergeService
         'product_vehicle_compatibility',
         'product_extra_categories',
         'product_suppliers',
-        'product_batches',
         'product_vins',
-        'oem_references',
         'inventory',
     ];
 
@@ -297,9 +295,7 @@ class ProductMergeService
             ->each(fn ($row) => DB::table('product_extra_categories')->insertOrIgnore(['product_id' => $survivorId, 'category_id' => $row->category_id]));
 
         $this->moveUnlessExists('product_suppliers', $survivorId, $duplicateId, ['supplier_id'], fn ($query) => $query->whereNull('variant_id'));
-        $this->moveUnlessExists('product_batches', $survivorId, $duplicateId, ['batch_number']);
         $this->moveUnlessExists('product_vins', $survivorId, $duplicateId, ['vin']);
-        $this->moveUnlessExists('oem_references', $survivorId, $duplicateId, ['oem_code']);
 
         // Existencias por almacén (tabla resumen): se suman si el producto conservado ya tiene fila en ese almacén.
         foreach (DB::table('inventory')->where('product_id', $duplicateId)->get() as $row) {

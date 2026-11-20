@@ -105,7 +105,8 @@ it('creates Toyota Corolla E120 2000-2007 with chassis and matching years', func
     $response
         ->assertCreated()
         ->assertJsonPath('data.generation', 'E120')
-        ->assertJsonPath('data.name', 'Corolla');
+        // Los nombres de modelo se guardan en mayúsculas.
+        ->assertJsonPath('data.name', 'COROLLA');
 
     $modelId = $response->json('data.id');
 

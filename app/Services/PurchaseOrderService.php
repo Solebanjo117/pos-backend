@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Exceptions\IdempotencyConflictException;
 use App\Helpers\TaxRateHelper;
 use App\Models\InventoryLot;
-use App\Models\ProductBatch;
 use App\Models\ProductSupplier;
 use App\Models\ProductVariant;
 use App\Models\PurchaseOrder;
@@ -212,12 +211,8 @@ class PurchaseOrderService
             ->whereIn('id', $variantIds)
             ->get(['id', 'product_id', 'brand_id']);
 
-        $supplierBrandIds = Supplier::query()
-            ->find($supplierId)
-            ?->brands()
-            ->pluck('brands.id')
-            ->map(fn ($id) => (int) $id)
-            ?? collect();
+        // Marcas del proveedor: por sus piezas o marcadas a mano.
+        $supplierBrandIds = app(SupplierBrandService::class)->brandIdsForSupplier($supplierId);
 
         $directVariantIds = ProductSupplier::query()
             ->where('supplier_id', $supplierId)
@@ -633,23 +628,6 @@ class PurchaseOrderService
                         'sale_price' => $newSalePrice,
                     ]);
 
-                    // Handle batch tracking if enabled
-                    if ($item->product && $item->product->batch_tracking && ! empty($received['batch_number'])) {
-                        $batchData = [
-                            'product_id' => $productId,
-                            'batch_number' => $received['batch_number'],
-                            'quantity' => $actualUnits,
-                            'expiry_date' => $received['expiry_date'] ?? null,
-                            'cost' => $item->unit_cost,
-                        ];
-
-                        if ($useVariant) {
-                            $batchData['variant_id'] = $variantId;
-                        }
-
-                        ProductBatch::create($batchData);
-                    }
-
                     // R30 — Update sale price if provided and different (LL-012)
                     if ($newSalePrice !== null && $newSalePrice > 0) {
                         if ($useVariant && $item->variant) {
@@ -1028,22 +1006,6 @@ class PurchaseOrderService
                 'batch_number' => $data['batch_number'] ?? null,
                 'sale_price' => $data['sale_price'] ?? null,
             ]);
-
-            // Handle batch tracking if applicable
-            $product = \App\Models\Product::find($productId);
-            if ($product?->batch_tracking && ! empty($data['batch_number'])) {
-                $batchData = [
-                    'product_id' => $productId,
-                    'batch_number' => $data['batch_number'],
-                    'quantity' => $quantity,
-                    'expiry_date' => $data['expiry_date'] ?? null,
-                    'cost' => $unitCost,
-                ];
-                if ($useVariant) {
-                    $batchData['variant_id'] = $variantId;
-                }
-                ProductBatch::create($batchData);
-            }
 
             // Update sale price if provided
             if (! empty($data['sale_price'])) {
