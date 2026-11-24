@@ -204,6 +204,9 @@ class ProductCodeService
             }
 
             (clone $ownerQuery)->update(['is_primary' => false]);
+            // Los modelos ya cargados aún creen que su principal está guardado; sin esto, el que
+            // sigue siendo principal no se vuelve a escribir y el producto queda sin principal.
+            $existing->each(fn (ProductCode $code) => $code->forceFill(['is_primary' => false])->syncOriginalAttribute('is_primary'));
 
             try {
                 foreach ($normalizedCodes as $codeData) {

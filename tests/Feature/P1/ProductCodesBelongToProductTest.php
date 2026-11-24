@@ -173,3 +173,33 @@ it('keeps the brand SKU and codes when the brand is saved without codes (prices 
     expect($this->variant->fresh()->sku)->toBe('SR-1234')
         ->and(brandCodes($this->variant))->toBe(['SR-1234']);
 });
+
+/*
+ * Error encontrado por Luis (2026-11-24): al guardar el producto sin cambiar el principal, el
+ * principal se perdía (se apagaban todos y el que ya era principal no se volvía a guardar).
+ */
+it('keeps the principal number when the product is saved again without changing it', function () {
+    $payload = ['codes' => [
+        ['code' => '11206-864Y', 'type' => 'sku', 'is_primary' => true],
+        ['code' => 'OEM-555', 'type' => 'alternate', 'is_primary' => false],
+    ]];
+
+    $this->putJson("/api/v1/products/{$this->product->id}", $payload)->assertOk();
+    $this->putJson("/api/v1/products/{$this->product->id}", $payload)->assertOk();
+
+    expect(ProductCode::query()->active()->where('product_id', $this->product->id)->whereNull('variant_id')
+        ->where('is_primary', true)->pluck('code')->all())->toBe(['11206-864Y']);
+});
+
+it('repairs products left without a principal number, preferring the product number', function () {
+    ProductCode::create(['product_id' => $this->product->id, 'code' => 'OEM-1', 'normalized_code' => 'OEM1', 'type' => 'alternate', 'status' => 'active', 'is_primary' => false]);
+    ProductCode::create(['product_id' => $this->product->id, 'code' => '11206-864Y', 'normalized_code' => '11206864Y', 'type' => 'sku', 'status' => 'active', 'is_primary' => false]);
+
+    $this->artisan('catalog:fix-primary-codes')->expectsOutputToContain('Modo simulación')->assertSuccessful();
+    expect(ProductCode::where('is_primary', true)->count())->toBe(0);
+
+    $this->artisan('catalog:fix-primary-codes --apply')->assertSuccessful();
+    expect(ProductCode::where('is_primary', true)->pluck('code')->all())->toBe(['11206-864Y']);
+
+    $this->artisan('catalog:fix-primary-codes')->expectsOutputToContain('Todos los productos tienen')->assertSuccessful();
+});
