@@ -159,7 +159,7 @@ it('labels exact vehicles with generation and engine in the product list and det
     $corollaPart = corollaPart();
 
     $listed = collect($this->getJson('/api/v1/products?per_page=50')->json('data'))->firstWhere('id', $corollaPart->id);
-    expect($listed['vehicles'])->toBe([['label' => 'TOYOTA COROLLA E110 1998-1999', 'detail' => '1.8L 16V DOHC 1ZZFE']]);
+    expect($listed['vehicles'])->toBe([['label' => 'TOYOTA COROLLA E110 1998-1999', 'detail' => '1.8L 16V DOHC 1ZZFE', 'primary' => true]]);
 
     $detail = $this->getJson("/api/v1/products/{$corollaPart->id}?include=compatibility")->assertOk()->json('data.compatibility.0');
     expect($detail)->toMatchArray(['scope_type' => 'vehicle', 'generation' => 'E110', 'engine_code' => '1ZZFE']);
