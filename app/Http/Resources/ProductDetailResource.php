@@ -42,6 +42,7 @@ class ProductDetailResource extends JsonResource
             'name' => $this->name,
             'description' => $this->description,
             'status' => $this->status,
+            'inventory_type' => $this->inventory_type ?? \App\Models\Product::INVENTORY_TYPE_SINGLE,
             'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
             'product_line_id' => $this->product_line_id,

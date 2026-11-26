@@ -39,6 +39,7 @@ class ProductResource extends JsonResource
             'pricing_formula' => $this->pricing_formula,
             'name' => $this->name,
             'status' => $this->status,
+            'inventory_type' => $this->inventory_type ?? \App\Models\Product::INVENTORY_TYPE_SINGLE,
             'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
             'image_url' => $this->getImageUrl(),

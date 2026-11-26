@@ -16,6 +16,17 @@ class Product extends Model
 {
     use HasFactory, SoftDeletes;
 
+    /** Lleva existencia (compras, lotes FIFO, ventas que descuentan). */
+    public const INVENTORY_TYPE_SINGLE = 'single';
+
+    /** No lleva existencia: servicios y cargos (mano de obra, instalación). */
+    public const INVENTORY_TYPE_NON_INVENTORY = 'non_inventory';
+
+    public const INVENTORY_TYPES = [
+        self::INVENTORY_TYPE_SINGLE,
+        self::INVENTORY_TYPE_NON_INVENTORY,
+    ];
+
     protected $fillable = [
         'sku_base',
         'pricing_formula',
@@ -26,8 +37,13 @@ class Product extends Model
         'description',
         'image_url',
         'status',
+        'inventory_type',
         'is_universal',
         'system_id',
+    ];
+
+    protected $attributes = [
+        'inventory_type' => self::INVENTORY_TYPE_SINGLE,
     ];
 
     protected $casts = [
