@@ -224,6 +224,7 @@ class StoreProductRequest extends FormRequest
             'vehicle_models.*' => 'integer|exists:vehicle_models,id',
             'all_engines' => 'nullable|boolean',
             'all_chassis' => 'nullable|boolean',
+            'inventory_type' => 'nullable|in:'.implode(',', \App\Models\Product::INVENTORY_TYPES),
             'is_universal' => 'nullable|boolean',
 
             // VINs
@@ -268,6 +269,7 @@ class StoreProductRequest extends FormRequest
             'category_id.exists' => 'La categoría seleccionada no existe',
             'extra_category_ids.*.exists' => 'Una de las categorÃ­as extra seleccionadas no existe',
             'status.in' => 'El estado debe ser: activo o discontinuado',
+            'inventory_type.in' => 'El tipo de inventario debe ser: inventariable o no inventariable',
             'initial_inventory.*.warehouse_id.required' => 'El almacén es obligatorio',
             'initial_inventory.*.warehouse_id.exists' => 'El almacén seleccionado no existe',
             'initial_inventory.*.stock_available.required' => 'El stock disponible es obligatorio',

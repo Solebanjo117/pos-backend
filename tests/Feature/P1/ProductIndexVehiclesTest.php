@@ -43,9 +43,9 @@ test('products index exposes compatible vehicles summarized for the list', funct
     $resource = collect($response->json('data'))->firstWhere('id', $product->id);
 
     expect(data_get($resource, 'vehicles'))->toBe([
-        ['label' => 'Toyota Tercel 1995-1999', 'detail' => null],
-        ['label' => 'Toyota Tercel 1995-1999', 'detail' => '1.5L 5E-FE'],
-        ['label' => 'Corolla AE100', 'detail' => null],
+        ['label' => 'Toyota Tercel 1995-1999', 'detail' => null, 'primary' => true],
+        ['label' => 'Toyota Tercel 1995-1999', 'detail' => '1.5L 5E-FE', 'primary' => false],
+        ['label' => 'Corolla AE100', 'detail' => null, 'primary' => false],
     ]);
 });
 

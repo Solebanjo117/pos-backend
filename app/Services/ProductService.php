@@ -707,6 +707,7 @@ class ProductService
                 'description' => $data['description'] ?? null,
                 'image_url' => $data['image_url'] ?? null,
                 'status' => $data['status'] ?? 'active',
+                'inventory_type' => $data['inventory_type'] ?? Product::INVENTORY_TYPE_SINGLE,
                 'is_universal' => $data['is_universal'] ?? false,
             ]);
 
@@ -961,6 +962,7 @@ class ProductService
                     'name',
                     'description',
                     'status',
+                    'inventory_type',
                     'product_line_id',
                     'category_id',
                     'is_universal',
@@ -1730,6 +1732,7 @@ class ProductService
                 'name' => $source->name.' (Copia)',
                 'description' => $source->description,
                 'status' => $source->status,
+                'inventory_type' => $source->inventory_type,
                 'is_universal' => $source->is_universal,
             ]);
 

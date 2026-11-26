@@ -39,6 +39,7 @@ class ProductResource extends JsonResource
             'pricing_formula' => $this->pricing_formula,
             'name' => $this->name,
             'status' => $this->status,
+            'inventory_type' => $this->inventory_type ?? \App\Models\Product::INVENTORY_TYPE_SINGLE,
             'is_universal' => (bool) $this->is_universal,
             'category_id' => $this->category_id,
             'image_url' => $this->getImageUrl(),
@@ -159,16 +160,20 @@ class ProductResource extends JsonResource
     /**
      * Vehículos compatibles resumidos para listados: "Marca Modelo Años" más motor o chasis.
      *
-     * @return array<int, array{label: string, detail: string|null}>
+     * El carro principal va primero (y marcado); luego los demás en el orden en que se cargaron.
+     *
+     * @return array<int, array{label: string, detail: string|null, primary: bool}>
      */
     private function compatibleVehicles(): array
     {
         return $this->vehicleCompatibility
+            ->sortBy(fn ($compatibility) => [$compatibility->is_default ? 0 : 1, $compatibility->id])
             ->map(function ($compatibility): ?array {
+                $primary = (bool) $compatibility->is_default;
                 if ($compatibility->scope_type === 'raw') {
                     $text = trim((string) $compatibility->raw_vehicle_text);
 
-                    return $text === '' ? null : ['label' => $text, 'detail' => null];
+                    return $text === '' ? null : ['label' => $text, 'detail' => null, 'primary' => $primary];
                 }
 
                 $model = $compatibility->model
@@ -190,7 +195,7 @@ class ProductResource extends JsonResource
                 $detail = $compatibility->engine?->full_description
                     ?: ($compatibility->chassis?->code ?: null);
 
-                return ['label' => $label, 'detail' => $detail];
+                return ['label' => $label, 'detail' => $detail, 'primary' => $primary];
             })
             ->filter()
             ->unique(fn (array $vehicle): string => $vehicle['label'].'|'.$vehicle['detail'])
